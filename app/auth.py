@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
-from . import crud, schemas
+from . import crud, schemas, models
 from .config import settings
 from .database import get_db
 
@@ -34,10 +34,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
-        # Default expiration time if not provided
         expire = datetime.now(timezone.utc) + timedelta(minutes=15)
     
-    # Ensure email is in payload if sub is used (for compatibility with get_current_active_user)
     if "sub" in to_encode and "email" not in to_encode:
         to_encode["email"] = to_encode["sub"]
 
@@ -46,11 +44,69 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 
+# --- TENANT RESOLUTION LOGIC ---
+
+def get_subdomain(request: Request) -> Optional[str]:
+    """
+    Liest die Subdomain aus dem Host-Header oder dem Custom-Header.
+    """
+    # 1. Custom Header für Frontend-Calls (wichtig für Marketing-Seite)
+    header_subdomain = request.headers.get("x-tenant-subdomain")
+    if header_subdomain:
+        return header_subdomain.lower()
+
+    # 2. Host Header (für echte Subdomain-Aufrufe)
+    host = request.headers.get("host", "")
+    if not host:
+        return None
+    
+    domain = host.split(":")[0]
+    
+    # Ignoriere Localhost oder IP-Adressen (Fallback für Dev)
+    if "localhost" in domain or "127.0.0.1" in domain:
+        return request.headers.get("x-tenant-id") # Fallback ID
+
+    parts = domain.split(".")
+    if len(parts) >= 3: 
+        return parts[0]
+    
+    return None
+
+
+async def get_current_tenant(
+    request: Request, db: Session = Depends(get_db)
+) -> models.Tenant:
+    """
+    Dependency, die den aktuellen Tenant basierend auf der Subdomain lädt.
+    """
+    subdomain = get_subdomain(request)
+    
+    if not subdomain:
+        # Versuche Fallback ID wenn keine Subdomain da ist
+        tenant_id_header = request.headers.get("x-tenant-id")
+        if tenant_id_header:
+            tenant = db.query(models.Tenant).filter(models.Tenant.id == int(tenant_id_header)).first()
+            if tenant: return tenant
+
+        raise HTTPException(status_code=404, detail="No tenant specified (subdomain missing)")
+
+    tenant = crud.get_tenant_by_subdomain(db, subdomain=subdomain)
+    if not tenant:
+        raise HTTPException(status_code=404, detail=f"School '{subdomain}' not found")
+        
+    if not tenant.is_active:
+        raise HTTPException(status_code=400, detail="School account is inactive")
+
+    return tenant
+
+
 async def get_current_active_user(
-    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+    token: str = Depends(oauth2_scheme), 
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(get_current_tenant)
 ) -> schemas.User:
     """
-    Validiert den Supabase JWT Token und holt den Benutzer aus der DB.
+    Validiert Token UND prüft, ob der User zum aktuellen Tenant gehört.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -58,16 +114,7 @@ async def get_current_active_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    # --- DEBUGGING START ---
-    print(f"DEBUG: Starte Token-Validierung...")
-    # Wir zeigen nur die ersten 5 Zeichen des Secrets, um sicherzugehen, dass es das richtige ist
-    safe_secret_preview = settings.SECRET_KEY[:5] if settings.SECRET_KEY else "NONE"
-    # print(f"DEBUG: Verwendetes SECRET_KEY (Start): {safe_secret_preview}...")
-    # --- DEBUGGING END ---
-
     try:
-        # 1. Token dekodieren
-        # WICHTIG: verify_aud=False ist nötig, da Supabase "authenticated" als Audience nutzt
         payload = jwt.decode(
             token, 
             settings.SECRET_KEY, 
@@ -75,41 +122,24 @@ async def get_current_active_user(
             options={"verify_aud": False} 
         )
         
-        # --- DEBUGGING START ---
-        print(f"DEBUG: Token erfolgreich dekodiert.")
-        # print(f"DEBUG: Token Payload: {payload}") 
-        # --- DEBUGGING END ---
-
-        # 2. E-Mail aus dem Feld "email" lesen (NICHT "sub")
-        # Fallback: Falls "email" fehlt, versuche "sub" (für lokale Tokens relevant)
         email: str = payload.get("email")
         if not email:
             email = payload.get("sub")
         
         if email is None:
-            print("DEBUG: FEHLER - Keine E-Mail im Token-Feld 'email' oder 'sub' gefunden.")
             raise credentials_exception
             
-        print(f"DEBUG: E-Mail aus Token extrahiert: {email}")
         token_data = schemas.TokenData(email=email)
         
-    except JWTError as e:
-        print(f"DEBUG: JWT Error (Dekodierung fehlgeschlagen): {str(e)}")
-        print("HINWEIS: Prüfen Sie, ob 'SECRET_KEY' in der .env-Datei mit dem 'JWT Secret' Ihres Supabase-Projekts übereinstimmt.")
-        # Häufiger Fehler: Signature verification failed -> Falsches Secret
+    except JWTError:
         raise credentials_exception
 
-    # 3. Benutzer in der Datenbank suchen
-    user = crud.get_user_by_email(db, email=token_data.email)
+    user = crud.get_user_by_email(db, email=token_data.email, tenant_id=tenant.id)
     
     if user is None:
-        print(f"DEBUG: FEHLER - User mit E-Mail '{token_data.email}' wurde in der SQL-Datenbank NICHT gefunden.")
-        # Falls der Token gültig ist, aber der User fehlt -> 401
-        raise credentials_exception
+        raise HTTPException(status_code=401, detail="User not found in this school")
 
     if not user.is_active:
-        print(f"DEBUG: FEHLER - User '{token_data.email}' ist inaktiv.")
         raise HTTPException(status_code=400, detail="Inactive user")
 
-    print(f"DEBUG: Login erfolgreich für User ID: {user.id}")
     return user

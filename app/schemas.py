@@ -1,9 +1,99 @@
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, EmailStr, Field
+from typing import List, Optional, Dict, Any
 from datetime import datetime, date
+from uuid import UUID
 
+# --- TENANT & CONFIGURATION ---
 
-# --- Base and Create Schemas ---
+class TenantConfig(BaseModel):
+    """Speichert Branding und Einstellungen als JSON"""
+    branding: Dict[str, Any] = {} # z.B. {"primary_color": "#...", "logo_url": "..."}
+    wording: Dict[str, str] = {} # z.B. {"level": "Klasse", "vip": "Rudelchef"}
+    features: Dict[str, bool] = {} # z.B. {"dark_mode": true}
+
+class TenantBase(BaseModel):
+    name: str
+    subdomain: str
+    plan: str = "starter"
+    is_active: bool = True
+    config: TenantConfig = TenantConfig()
+
+class TenantCreate(TenantBase):
+    pass
+
+class Tenant(TenantBase):
+    id: int
+    created_at: datetime
+    subscription_ends_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+# NEU: Response für den Status-Check
+class TenantStatus(BaseModel):
+    exists: bool
+    name: Optional[str] = None
+    subscription_valid: bool = False
+    subscription_ends_at: Optional[datetime] = None
+    plan: Optional[str] = None
+
+# NEU: Request für das Abo-Update
+class SubscriptionUpdate(BaseModel):
+    subdomain: str
+    plan: str # 'starter', 'pro', 'verband'
+
+# --- TRAINING TYPES ---
+
+class TrainingTypeBase(BaseModel):
+    name: str
+    category: str # 'training', 'workshop', 'lecture', 'exam'
+    default_price: float = 0.0
+
+class TrainingTypeCreate(TrainingTypeBase):
+    pass
+
+class TrainingType(TrainingTypeBase):
+    id: int
+    tenant_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# --- LEVEL & REQUIREMENTS ---
+
+class LevelRequirementBase(BaseModel):
+    training_type_id: int
+    required_count: int = 1
+
+class LevelRequirementCreate(LevelRequirementBase):
+    pass
+
+class LevelRequirement(LevelRequirementBase):
+    id: int
+    level_id: int
+    training_type: Optional[TrainingType] = None 
+
+    class Config:
+        from_attributes = True
+
+class LevelBase(BaseModel):
+    name: str
+    rank_order: int
+    icon_url: Optional[str] = None
+
+class LevelCreate(LevelBase):
+    requirements: List[LevelRequirementCreate] = []
+
+class Level(LevelBase):
+    id: int
+    tenant_id: int
+    requirements: List[LevelRequirement] = []
+
+    class Config:
+        from_attributes = True
+
+# --- DOGS ---
 
 class DogBase(BaseModel):
     name: str
@@ -14,83 +104,105 @@ class DogBase(BaseModel):
 class DogCreate(DogBase):
     pass
 
+class Dog(DogBase):
+    id: int
+    owner_id: int
+    tenant_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# --- USERS ---
 
 class UserBase(BaseModel):
-    email: str
+    email: EmailStr
     name: str
-    role: str
+    role: str # 'admin', 'mitarbeiter', 'kunde'
     is_active: bool = True
     balance: float = 0.0
     phone: Optional[str] = None
-    level_id: int = 1
     is_vip: bool = False
     is_expert: bool = False
+    current_level_id: Optional[int] = None
 
 class UserCreate(UserBase):
-    password: Optional[str] = None
+    password: Optional[str] = None 
     dogs: List[DogCreate] = []
 
-# KORREKTUR: Alle Felder optional machen, um Datenverlust bei Teil-Updates zu verhindern
 class UserUpdate(BaseModel):
-    email: Optional[str] = None
+    email: Optional[EmailStr] = None
     name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
     balance: Optional[float] = None
     phone: Optional[str] = None
-    level_id: Optional[int] = None
     is_vip: Optional[bool] = None
     is_expert: Optional[bool] = None
+    current_level_id: Optional[int] = None
     password: Optional[str] = None
 
 class UserStatusUpdate(BaseModel):
     is_vip: Optional[bool] = None
     is_expert: Optional[bool] = None
 
+class User(UserBase):
+    id: int
+    tenant_id: int
+    auth_id: Optional[UUID] = None
+    customer_since: datetime
+    
+    dogs: List[Dog] = []
+    current_level: Optional[Level] = None
+
+    class Config:
+        from_attributes = True
+
+# --- TRANSACTIONS ---
+
 class TransactionBase(BaseModel):
-    type: str
+    type: str 
     description: Optional[str] = None
     amount: float
 
-
 class TransactionCreate(TransactionBase):
     user_id: int
-    requirement_id: Optional[str] = None
-
-
-# --- Full Schemas with Relationships ---
-
-class Dog(DogBase):
-    id: int
-    owner_id: int
-
-    class Config:
-        from_attributes = True
-
-
-class Achievement(BaseModel):
-    id: int
-    requirement_id: str
-    date_achieved: datetime
-    is_consumed: bool
-
-    class Config:
-        from_attributes = True
-
+    training_type_id: Optional[int] = None 
 
 class Transaction(TransactionBase):
     id: int
+    tenant_id: int
     user_id: int
-    date: datetime
-    balance_after: float
     booked_by_id: int
+    balance_after: float
+    date: datetime
 
     class Config:
         from_attributes = True
 
+# --- ACHIEVEMENTS ---
+
+class AchievementBase(BaseModel):
+    training_type_id: int
+    date_achieved: datetime
+    is_consumed: bool = False
+
+class Achievement(AchievementBase):
+    id: int
+    tenant_id: int
+    user_id: int
+    transaction_id: Optional[int] = None
+    training_type: Optional[TrainingType] = None
+
+    class Config:
+        from_attributes = True
+
+# --- DOCUMENTS ---
 
 class Document(BaseModel):
     id: int
+    tenant_id: int
+    user_id: int
     file_name: str
     file_type: str
     upload_date: datetime
@@ -99,28 +211,16 @@ class Document(BaseModel):
     class Config:
         from_attributes = True
 
+# --- AUTH & SYSTEM ---
 
-class User(UserBase):
-    id: int
-    customer_since: datetime
-    dogs: List[Dog] = []
-    transactions: List[Transaction] = []
-    achievements: List[Achievement] = []
-    documents: List[Document] = []
-
-    class Config:
-        from_attributes = True
-
-
-# --- For Login ---
 class Token(BaseModel):
     access_token: str
     token_type: str
     user: User
 
-
 class TokenData(BaseModel):
     email: Optional[str] = None
+    tenant_id: Optional[int] = None 
 
 class UserLevelUpdate(BaseModel):
     level_id: int
@@ -130,3 +230,40 @@ class UserVipUpdate(BaseModel):
 
 class UserExpertUpdate(BaseModel):
     is_expert: bool
+
+class AppConfig(BaseModel):
+    tenant: Tenant
+    levels: List[Level]
+    training_types: List[TrainingType]
+
+# --- SETTINGS UPDATE SCHEMAS (NEU) ---
+
+class ServiceUpdateItem(BaseModel):
+    id: Optional[int] = None # Wenn null, wird neu erstellt
+    name: str
+    category: str
+    price: float
+
+class RequirementUpdateItem(BaseModel):
+    id: Optional[int] = None
+    training_type_id: int # Muss existieren
+    required_count: int
+
+class LevelUpdateItem(BaseModel):
+    id: Optional[int] = None
+    name: str
+    rank_order: int
+    badge_image: Optional[str] = None
+    requirements: List[RequirementUpdateItem] = []
+
+class SettingsUpdate(BaseModel):
+    school_name: str
+    logo_url: Optional[str] = None
+    # Config Fields
+    primary_color: str
+    secondary_color: str
+    level_term: str
+    vip_term: str
+    
+    services: List[ServiceUpdateItem]
+    levels: List[LevelUpdateItem]

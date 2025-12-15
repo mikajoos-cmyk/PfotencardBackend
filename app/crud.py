@@ -1,143 +1,214 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import and_, func
 from . import models, schemas, auth
 from fastapi import HTTPException
 import secrets
 from typing import List, Optional
 
-# In backend/app/crud.py (ganz oben)
+# --- TENANT & CONFIGURATION ---
 
-LEVEL_REQUIREMENTS = {
-  # Level 1 (Welpen) hat keine Anforderungen für den Aufstieg.
-  2: [{"id": 'group_class', "name": 'Gruppenstunde', "required": 6}, {"id": 'exam', "name": 'Prüfung', "required": 1}],
-  3: [{"id": 'group_class', "name": 'Gruppenstunde', "required": 6}, {"id": 'exam', "name": 'Prüfung', "required": 1}],
-  4: [{"id": 'social_walk', "name": 'Social Walk', "required": 6}, {"id": 'tavern_training', "name": 'Wirtshaustraining', "required": 2}, {"id": 'exam', "name": 'Prüfung', "required": 1}],
-  5: [{"id": 'exam', "name": 'Prüfung', "required": 1}],
-}
+def get_tenant_by_subdomain(db: Session, subdomain: str):
+    return db.query(models.Tenant).filter(models.Tenant.subdomain == subdomain).first()
 
-# In backend/app/crud.py
+def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+        
+    levels = db.query(models.Level).options(
+        joinedload(models.Level.requirements).joinedload(models.LevelRequirement.training_type)
+    ).filter(models.Level.tenant_id == tenant_id).order_by(models.Level.rank_order).all()
+    
+    training_types = db.query(models.TrainingType).filter(
+        models.TrainingType.tenant_id == tenant_id
+    ).all()
+    
+    return schemas.AppConfig(
+        tenant=tenant,
+        levels=levels,
+        training_types=training_types
+    )
 
-DOGLICENSE_PREREQS = [
-    {"id": 'lecture_bonding', "name": 'Vortrag Bindung & Beziehung', "required": 1},
-    {"id": 'lecture_hunting', "name": 'Vortrag Jagdverhalten', "required": 1},
-    {"id": 'ws_communication', "name": 'WS Kommunikation & Körpersprache', "required": 1},
-    {"id": 'ws_stress', "name": 'WS Stress & Impulskontrolle', "required": 1},
-    {"id": 'theory_license', "name": 'Theorieabend Hundeführerschein', "required": 1},
-    {"id": 'first_aid', "name": 'Erste-Hilfe-Kurs', "required": 1},
-]
+def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.SettingsUpdate):
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant: raise HTTPException(404, "Tenant not found")
+
+    # 1. Update Tenant Basic Info & Config
+    tenant.name = settings.school_name
+    
+    # Sicherstellen, dass config ein Dict ist und Updates mergen
+    current_config = dict(tenant.config) if tenant.config else {}
+    
+    current_config["branding"] = current_config.get("branding", {})
+    current_config["branding"]["primary_color"] = settings.primary_color
+    current_config["branding"]["secondary_color"] = settings.secondary_color
+    if settings.logo_url:
+        current_config["branding"]["logo_url"] = settings.logo_url
+    
+    current_config["wording"] = current_config.get("wording", {})
+    current_config["wording"]["level"] = settings.level_term
+    current_config["wording"]["vip"] = settings.vip_term
+    
+    # Wichtig: Explizit neu setzen, damit SQLAlchemy die Änderung am JSONB erkennt
+    tenant.config = current_config
+    
+    # 2. Sync Services (TrainingTypes)
+    # Strategy: IDs in payload -> Update. IDs missing in payload but in DB -> Delete. No ID -> Create.
+    existing_services = db.query(models.TrainingType).filter(models.TrainingType.tenant_id == tenant_id).all()
+    existing_service_ids = {s.id for s in existing_services}
+    payload_service_ids = {s.id for s in settings.services if s.id is not None}
+    
+    # Delete missing
+    to_delete_ids = existing_service_ids - payload_service_ids
+    if to_delete_ids:
+        db.query(models.TrainingType).filter(models.TrainingType.id.in_(to_delete_ids)).delete(synchronize_session=False)
+    
+    # Update or Create
+    for s_data in settings.services:
+        if s_data.id:
+            # Update
+            svc = next((s for s in existing_services if s.id == s_data.id), None)
+            if svc:
+                svc.name = s_data.name
+                svc.category = s_data.category
+                svc.default_price = s_data.price
+        else:
+            # Create
+            new_svc = models.TrainingType(
+                tenant_id=tenant_id,
+                name=s_data.name,
+                category=s_data.category,
+                default_price=s_data.price
+            )
+            db.add(new_svc)
+    
+    db.flush() # IDs generieren für neue Services (falls wir sie sofort brauchen würden, hier aber ok)
+
+    # 3. Sync Levels
+    existing_levels = db.query(models.Level).filter(models.Level.tenant_id == tenant_id).all()
+    existing_level_ids = {l.id for l in existing_levels}
+    payload_level_ids = {l.id for l in settings.levels if l.id is not None}
+    
+    # Delete missing Levels
+    to_delete_level_ids = existing_level_ids - payload_level_ids
+    if to_delete_level_ids:
+        db.query(models.Level).filter(models.Level.id.in_(to_delete_level_ids)).delete(synchronize_session=False)
+        
+    for l_data in settings.levels:
+        current_level = None
+        if l_data.id:
+            current_level = next((l for l in existing_levels if l.id == l_data.id), None)
+            if current_level:
+                current_level.name = l_data.name
+                current_level.rank_order = l_data.rank_order
+                current_level.icon_url = l_data.badge_image
+        else:
+            current_level = models.Level(
+                tenant_id=tenant_id,
+                name=l_data.name,
+                rank_order=l_data.rank_order,
+                icon_url=l_data.badge_image
+            )
+            db.add(current_level)
+            db.flush() # Need ID for requirements
+            
+        # Sync Requirements for this level
+        # Achtung: Wir müssen hier vorsichtig sein. Alte Requirements löschen und neu anlegen ist oft einfacher als diffen.
+        # Aber wir löschen nur die für dieses Level.
+        if current_level.id:
+            db.query(models.LevelRequirement).filter(models.LevelRequirement.level_id == current_level.id).delete()
+            
+            for req_data in l_data.requirements:
+                # Prüfen ob training_type_id existiert (könnte gelöscht worden sein, wenn User Quatsch sendet)
+                # Frontend muss sicherstellen, dass nur gültige IDs gesendet werden.
+                # Wenn wir oben Services erstellt haben, kennt das Frontend deren neue IDs noch nicht.
+                # LIMITATION: In diesem einfachen Flow kann man einen NEUEN Service nicht direkt in einer NEUEN Anforderung nutzen.
+                # Man muss erst speichern (Service anlegen), dann nochmal bearbeiten.
+                
+                new_req = models.LevelRequirement(
+                    level_id=current_level.id,
+                    training_type_id=req_data.training_type_id,
+                    required_count=req_data.required_count
+                )
+                db.add(new_req)
+
+    db.commit()
+    db.refresh(tenant)
+    return tenant
 
 # --- USER ---
-def get_user(db: Session, user_id: int):
-    return db.query(models.User).filter(models.User.id == user_id).first()
 
+def get_user(db: Session, user_id: int, tenant_id: int):
+    return db.query(models.User).filter(
+        models.User.id == user_id, 
+        models.User.tenant_id == tenant_id
+    ).first()
 
-def get_user_by_email(db: Session, email: str):
-    return db.query(models.User).filter(models.User.email == email).first()
+def get_user_by_email(db: Session, email: str, tenant_id: int):
+    return db.query(models.User).filter(
+        models.User.email == email, 
+        models.User.tenant_id == tenant_id
+    ).first()
 
-
-def get_users(db: Session, skip: int = 0, limit: int = 100, portfolio_of_user_id: Optional[int] = None):
-    query = db.query(models.User)
+def get_users(db: Session, tenant_id: int, skip: int = 0, limit: int = 100, portfolio_of_user_id: Optional[int] = None):
+    query = db.query(models.User).filter(models.User.tenant_id == tenant_id)
+    
     if portfolio_of_user_id:
-        # Finde alle User-IDs, mit denen der Mitarbeiter Transaktionen hatte
-        customer_ids_with_transactions = db.query(models.Transaction.user_id).filter(models.Transaction.booked_by_id == portfolio_of_user_id).distinct()
-        # Filter die User-Liste auf diese IDs
-        query = query.filter(models.User.id.in_([c[0] for c in customer_ids_with_transactions]))
+        customer_ids = db.query(models.Transaction.user_id).filter(
+            models.Transaction.booked_by_id == portfolio_of_user_id,
+            models.Transaction.tenant_id == tenant_id
+        ).distinct()
+        query = query.filter(models.User.id.in_(customer_ids))
 
     return query.order_by(models.User.name).offset(skip).limit(limit).all()
 
+def search_users(db: Session, tenant_id: int, search_term: str):
+    return db.query(models.User).filter(
+        models.User.tenant_id == tenant_id,
+        models.User.name.ilike(f"%{search_term}%")
+    ).all()
 
-def search_users(db: Session, search_term: str):
-    return db.query(models.User).filter(models.User.name.like(f"%{search_term}%")).all()
-
-
-def create_user(db: Session, user: schemas.UserCreate):
-    # NEU: Wenn kein Passwort übergeben wird, erstelle ein sicheres Zufallspasswort
-    if not user.password:
+def create_user(db: Session, user: schemas.UserCreate, tenant_id: int, auth_id: Optional[str] = None):
+    if not user.password and not auth_id:
         user.password = secrets.token_urlsafe(16)
 
-    hashed_password = auth.get_password_hash(user.password)
+    hashed_password = auth.get_password_hash(user.password) if user.password else None
+    
+    start_level = db.query(models.Level).filter(
+        models.Level.tenant_id == tenant_id,
+        models.Level.rank_order == 1
+    ).first()
+    
     db_user = models.User(
+        tenant_id=tenant_id,
+        auth_id=auth_id,
         email=user.email,
         name=user.name,
         role=user.role,
         is_active=user.is_active,
         balance=user.balance,
         phone=user.phone,
-        level_id=user.level_id,
+        current_level_id=start_level.id if start_level else None,
         hashed_password=hashed_password
     )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+    
     for dog_data in user.dogs:
-        db_dog = models.Dog(**dog_data.model_dump(), owner_id=db_user.id)
-        db.add(db_dog)
-    db.commit()
-    db.refresh(db_user)
+        create_dog_for_user(db, dog_data, db_user.id, tenant_id)
+        
     return db_user
 
-
-# In backend/app/crud.py
-
-# In backend/app/crud.py
-
-def are_prerequisites_met_for_exam(db: Session, customer: models.User) -> bool:
-    """
-    Prüft, ob ein Kunde alle Nicht-Prüfungs-Anforderungen für sein aktuelles Level
-    oder für den Hundeführerschein (Level 5) erfüllt hat.
-    """
-    current_level_id = customer.level_id
-
-    # *** NEU: Sonderlogik für den Hundeführerschein (Level 5) ***
-    if current_level_id == 5:
-        print("DEBUG: Prüfe Voraussetzungen für Level 5 (Hundeführerschein).")
-        prereqs = DOGLICENSE_PREREQS
-    else:
-        # Bestehende Logik für alle anderen Level
-        requirements_for_level = LEVEL_REQUIREMENTS.get(current_level_id, [])
-        if not requirements_for_level:
-            return True  # Keine Anforderungen, also ist die Prüfung erlaubt.
-        prereqs = [req for req in requirements_for_level if req.get("id") != 'exam']
-
-    if not prereqs:
-        return True  # Es gibt keine Voraussetzungen außer der Prüfung.
-
-    # Zähle alle bisherigen, unverbrauchten Leistungen des Kunden.
-    unconsumed_achievements = db.query(models.Achievement).filter(
-        models.Achievement.user_id == customer.id,
-        models.Achievement.is_consumed == False
-    ).all()
-
-    achievement_counts = {}
-    for ach in unconsumed_achievements:
-        req_id = ach.requirement_id
-        achievement_counts[req_id] = achievement_counts.get(req_id, 0) + 1
-
-    # Prüfe für jede Anforderung, ob die benötigte Anzahl erreicht ist.
-    for req in prereqs:
-        req_id = req.get("id")
-        required_amount = req.get("required")
-        if achievement_counts.get(req_id, 0) < required_amount:
-            print(
-                f"DEBUG: Voraussetzung '{req_id}' nicht erfüllt. Benötigt: {required_amount}, Vorhanden: {achievement_counts.get(req_id, 0)}")
-            return False  # Eine Voraussetzung ist nicht erfüllt.
-
-    print("DEBUG: Alle Voraussetzungen für die Prüfung sind erfüllt.")
-    return True  # Alle Voraussetzungen sind erfüllt.
-
-def update_user(db: Session, user_id: int, user: schemas.UserUpdate):
-    db_user = get_user(db, user_id=user_id)
+def update_user(db: Session, user_id: int, tenant_id: int, user: schemas.UserUpdate):
+    db_user = get_user(db, user_id, tenant_id)
     if not db_user:
         return None
 
-    # Lade die Update-Daten
     update_data = user.model_dump(exclude_unset=True)
-
-    # Wenn ein neues Passwort mitgesendet wurde, hashe es und entferne es aus den restlichen Daten
     if "password" in update_data and update_data["password"]:
-        hashed_password = auth.get_password_hash(update_data.pop("password"))
-        db_user.hashed_password = hashed_password
+        db_user.hashed_password = auth.get_password_hash(update_data.pop("password"))
 
-    # Aktualisiere die restlichen Felder
     for key, value in update_data.items():
         setattr(db_user, key, value)
 
@@ -146,41 +217,17 @@ def update_user(db: Session, user_id: int, user: schemas.UserUpdate):
     db.refresh(db_user)
     return db_user
 
-def update_user_vip_status(db: Session, user_id: int, is_vip: bool):
-    db_user = get_user(db, user_id=user_id)
-    if not db_user:
-        return None
-    db_user.is_vip = is_vip
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-def update_user_expert_status(db: Session, user_id: int, is_expert: bool):
-    db_user = get_user(db, user_id=user_id)
-    if not db_user:
-        return None
-    db_user.is_expert = is_expert
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-# In backend/app/crud.py
-def update_user_status(db: Session, user_id: int, status: schemas.UserStatusUpdate):
-    db_user = get_user(db, user_id=user_id)
-    if not db_user:
-        return None
+def update_user_status(db: Session, user_id: int, tenant_id: int, status: schemas.UserStatusUpdate):
+    db_user = get_user(db, user_id, tenant_id)
+    if not db_user: return None
 
     update_data = status.model_dump(exclude_unset=True)
-
-    # NEUE REGEL: Wenn ein Status auf True gesetzt wird, wird der andere auf False gesetzt.
+    
     if update_data.get("is_vip") is True:
         db_user.is_expert = False
     elif update_data.get("is_expert") is True:
         db_user.is_vip = False
 
-    # Übernehme die Änderungen aus dem Request
     for key, value in update_data.items():
         setattr(db_user, key, value)
 
@@ -189,181 +236,208 @@ def update_user_status(db: Session, user_id: int, status: schemas.UserStatusUpda
     db.refresh(db_user)
     return db_user
 
-def delete_user(db: Session, user_id: int):
-    db_user = get_user(db, user_id=user_id)
-    if not db_user:
-        return None
+def delete_user(db: Session, user_id: int, tenant_id: int):
+    db_user = get_user(db, user_id, tenant_id)
+    if not db_user: return None
     db.delete(db_user)
     db.commit()
     return {"ok": True}
 
-# --- TRANSACTION ---
-# In backend/app/crud.py
+# --- DOGS ---
 
-def create_transaction(db: Session, transaction: schemas.TransactionCreate, booked_by: models.User):
-    customer = get_user(db, user_id=transaction.user_id)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
+def get_dog(db: Session, dog_id: int, tenant_id: int):
+    return db.query(models.Dog).filter(
+        models.Dog.id == dog_id,
+        models.Dog.tenant_id == tenant_id
+    ).first()
 
-    # Bonus Logic
-    amount_to_add = transaction.amount
-    bonus = 0
-    if transaction.type == "Aufladung":  # Bonus nur bei Aufladungen
-        if amount_to_add >= 300:
-            bonus = 150
-        elif amount_to_add >= 150:
-            bonus = 30
-        elif amount_to_add >= 100:
-            bonus = 15
-        elif amount_to_add >= 50:
-            bonus = 5
-
-    total_change = amount_to_add + bonus
-
-    # Update customer balance
-    customer.balance += total_change
-    db.add(customer)
-
-    # Transaktion in der DB anlegen
-    db_transaction = models.Transaction(
-        user_id=customer.id,
-        type=transaction.type,
-        description=transaction.description,
-        amount=total_change,
-        balance_after=customer.balance,
-        booked_by_id=booked_by.id
-    )
-    db.add(db_transaction)
-    db.flush()  # Wichtig, um eine ID für die Transaktion zu bekommen
-
-    # *** HIER IST DIE NEUE LOGIK FÜR ACHIEVEMENTS ***
-    if transaction.requirement_id:
-        can_create_achievement = True
-
-        # Sonderprüfung für Prüfungen
-        if transaction.requirement_id == 'exam':
-            print(f"DEBUG: Prüfungs-Achievement wird geprüft für User {customer.id} in Level {customer.level_id}.")
-            if not are_prerequisites_met_for_exam(db, customer):
-                can_create_achievement = False
-                print(f"DEBUG: Voraussetzungen für Prüfung nicht erfüllt. Achievement wird NICHT erstellt.")
-
-        # Achievement nur erstellen, wenn die Prüfung erlaubt ist ODER es keine Prüfung ist.
-        if can_create_achievement:
-            print(f"DEBUG: Achievement '{transaction.requirement_id}' wird für User {customer.id} erstellt.")
-            create_achievement(
-                db,
-                user_id=customer.id,
-                requirement_id=transaction.requirement_id,
-                transaction_id=db_transaction.id
-            )
-
+def create_dog_for_user(db: Session, dog: schemas.DogCreate, user_id: int, tenant_id: int):
+    db_dog = models.Dog(**dog.model_dump(), owner_id=user_id, tenant_id=tenant_id)
+    db.add(db_dog)
     db.commit()
-    db.refresh(db_transaction)
-    return db_transaction
+    db.refresh(db_dog)
+    return db_dog
 
-def get_transactions(db: Session, skip: int = 0, limit: int = 100):
-    """Holt eine Liste von Transaktionen, die neuesten zuerst."""
-    return db.query(models.Transaction).order_by(models.Transaction.date.desc()).offset(skip).limit(limit).all()
-
-
-def get_transactions_for_user(db: Session, user_id: int, for_staff: bool = False):
-    """
-    Holt Transaktionen.
-    - Wenn for_staff=False, holt es alle Transaktionen des Kunden (user_id).
-    - Wenn for_staff=True, holt es alle Transaktionen, die vom Mitarbeiter (user_id) gebucht wurden.
-    """
-    if for_staff:
-        # Filter nach der 'booked_by_id' Spalte für Mitarbeiter
-        return db.query(models.Transaction).filter(models.Transaction.booked_by_id == user_id).order_by(models.Transaction.date.desc()).all()
-    else:
-        # Filter nach der 'user_id' Spalte für Kunden
-        return db.query(models.Transaction).filter(models.Transaction.user_id == user_id).order_by(models.Transaction.date.desc()).all()
-# --- ACHIEVEMENT ---
-def create_achievement(db: Session, user_id: int, requirement_id: str, transaction_id: int):
-    # Die alte "exists"-Prüfung wurde entfernt.
-    # Es wird jetzt immer ein neuer Eintrag erstellt.
-    db_achievement = models.Achievement(
-        user_id=user_id,
-        requirement_id=requirement_id,
-        transaction_id=transaction_id
-    )
-    db.add(db_achievement)
-    return db_achievement
-
-# --- USER LEVEL ---
-def update_user_level(db: Session, user_id: int, new_level_id: int):
-    db_user = get_user(db, user_id=user_id)
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    dog_license_prereq_ids = {req['id'] for req in DOGLICENSE_PREREQS}
-
-    unconsumed_achievements = db.query(models.Achievement).filter_by(
-        user_id=user_id, is_consumed=False
-    ).all()
-
-    for ach in unconsumed_achievements:
-        # Zusatzveranstaltungen werden NICHT verbraucht, alles andere schon.
-        if ach.requirement_id not in dog_license_prereq_ids:
-            ach.is_consumed = True
-            db.add(ach)
-
-    db_user.level_id = new_level_id
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-def get_dog(db: Session, dog_id: int):
-    return db.query(models.Dog).filter(models.Dog.id == dog_id).first()
-
-def update_dog(db: Session, dog_id: int, dog: schemas.DogBase):
-    db_dog = get_dog(db, dog_id=dog_id)
-    if not db_dog:
-        return None
-
-    update_data = dog.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
+def update_dog(db: Session, dog_id: int, tenant_id: int, dog: schemas.DogBase):
+    db_dog = get_dog(db, dog_id, tenant_id)
+    if not db_dog: return None
+    
+    for key, value in dog.model_dump(exclude_unset=True).items():
         setattr(db_dog, key, value)
-
+        
     db.add(db_dog)
     db.commit()
     db.refresh(db_dog)
     return db_dog
 
-# In backend/app/crud.py
-
-def create_document(db: Session, user_id: int, file_name: str, file_type: str, file_path: str):
-    db_doc = models.Document(
-        user_id=user_id, file_name=file_name, file_type=file_type, file_path=file_path
-    )
-    db.add(db_doc)
-    db.commit()
-    db.refresh(db_doc)
-    return db_doc
-
-def get_document(db: Session, document_id: int):
-    return db.query(models.Document).filter(models.Document.id == document_id).first()
-
-def delete_document(db: Session, document_id: int):
-    db_doc = get_document(db, document_id)
-    if db_doc:
-        db.delete(db_doc)
-        db.commit()
-        return True
-    return False
-
-def create_dog_for_user(db: Session, dog: schemas.DogCreate, user_id: int):
-    db_dog = models.Dog(**dog.model_dump(), owner_id=user_id)
-    db.add(db_dog)
-    db.commit()
-    db.refresh(db_dog)
-    return db_dog
-
-def delete_dog(db: Session, dog_id: int):
-    db_dog = get_dog(db, dog_id=dog_id)
-    if not db_dog:
-        return None
+def delete_dog(db: Session, dog_id: int, tenant_id: int):
+    db_dog = get_dog(db, dog_id, tenant_id)
+    if not db_dog: return None
     db.delete(db_dog)
     db.commit()
     return {"ok": True}
+
+# --- LEVEL & ACHIEVEMENTS LOGIC (DYNAMISCH) ---
+
+def check_level_up_eligibility(db: Session, user: models.User) -> bool:
+    if not user.current_level_id:
+        return False
+
+    current_level = db.query(models.Level).filter(models.Level.id == user.current_level_id).first()
+    next_level = db.query(models.Level).filter(
+        models.Level.tenant_id == user.tenant_id,
+        models.Level.rank_order == current_level.rank_order + 1
+    ).first()
+
+    if not next_level:
+        return False
+
+    requirements = db.query(models.LevelRequirement).filter(
+        models.LevelRequirement.level_id == current_level.id
+    ).all()
+
+    if not requirements:
+        return True
+
+    unconsumed_achievements = db.query(
+        models.Achievement.training_type_id, 
+        func.count(models.Achievement.id)
+    ).filter(
+        models.Achievement.user_id == user.id,
+        models.Achievement.is_consumed == False,
+        models.Achievement.tenant_id == user.tenant_id
+    ).group_by(models.Achievement.training_type_id).all()
+    
+    achievement_map = {TypeId: Count for TypeId, Count in unconsumed_achievements}
+
+    for req in requirements:
+        available = achievement_map.get(req.training_type_id, 0)
+        if available < req.required_count:
+            return False
+
+    return True
+
+def perform_level_up(db: Session, user_id: int, tenant_id: int):
+    user = get_user(db, user_id, tenant_id)
+    if not user: raise HTTPException(404, "User not found")
+    
+    if not check_level_up_eligibility(db, user):
+        raise HTTPException(400, "Requirements not met")
+
+    current_level = db.query(models.Level).filter(models.Level.id == user.current_level_id).first()
+    requirements = db.query(models.LevelRequirement).filter(models.LevelRequirement.level_id == current_level.id).all()
+
+    for req in requirements:
+        achievements_to_consume = db.query(models.Achievement).filter(
+            models.Achievement.user_id == user.id,
+            models.Achievement.tenant_id == tenant_id,
+            models.Achievement.training_type_id == req.training_type_id,
+            models.Achievement.is_consumed == False
+        ).order_by(models.Achievement.date_achieved.asc()).limit(req.required_count).all()
+        
+        for ach in achievements_to_consume:
+            ach.is_consumed = True
+            db.add(ach)
+
+    next_level = db.query(models.Level).filter(
+        models.Level.tenant_id == tenant_id,
+        models.Level.rank_order == current_level.rank_order + 1
+    ).first()
+    
+    user.current_level_id = next_level.id
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+# --- TRANSACTIONS & ACHIEVEMENTS ---
+
+def create_transaction(db: Session, transaction: schemas.TransactionCreate, booked_by_id: int, tenant_id: int):
+    user = get_user(db, transaction.user_id, tenant_id)
+    if not user: raise HTTPException(404, "User not found")
+
+    amount_to_add = transaction.amount
+    bonus = 0
+    if transaction.type == "Aufladung":
+        if amount_to_add >= 300: bonus = 150
+        elif amount_to_add >= 150: bonus = 30
+        elif amount_to_add >= 100: bonus = 15
+        elif amount_to_add >= 50: bonus = 5
+
+    total_change = amount_to_add + bonus
+    user.balance += total_change
+    db.add(user)
+
+    db_tx = models.Transaction(
+        tenant_id=tenant_id,
+        user_id=user.id,
+        booked_by_id=booked_by_id,
+        type=transaction.type,
+        description=transaction.description,
+        amount=total_change,
+        balance_after=user.balance
+    )
+    db.add(db_tx)
+    db.flush()
+
+    if transaction.training_type_id:
+        tt = db.query(models.TrainingType).filter(
+            models.TrainingType.id == transaction.training_type_id,
+            models.TrainingType.tenant_id == tenant_id
+        ).first()
+        
+        if tt:
+            create_achievement(db, user.id, tenant_id, tt.id, db_tx.id)
+
+    db.commit()
+    db.refresh(db_tx)
+    return db_tx
+
+def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None):
+    ach = models.Achievement(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        training_type_id=training_type_id,
+        transaction_id=transaction_id
+    )
+    db.add(ach)
+    return ach
+
+def get_transactions_for_user(db: Session, user_id: int, tenant_id: int, for_staff: bool = False):
+    query = db.query(models.Transaction).filter(models.Transaction.tenant_id == tenant_id)
+    
+    if for_staff:
+        query = query.filter(models.Transaction.booked_by_id == user_id)
+    else:
+        query = query.filter(models.Transaction.user_id == user_id)
+        
+    return query.order_by(models.Transaction.date.desc()).all()
+
+# --- DOCUMENTS ---
+
+def create_document(db: Session, user_id: int, tenant_id: int, file_name: str, file_type: str, file_path: str):
+    doc = models.Document(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        file_name=file_name,
+        file_type=file_type,
+        file_path=file_path
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+def get_document(db: Session, document_id: int, tenant_id: int):
+    return db.query(models.Document).filter(
+        models.Document.id == document_id,
+        models.Document.tenant_id == tenant_id
+    ).first()
+
+def delete_document(db: Session, document_id: int, tenant_id: int):
+    doc = get_document(db, document_id, tenant_id)
+    if doc:
+        db.delete(doc)
+        db.commit()
+        return True
+    return False
