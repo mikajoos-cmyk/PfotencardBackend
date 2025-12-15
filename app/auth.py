@@ -36,6 +36,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     else:
         # Default expiration time if not provided
         expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    
+    # Ensure email is in payload if sub is used (for compatibility with get_current_active_user)
+    if "sub" in to_encode and "email" not in to_encode:
+        to_encode["email"] = to_encode["sub"]
+
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
@@ -57,7 +62,7 @@ async def get_current_active_user(
     print(f"DEBUG: Starte Token-Validierung...")
     # Wir zeigen nur die ersten 5 Zeichen des Secrets, um sicherzugehen, dass es das richtige ist
     safe_secret_preview = settings.SECRET_KEY[:5] if settings.SECRET_KEY else "NONE"
-    print(f"DEBUG: Verwendetes SECRET_KEY (Start): {safe_secret_preview}...")
+    # print(f"DEBUG: Verwendetes SECRET_KEY (Start): {safe_secret_preview}...")
     # --- DEBUGGING END ---
 
     try:
@@ -72,14 +77,17 @@ async def get_current_active_user(
         
         # --- DEBUGGING START ---
         print(f"DEBUG: Token erfolgreich dekodiert.")
-        # print(f"DEBUG: Token Payload: {payload}") # Vorsicht: Zeigt alle Daten im Log
+        # print(f"DEBUG: Token Payload: {payload}") 
         # --- DEBUGGING END ---
 
         # 2. E-Mail aus dem Feld "email" lesen (NICHT "sub")
+        # Fallback: Falls "email" fehlt, versuche "sub" (für lokale Tokens relevant)
         email: str = payload.get("email")
+        if not email:
+            email = payload.get("sub")
         
         if email is None:
-            print("DEBUG: FEHLER - Keine E-Mail im Token-Feld 'email' gefunden.")
+            print("DEBUG: FEHLER - Keine E-Mail im Token-Feld 'email' oder 'sub' gefunden.")
             raise credentials_exception
             
         print(f"DEBUG: E-Mail aus Token extrahiert: {email}")
@@ -87,6 +95,7 @@ async def get_current_active_user(
         
     except JWTError as e:
         print(f"DEBUG: JWT Error (Dekodierung fehlgeschlagen): {str(e)}")
+        print("HINWEIS: Prüfen Sie, ob 'SECRET_KEY' in der .env-Datei mit dem 'JWT Secret' Ihres Supabase-Projekts übereinstimmt.")
         # Häufiger Fehler: Signature verification failed -> Falsches Secret
         raise credentials_exception
 

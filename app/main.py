@@ -34,7 +34,8 @@ origins = [
     "http://localhost:5173",         # Gängiger Vite-Port
     "http://127.0.0.1:5173",         # Vite-Port mit IP statt Name
     "http://127.0.0.1:3000",         # React-Port mit IP statt Name
-    "http://localhost:5174"
+    "http://localhost:5174",
+    "http://localhost:5175",
 ]
 
 # Allows the frontend (running on a different port) to communicate with the backend.
