@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_, func
 from . import models, schemas, auth
 from fastapi import HTTPException
@@ -36,44 +37,45 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     # 1. Update Tenant Basic Info & Config
     tenant.name = settings.school_name
     
-    # Sicherstellen, dass config ein Dict ist und Updates mergen
+    # Sicherstellen, dass config ein Dict ist
     current_config = dict(tenant.config) if tenant.config else {}
     
+    # Branding Updates
     current_config["branding"] = current_config.get("branding", {})
     current_config["branding"]["primary_color"] = settings.primary_color
     current_config["branding"]["secondary_color"] = settings.secondary_color
+    
+    # LOGO SPEICHERN: Nur wenn eine URL gesendet wurde
     if settings.logo_url:
         current_config["branding"]["logo_url"] = settings.logo_url
     
+    # Wording Updates
     current_config["wording"] = current_config.get("wording", {})
     current_config["wording"]["level"] = settings.level_term
     current_config["wording"]["vip"] = settings.vip_term
     
-    # Wichtig: Explizit neu setzen, damit SQLAlchemy die Änderung am JSONB erkennt
+    # Zuweisen und als geändert markieren (WICHTIG!)
     tenant.config = current_config
+    flag_modified(tenant, "config") # <--- DAS LÖST DAS SPEICHER-PROBLEM
     
+    # ... (Rest der Funktion für Services und Levels bleibt gleich wie vorher) ...
     # 2. Sync Services (TrainingTypes)
-    # Strategy: IDs in payload -> Update. IDs missing in payload but in DB -> Delete. No ID -> Create.
     existing_services = db.query(models.TrainingType).filter(models.TrainingType.tenant_id == tenant_id).all()
     existing_service_ids = {s.id for s in existing_services}
     payload_service_ids = {s.id for s in settings.services if s.id is not None}
     
-    # Delete missing
     to_delete_ids = existing_service_ids - payload_service_ids
     if to_delete_ids:
         db.query(models.TrainingType).filter(models.TrainingType.id.in_(to_delete_ids)).delete(synchronize_session=False)
     
-    # Update or Create
     for s_data in settings.services:
         if s_data.id:
-            # Update
             svc = next((s for s in existing_services if s.id == s_data.id), None)
             if svc:
                 svc.name = s_data.name
                 svc.category = s_data.category
                 svc.default_price = s_data.price
         else:
-            # Create
             new_svc = models.TrainingType(
                 tenant_id=tenant_id,
                 name=s_data.name,
@@ -82,14 +84,13 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
             )
             db.add(new_svc)
     
-    db.flush() # IDs generieren für neue Services (falls wir sie sofort brauchen würden, hier aber ok)
+    db.flush()
 
     # 3. Sync Levels
     existing_levels = db.query(models.Level).filter(models.Level.tenant_id == tenant_id).all()
     existing_level_ids = {l.id for l in existing_levels}
     payload_level_ids = {l.id for l in settings.levels if l.id is not None}
     
-    # Delete missing Levels
     to_delete_level_ids = existing_level_ids - payload_level_ids
     if to_delete_level_ids:
         db.query(models.Level).filter(models.Level.id.in_(to_delete_level_ids)).delete(synchronize_session=False)
@@ -110,21 +111,11 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
                 icon_url=l_data.badge_image
             )
             db.add(current_level)
-            db.flush() # Need ID for requirements
+            db.flush()
             
-        # Sync Requirements for this level
-        # Achtung: Wir müssen hier vorsichtig sein. Alte Requirements löschen und neu anlegen ist oft einfacher als diffen.
-        # Aber wir löschen nur die für dieses Level.
         if current_level.id:
             db.query(models.LevelRequirement).filter(models.LevelRequirement.level_id == current_level.id).delete()
-            
             for req_data in l_data.requirements:
-                # Prüfen ob training_type_id existiert (könnte gelöscht worden sein, wenn User Quatsch sendet)
-                # Frontend muss sicherstellen, dass nur gültige IDs gesendet werden.
-                # Wenn wir oben Services erstellt haben, kennt das Frontend deren neue IDs noch nicht.
-                # LIMITATION: In diesem einfachen Flow kann man einen NEUEN Service nicht direkt in einer NEUEN Anforderung nutzen.
-                # Man muss erst speichern (Service anlegen), dann nochmal bearbeiten.
-                
                 new_req = models.LevelRequirement(
                     level_id=current_level.id,
                     training_type_id=req_data.training_type_id,
