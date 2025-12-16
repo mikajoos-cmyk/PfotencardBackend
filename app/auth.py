@@ -64,7 +64,8 @@ def get_subdomain(request: Request) -> Optional[str]:
     
     # Ignoriere Localhost oder IP-Adressen (Fallback für Dev)
     if "localhost" in domain or "127.0.0.1" in domain:
-        return request.headers.get("x-tenant-id") # Fallback ID
+        # return request.headers.get("x-tenant-id") # Fallback ID
+        return "dev"
 
     parts = domain.split(".")
     if len(parts) >= 3: 
@@ -80,7 +81,7 @@ async def get_current_tenant(
     Dependency, die den aktuellen Tenant basierend auf der Subdomain lädt.
     """
     subdomain = get_subdomain(request)
-    
+    print(subdomain, 2387764238428)
     if not subdomain:
         # Versuche Fallback ID wenn keine Subdomain da ist
         tenant_id_header = request.headers.get("x-tenant-id")
@@ -91,6 +92,7 @@ async def get_current_tenant(
         raise HTTPException(status_code=404, detail="No tenant specified (subdomain missing)")
 
     tenant = crud.get_tenant_by_subdomain(db, subdomain=subdomain)
+    print(tenant, 2387764238312313123428)
     if not tenant:
         raise HTTPException(status_code=404, detail=f"School '{subdomain}' not found")
         
