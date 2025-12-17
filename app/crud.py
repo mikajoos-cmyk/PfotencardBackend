@@ -69,12 +69,15 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
         db.query(models.TrainingType).filter(models.TrainingType.id.in_(to_delete_ids)).delete(synchronize_session=False)
     
     for s_data in settings.services:
-        if s_data.id:
+        # FIX: Nur positive IDs gelten als existierend. Negative IDs (vom Frontend) sind neu.
+        svc = None
+        if s_data.id and s_data.id > 0:
             svc = next((s for s in existing_services if s.id == s_data.id), None)
-            if svc:
-                svc.name = s_data.name
-                svc.category = s_data.category
-                svc.default_price = s_data.price
+            
+        if svc:
+            svc.name = s_data.name
+            svc.category = s_data.category
+            svc.default_price = s_data.price
         else:
             new_svc = models.TrainingType(
                 tenant_id=tenant_id,
