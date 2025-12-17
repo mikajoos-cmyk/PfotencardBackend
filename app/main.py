@@ -20,7 +20,7 @@ app = FastAPI()
 UPLOADS_DIR = "uploads"
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
-origins_regex = r"https://.*\.pfotencard\.de|http://localhost:\d+"
+origins_regex = r"https://(.*\.)?pfotencard\.de|http://localhost:\d+"
 
 app.add_middleware(
     CORSMiddleware,
