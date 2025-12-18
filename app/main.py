@@ -20,6 +20,9 @@ app = FastAPI()
 UPLOADS_DIR = "uploads"
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
+# Supabase Client initialisieren
+supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+
 origins_regex = r"https://(.*\.)?pfotencard\.de|http://localhost:\d+"
 
 app.add_middleware(
@@ -135,6 +138,7 @@ def register_tenant(
         
     trial_end = datetime.now(timezone.utc) + timedelta(days=14)
     
+    # 1. Tenant erstellen
     new_tenant = models.Tenant(
         name=tenant_data.name,
         subdomain=tenant_data.subdomain,
@@ -146,8 +150,25 @@ def register_tenant(
     db.commit()
     db.refresh(new_tenant)
     
+    # 2. Admin in Supabase Auth anlegen
+    auth_id = None
+    try:
+        # Sicherstellen, dass ein Passwort da ist
+        if not admin_data.password:
+            admin_data.password = secrets.token_urlsafe(16)
+
+        auth_res = supabase.auth.admin.create_user({
+            "email": admin_data.email,
+            "password": admin_data.password,
+            "email_confirm": True
+        })
+        if auth_res.user:
+            auth_id = auth_res.user.id
+    except Exception as e:
+        print(f"DEBUG: Supabase Registration skipped or failed: {e}")
+
     admin_data.role = "admin"
-    crud.create_user(db, admin_data, new_tenant.id)
+    crud.create_user(db, admin_data, new_tenant.id, auth_id=auth_id)
     
     return new_tenant
 
@@ -165,8 +186,25 @@ def create_user(
     db_user = crud.get_user_by_email(db, email=user.email, tenant_id=tenant.id)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered in this school")
-        
-    return crud.create_user(db=db, user=user, tenant_id=tenant.id)
+    
+    # In Supabase Auth anlegen
+    auth_id = None
+    try:
+        # Passwort generieren falls nicht vorhanden
+        if not user.password:
+            user.password = secrets.token_urlsafe(16)
+
+        auth_res = supabase.auth.admin.create_user({
+            "email": user.email,
+            "password": user.password,
+            "email_confirm": True
+        })
+        if auth_res.user:
+            auth_id = auth_res.user.id
+    except Exception as e:
+        print(f"DEBUG: Supabase User Registration failed: {e}")
+
+    return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=auth_id)
 
 @app.get("/api/users", response_model=List[schemas.User])
 def read_users(
