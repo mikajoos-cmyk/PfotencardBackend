@@ -54,6 +54,7 @@ class Level(Base):
     name = Column(String(255), nullable=False)  # z.B. "Welpe"
     rank_order = Column(Integer, nullable=False) # 1, 2, 3...
     icon_url = Column(String(512))
+    has_additional_requirements = Column(Boolean, default=False) # NEU: Fragt Zusatzleistungen ab
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="levels")
@@ -68,6 +69,7 @@ class LevelRequirement(Base):
     level_id = Column(Integer, ForeignKey('levels.id'), nullable=False)
     training_type_id = Column(Integer, ForeignKey('training_types.id'), nullable=False)
     required_count = Column(Integer, default=1)
+    is_additional = Column(Boolean, default=False) # NEU: Markiert als Zusatzleistung
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     level = relationship("Level", back_populates="requirements")

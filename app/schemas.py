@@ -9,6 +9,7 @@ class TenantConfig(BaseModel):
     """Speichert Branding und Einstellungen als JSON"""
     branding: Dict[str, Any] = {} # z.B. {"primary_color": "#...", "logo_url": "..."}
     wording: Dict[str, str] = {} # z.B. {"level": "Klasse", "vip": "Rudelchef"}
+    balance: Dict[str, Any] = {} # z.B. {"allow_custom_top_up": true, "top_up_options": [...]}
     features: Dict[str, bool] = {} # z.B. {"dark_mode": true}
 
 class TenantBase(BaseModel):
@@ -65,6 +66,7 @@ class TrainingType(TrainingTypeBase):
 class LevelRequirementBase(BaseModel):
     training_type_id: int
     required_count: int = 1
+    is_additional: bool = False
 
 class LevelRequirementCreate(LevelRequirementBase):
     pass
@@ -81,6 +83,7 @@ class LevelBase(BaseModel):
     name: str
     rank_order: int
     icon_url: Optional[str] = None
+    has_additional_requirements: bool = False
 
 class LevelCreate(LevelBase):
     requirements: List[LevelRequirementCreate] = []
@@ -244,16 +247,22 @@ class ServiceUpdateItem(BaseModel):
     category: str
     price: float
 
+class TopUpOption(BaseModel):
+    amount: float
+    bonus: float = 0.0
+
 class RequirementUpdateItem(BaseModel):
     id: Optional[int] = None
     training_type_id: int # Muss existieren
     required_count: int
+    is_additional: bool = False
 
 class LevelUpdateItem(BaseModel):
     id: Optional[int] = None
     name: str
     rank_order: int
     badge_image: Optional[str] = None
+    has_additional_requirements: bool = False
     requirements: List[RequirementUpdateItem] = []
 
 class SettingsUpdate(BaseModel):
@@ -264,6 +273,10 @@ class SettingsUpdate(BaseModel):
     secondary_color: str
     level_term: str
     vip_term: str
+    
+    # Balance Settings
+    allow_custom_top_up: bool = True
+    top_up_options: List[TopUpOption] = []
     
     services: List[ServiceUpdateItem]
     levels: List[LevelUpdateItem]

@@ -53,6 +53,11 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     current_config["wording"] = current_config.get("wording", {})
     current_config["wording"]["level"] = settings.level_term
     current_config["wording"]["vip"] = settings.vip_term
+
+    # Balance Updates
+    current_config["balance"] = current_config.get("balance", {})
+    current_config["balance"]["allow_custom_top_up"] = settings.allow_custom_top_up
+    current_config["balance"]["top_up_options"] = [opt.dict() for opt in settings.top_up_options]
     
     # Zuweisen und als geändert markieren (WICHTIG!)
     tenant.config = current_config
@@ -106,12 +111,14 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
                 current_level.name = l_data.name
                 current_level.rank_order = l_data.rank_order
                 current_level.icon_url = l_data.badge_image
+                current_level.has_additional_requirements = l_data.has_additional_requirements
         else:
             current_level = models.Level(
                 tenant_id=tenant_id,
                 name=l_data.name,
                 rank_order=l_data.rank_order,
-                icon_url=l_data.badge_image
+                icon_url=l_data.badge_image,
+                has_additional_requirements=l_data.has_additional_requirements
             )
             db.add(current_level)
             db.flush()
@@ -122,7 +129,8 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
                 new_req = models.LevelRequirement(
                     level_id=current_level.id,
                     training_type_id=req_data.training_type_id,
-                    required_count=req_data.required_count
+                    required_count=req_data.required_count,
+                    is_additional=req_data.is_additional
                 )
                 db.add(new_req)
 
