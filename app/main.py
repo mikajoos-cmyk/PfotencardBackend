@@ -249,6 +249,17 @@ def update_user_endpoint(
     updated = crud.update_user(db, user_id, tenant.id, user_update)
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
+        
+    # Passwort in Supabase synchronisieren, falls geändert
+    if user_update.password and updated.auth_id:
+        try:
+            supabase.auth.admin.update_user_by_id(
+                str(updated.auth_id),
+                {"password": user_update.password}
+            )
+        except Exception as e:
+            print(f"DEBUG: Supabase Password Sync failed: {e}")
+            
     return updated
 
 @app.put("/api/users/{user_id}/status", response_model=schemas.User)
