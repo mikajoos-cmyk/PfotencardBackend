@@ -44,7 +44,8 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     current_config["branding"] = current_config.get("branding", {})
     current_config["branding"]["primary_color"] = settings.primary_color
     current_config["branding"]["secondary_color"] = settings.secondary_color
-    
+    current_config["branding"]["background_color"] = settings.background_color  # NEU
+    current_config["branding"]["sidebar_color"] = settings.sidebar_color        # NEU
     # LOGO SPEICHERN: Nur wenn eine URL gesendet wurde
     if settings.logo_url:
         current_config["branding"]["logo_url"] = settings.logo_url
@@ -57,8 +58,11 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     # Balance Updates
     current_config["balance"] = current_config.get("balance", {})
     current_config["balance"]["allow_custom_top_up"] = settings.allow_custom_top_up
-    current_config["balance"]["top_up_options"] = [opt.dict() for opt in settings.top_up_options]
+    current_config["balance"]["top_up_options"] = [opt.model_dump() for opt in settings.top_up_options]
     
+    # Modules Update
+    current_config["active_modules"] = settings.active_modules # NEU
+
     # Zuweisen und als geändert markieren (WICHTIG!)
     tenant.config = current_config
     flag_modified(tenant, "config")
@@ -474,3 +478,124 @@ def delete_document(db: Session, document_id: int, tenant_id: int):
         db.commit()
         return True
     return False
+
+
+# --- APPOINTMENTS & BOOKINGS ---
+
+def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tenant_id: int):
+    # Einfaches Anlegen eines Termins
+    db_appt = models.Appointment(
+        tenant_id=tenant_id,
+        title=appointment.title,
+        description=appointment.description,
+        start_time=appointment.start_time,
+        end_time=appointment.end_time,
+        location=appointment.location,
+        max_participants=appointment.max_participants
+    )
+    db.add(db_appt)
+    db.commit()
+    db.refresh(db_appt)
+    return db_appt
+
+def get_appointments(db: Session, tenant_id: int):
+    # Holt alle Termine für einen Tenant.
+    # Optional: Filter nach Datum (z.B. nur zukünftige)
+    # Hier erstmal alle zurückgeben
+    appointments = db.query(models.Appointment).filter(
+        models.Appointment.tenant_id == tenant_id
+    ).order_by(models.Appointment.start_time.asc()).all()
+    
+    # Berechne Teilnehmerzahl dynamisch für die API Response
+    # Achtung: Das ist nicht super effizient bei tausenden Terminen, aber ok für KMU Scale
+    for appt in appointments:
+        appt.participants_count = db.query(models.Booking).filter(
+            models.Booking.appointment_id == appt.id,
+            models.Booking.status == 'confirmed'
+        ).count()
+        
+    return appointments
+
+def get_appointment(db: Session, appointment_id: int, tenant_id: int):
+    return db.query(models.Appointment).filter(
+        models.Appointment.id == appointment_id,
+        models.Appointment.tenant_id == tenant_id
+    ).first()
+
+def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int):
+    # 1. Termin holen & prüfen
+    appt = get_appointment(db, appointment_id, tenant_id)
+    if not appt:
+        raise HTTPException(404, "Appointment not found")
+        
+    # 2. Prüfen ob schon gebucht
+    existing = db.query(models.Booking).filter(
+        models.Booking.appointment_id == appointment_id,
+        models.Booking.user_id == user_id
+    ).first()
+    
+    if existing:
+        if existing.status == 'cancelled':
+            # Re-aktivieren
+            existing.status = 'confirmed'
+            db.commit()
+            return existing
+        else:
+            raise HTTPException(400, "Already booked or on waitlist")
+
+    # 3. Platz prüfen (optional, eigentlich sollte man Overbooking verhindern)
+    current_count = db.query(models.Booking).filter(
+        models.Booking.appointment_id == appointment_id,
+        models.Booking.status == 'confirmed'
+    ).count()
+    
+    if current_count >= appt.max_participants:
+        # Warteliste-Logik könnte hier hin. Für jetzt einfach Fehler oder Warteliste-Status
+        raise HTTPException(400, "Appointment is full")
+
+    # 4. Buchen
+    booking = models.Booking(
+        tenant_id=tenant_id,
+        appointment_id=appointment_id,
+        user_id=user_id,
+        status="confirmed"
+    )
+    db.add(booking)
+    db.commit()
+    db.refresh(booking)
+    return booking
+
+def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int):
+    booking = db.query(models.Booking).filter(
+        models.Booking.appointment_id == appointment_id,
+        models.Booking.user_id == user_id,
+        models.Booking.tenant_id == tenant_id
+    ).first()
+    
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+        
+    booking.status = 'cancelled'
+    db.commit()
+    return {"ok": True}
+
+def get_participants(db: Session, tenant_id: int, appointment_id: int):
+    # List of bookings with User data loaded
+    return db.query(models.Booking).options(joinedload(models.Booking.user)).filter(
+        models.Booking.appointment_id == appointment_id,
+        models.Booking.tenant_id == tenant_id
+    ).all()
+
+def toggle_attendance(db: Session, tenant_id: int, booking_id: int):
+    booking = db.query(models.Booking).filter(
+        models.Booking.id == booking_id,
+        models.Booking.tenant_id == tenant_id
+    ).first()
+    
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+        
+    booking.attended = not booking.attended
+    db.commit()
+    db.refresh(booking)
+    return booking

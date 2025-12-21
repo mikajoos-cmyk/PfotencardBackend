@@ -421,3 +421,72 @@ def upload_public_image(
     # Return URL (relative or absolute)
     # Assuming standard setup: /static/uploads/...
     return {"url": f"/static/uploads/{safe_name}"}
+
+
+# --- APPOINTMENTS & BOOKINGS ---
+
+@app.post("/api/appointments", response_model=schemas.Appointment)
+def create_appointment(
+    appointment: schemas.AppointmentCreate,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+         raise HTTPException(status_code=403, detail="Not authorized")
+         
+    return crud.create_appointment(db, appointment, tenant.id)
+
+@app.get("/api/appointments", response_model=List[schemas.Appointment])
+def read_appointments(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    # Jeder eingeloggte User darf Termine sehen
+    return crud.get_appointments(db, tenant.id)
+
+@app.post("/api/appointments/{appointment_id}/book", response_model=schemas.Booking)
+def book_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    # Jeder Kunde darf buchen (evtl. Level-Checks hier später)
+    return crud.create_booking(db, tenant.id, appointment_id, current_user.id)
+
+@app.delete("/api/appointments/{appointment_id}/book")
+def cancel_appointment_booking(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    # Eigene Buchung stornieren
+    return crud.cancel_booking(db, tenant.id, appointment_id, current_user.id)
+
+@app.get("/api/appointments/{appointment_id}/participants", response_model=List[schemas.Booking])
+def read_participants(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+         raise HTTPException(status_code=403, detail="Not authorized")
+         
+    return crud.get_participants(db, tenant.id, appointment_id)
+
+@app.put("/api/bookings/{booking_id}/attendance", response_model=schemas.Booking)
+def toggle_booking_attendance(
+    booking_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+         raise HTTPException(status_code=403, detail="Not authorized")
+         
+    return crud.toggle_attendance(db, tenant.id, booking_id)
+

@@ -11,6 +11,7 @@ class TenantConfig(BaseModel):
     wording: Dict[str, str] = {} # z.B. {"level": "Klasse", "vip": "Rudelchef"}
     balance: Dict[str, Any] = {} # z.B. {"allow_custom_top_up": true, "top_up_options": [...]}
     features: Dict[str, bool] = {} # z.B. {"dark_mode": true}
+    active_modules: List[str] = ["news", "documents"] # NEU
 
 class TenantBase(BaseModel):
     name: str
@@ -271,6 +272,8 @@ class SettingsUpdate(BaseModel):
     # Config Fields
     primary_color: str
     secondary_color: str
+    background_color: str  # NEU
+    sidebar_color: str     # NEU
     level_term: str
     vip_term: str
     
@@ -280,3 +283,52 @@ class SettingsUpdate(BaseModel):
     
     services: List[ServiceUpdateItem]
     levels: List[LevelUpdateItem]
+    active_modules: List[str] = [] # NEU
+
+
+# --- APPOINTMENTS & BOOKINGS ---
+
+class BookingBase(BaseModel):
+    pass
+
+class BookingCreate(BookingBase):
+    appointment_id: int
+
+class Booking(BookingBase):
+    id: int
+    tenant_id: int
+    appointment_id: int
+    user_id: int
+    status: str
+    attended: bool
+    created_at: datetime
+    
+    user: Optional[User] = None # Um Teilnehmerinfos anzuzeigen
+
+    class Config:
+        from_attributes = True
+
+class AppointmentBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    start_time: datetime
+    end_time: datetime
+    location: Optional[str] = None
+    max_participants: int = 10
+
+class AppointmentCreate(AppointmentBase):
+    pass
+
+class Appointment(AppointmentBase):
+    id: int
+    tenant_id: int
+    created_at: datetime
+    
+    # Optional: Liste der Buchungen für Admins
+    bookings: List[Booking] = []
+    
+    # Computed fields for frontend convenience (optional, can be done in frontend)
+    participants_count: Optional[int] = None 
+
+    class Config:
+        from_attributes = True

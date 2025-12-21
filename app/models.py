@@ -26,6 +26,8 @@ class Tenant(Base):
     training_types = relationship("TrainingType", back_populates="tenant", cascade="all, delete-orphan")
     levels = relationship("Level", back_populates="tenant", cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="tenant", cascade="all, delete-orphan")
+    appointments = relationship("Appointment", back_populates="tenant", cascade="all, delete-orphan")
+    bookings = relationship("Booking", back_populates="tenant", cascade="all, delete-orphan")
 
 
 # --- 2. KONFIGURATION (Leistungen & Level) ---
@@ -118,7 +120,9 @@ class User(Base):
                                      back_populates="booked_by")
                                      
     achievements = relationship("Achievement", back_populates="user", cascade="all, delete-orphan")
+    achievements = relationship("Achievement", back_populates="user", cascade="all, delete-orphan")
     documents = relationship("Document", back_populates="user", cascade="all, delete-orphan")
+    bookings = relationship("Booking", back_populates="user", cascade="all, delete-orphan")
 
 
 class Dog(Base):
@@ -187,3 +191,46 @@ class Document(Base):
     file_path = Column(String(512), nullable=False)
 
     user = relationship("User", back_populates="documents")
+
+
+# --- 4. TERMINVEREINBARUNG (APPOINTMENTS) ---
+
+class Appointment(Base):
+    __tablename__ = 'appointments'
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    
+    title = Column(String(255), nullable=False)
+    description = Column(String(1024), nullable=True)
+    
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=False)
+    location = Column(String(255), nullable=True)
+    
+    max_participants = Column(Integer, default=10)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    tenant = relationship("Tenant", back_populates="appointments")
+    bookings = relationship("Booking", back_populates="appointment", cascade="all, delete-orphan")
+
+
+class Booking(Base):
+    __tablename__ = 'bookings'
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    appointment_id = Column(Integer, ForeignKey('appointments.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    
+    status = Column(String(50), default="confirmed") # confirmed, cancelled, waitlist
+    attended = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Ein User kann pro Termin nur einmal buchen
+    __table_args__ = (UniqueConstraint('appointment_id', 'user_id', name='uix_appointment_user'),)
+
+    tenant = relationship("Tenant", back_populates="bookings")
+    appointment = relationship("Appointment", back_populates="bookings")
+    user = relationship("User", back_populates="bookings")
