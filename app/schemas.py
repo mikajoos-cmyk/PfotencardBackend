@@ -144,6 +144,7 @@ class UserUpdate(BaseModel):
     is_vip: Optional[bool] = None
     is_expert: Optional[bool] = None
     current_level_id: Optional[int] = None
+    level_id: Optional[int] = None
     password: Optional[str] = None
 
 class UserStatusUpdate(BaseModel):
@@ -160,6 +161,8 @@ class User(UserBase):
     
     dogs: List[Dog] = []
     current_level: Optional[Level] = None
+    level_id: Optional[int] = None
+    
     
     # --- FÜGE DIESE ZEILEN HINZU ---
     documents: List['Document'] = []
@@ -187,6 +190,8 @@ class Transaction(TransactionBase):
     booked_by_id: int
     balance_after: float
     date: datetime
+    # NEU: Bonus Feld auch im Output
+    bonus: float = 0.0
 
     class Config:
         from_attributes = True

@@ -101,6 +101,10 @@ class User(Base):
     is_expert = Column(Boolean, default=False, nullable=False)
     current_level_id = Column(Integer, ForeignKey('levels.id'), nullable=True)
 
+    @property
+    def level_id(self):
+        return self.current_level_id
+
     # WICHTIG: E-Mail muss pro Tenant einzigartig sein, nicht global!
     __table_args__ = (UniqueConstraint('email', 'tenant_id', name='uix_email_tenant'),)
 
@@ -155,6 +159,9 @@ class Transaction(Base):
     description = Column(String(255))
     amount = Column(Float, nullable=False)
     balance_after = Column(Float, nullable=False)
+    
+    # NEU: Speichert den Bonus explizit ab
+    bonus = Column(Float, default=0.0)
 
     tenant = relationship("Tenant", back_populates="transactions")
     user = relationship("User", foreign_keys=[user_id], back_populates="transactions")

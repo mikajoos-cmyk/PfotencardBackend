@@ -44,9 +44,8 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     current_config["branding"] = current_config.get("branding", {})
     current_config["branding"]["primary_color"] = settings.primary_color
     current_config["branding"]["secondary_color"] = settings.secondary_color
-    current_config["branding"]["background_color"] = settings.background_color  # NEU
-    current_config["branding"]["sidebar_color"] = settings.sidebar_color        # NEU
-    # LOGO SPEICHERN: Nur wenn eine URL gesendet wurde
+    current_config["branding"]["background_color"] = settings.background_color
+    current_config["branding"]["sidebar_color"] = settings.sidebar_color
     if settings.logo_url:
         current_config["branding"]["logo_url"] = settings.logo_url
     
@@ -61,23 +60,20 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     current_config["balance"]["top_up_options"] = [opt.model_dump() for opt in settings.top_up_options]
     
     # Modules Update
-    current_config["active_modules"] = settings.active_modules # NEU
+    current_config["active_modules"] = settings.active_modules
 
-    # Zuweisen und als geändert markieren (WICHTIG!)
     tenant.config = current_config
     flag_modified(tenant, "config")
     
     # 2. Sync Services (TrainingTypes)
     existing_services = db.query(models.TrainingType).filter(models.TrainingType.tenant_id == tenant_id).all()
     existing_service_ids = {s.id for s in existing_services}
-    # FIX: Nur positive IDs gelten als existierend. Negative IDs sind neu.
     payload_service_ids = {s.id for s in settings.services if s.id is not None and s.id > 0}
     
     to_delete_ids = existing_service_ids - payload_service_ids
     if to_delete_ids:
         db.query(models.TrainingType).filter(models.TrainingType.id.in_(to_delete_ids)).delete(synchronize_session=False)
     
-    # Mapping speichern: Frontend-ID (negativ) -> Neue DB-ID (positiv)
     temp_id_mapping = {}
 
     for s_data in settings.services:
@@ -97,9 +93,7 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
                 default_price=s_data.price
             )
             db.add(new_svc)
-            db.flush() # ID generieren
-            
-            # Falls eine negative ID übergeben wurde, mapping speichern
+            db.flush()
             if s_data.id and s_data.id < 0:
                 temp_id_mapping[s_data.id] = new_svc.id
     
@@ -108,7 +102,6 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     # 3. Sync Levels
     existing_levels = db.query(models.Level).filter(models.Level.tenant_id == tenant_id).all()
     existing_level_ids = {l.id for l in existing_levels}
-    # Auch hier: Nur positive IDs gelten als existierend
     payload_level_ids = {l.id for l in settings.levels if l.id is not None and l.id > 0}
     
     to_delete_level_ids = existing_level_ids - payload_level_ids
@@ -138,15 +131,13 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
         if current_level.id:
             db.query(models.LevelRequirement).filter(models.LevelRequirement.level_id == current_level.id).delete()
             for req_data in l_data.requirements:
-                
-                # WICHTIG: Hier prüfen wir, ob die ID gemappt werden muss
                 training_id = req_data.training_type_id
                 if training_id in temp_id_mapping:
                     training_id = temp_id_mapping[training_id]
 
                 new_req = models.LevelRequirement(
                     level_id=current_level.id,
-                    training_type_id=training_id, # Verwende die korrekte, positive ID
+                    training_type_id=training_id,
                     required_count=req_data.required_count,
                     is_additional=req_data.is_additional
                 )
@@ -176,7 +167,6 @@ def get_user_by_email(db: Session, email: str, tenant_id: int):
     ).first()
 
 def get_users(db: Session, tenant_id: int, skip: int = 0, limit: int = 100, portfolio_of_user_id: Optional[int] = None):
-    # Wir laden documents und achievements direkt mit (Eager Loading)
     query = db.query(models.User).options(
         joinedload(models.User.documents),
         joinedload(models.User.achievements),
@@ -241,7 +231,10 @@ def update_user(db: Session, user_id: int, tenant_id: int, user: schemas.UserUpd
         db_user.hashed_password = auth.get_password_hash(update_data.pop("password"))
 
     for key, value in update_data.items():
-        setattr(db_user, key, value)
+        if key == "level_id":
+             db_user.current_level_id = value
+        else:
+             setattr(db_user, key, value)
 
     db.add(db_user)
     db.commit()
@@ -268,7 +261,6 @@ def update_user_status(db: Session, user_id: int, tenant_id: int, status: schema
     return db_user
 
 def update_user_level(db: Session, user_id: int, new_level_id: int):
-    # Dies ist eine Hilfsfunktion für manuelles Level-Setzen
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user: return None
     user.current_level_id = new_level_id
@@ -325,7 +317,6 @@ def check_level_up_eligibility(db: Session, user: models.User) -> bool:
         return False
 
     current_level = db.query(models.Level).filter(models.Level.id == user.current_level_id).first()
-    # Finde das nächste Level basierend auf rank_order
     next_level = db.query(models.Level).filter(
         models.Level.tenant_id == user.tenant_id,
         models.Level.rank_order > current_level.rank_order
@@ -336,7 +327,7 @@ def check_level_up_eligibility(db: Session, user: models.User) -> bool:
 
     requirements = db.query(models.LevelRequirement).filter(
         models.LevelRequirement.level_id == current_level.id,
-        models.LevelRequirement.is_additional == False # Nur Pflichtanforderungen prüfen
+        models.LevelRequirement.is_additional == False
     ).all()
 
     if not requirements:
@@ -403,14 +394,23 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
     if not user: raise HTTPException(404, "User not found")
 
     amount_to_add = transaction.amount
-    # Optional: Bonus Logik hier auch dynamisch machen oder aus Tenant Config laden
     bonus = 0
-    # Beispielhafte harte Logik, sollte idealerweise auch aus tenant.config kommen
+    
+    # DYNAMISCHE BONUS-BERECHNUNG aus Tenant Config
     if transaction.type == "Aufladung":
-        if amount_to_add >= 300: bonus = 150
-        elif amount_to_add >= 150: bonus = 30
-        elif amount_to_add >= 100: bonus = 15
-        elif amount_to_add >= 50: bonus = 5
+        tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+        if tenant and tenant.config and "balance" in tenant.config:
+            top_up_options = tenant.config["balance"].get("top_up_options", [])
+            # Sortiere absteigend, um den höchsten zutreffenden Bonus zu finden
+            # (Annahme: Optionen sind [{"amount": 300, "bonus": 150}, ...])
+            sorted_options = sorted(top_up_options, key=lambda x: x.get("amount", 0), reverse=True)
+            
+            for option in sorted_options:
+                threshold = option.get("amount", 0)
+                bonus_val = option.get("bonus", 0)
+                if amount_to_add >= threshold:
+                    bonus = bonus_val
+                    break
 
     total_change = amount_to_add + bonus
     user.balance += total_change
@@ -422,8 +422,9 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
         booked_by_id=booked_by_id,
         type=transaction.type,
         description=transaction.description,
-        amount=total_change,
-        balance_after=user.balance
+        amount=total_change, # Gesamtbetrag auf dem Konto
+        balance_after=user.balance,
+        bonus=bonus # NEU: Hier wird der Bonus festgeschrieben!
     )
     db.add(db_tx)
     db.flush()
@@ -451,12 +452,19 @@ def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_
     db.add(ach)
     return ach
 
-def get_transactions_for_user(db: Session, user_id: int, tenant_id: int, for_staff: bool = False):
+# Update: Filter für user_id hinzugefügt, um spezifische Kundenhistorien zu laden
+def get_transactions_for_user(db: Session, user_id: int, tenant_id: int, for_staff: bool = False, specific_customer_id: Optional[int] = None):
     query = db.query(models.Transaction).filter(models.Transaction.tenant_id == tenant_id)
     
     if for_staff:
-        query = query.filter(models.Transaction.booked_by_id == user_id)
+        # Mitarbeiter sieht normalerweise seine Buchungen...
+        if specific_customer_id:
+             # ... aber wenn er einen Kunden öffnet, sieht er dessen Historie
+             query = query.filter(models.Transaction.user_id == specific_customer_id)
+        else:
+             query = query.filter(models.Transaction.booked_by_id == user_id)
     else:
+        # Kunden sehen immer nur ihre eigenen
         query = query.filter(models.Transaction.user_id == user_id)
         
     return query.order_by(models.Transaction.date.desc()).all()
@@ -494,7 +502,6 @@ def delete_document(db: Session, document_id: int, tenant_id: int):
 # --- APPOINTMENTS & BOOKINGS ---
 
 def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tenant_id: int):
-    # Einfaches Anlegen eines Termins
     db_appt = models.Appointment(
         tenant_id=tenant_id,
         title=appointment.title,
@@ -510,15 +517,10 @@ def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tena
     return db_appt
 
 def get_appointments(db: Session, tenant_id: int):
-    # Holt alle Termine für einen Tenant.
-    # Optional: Filter nach Datum (z.B. nur zukünftige)
-    # Hier erstmal alle zurückgeben
     appointments = db.query(models.Appointment).filter(
         models.Appointment.tenant_id == tenant_id
     ).order_by(models.Appointment.start_time.asc()).all()
     
-    # Berechne Teilnehmerzahl dynamisch für die API Response
-    # Achtung: Das ist nicht super effizient bei tausenden Terminen, aber ok für KMU Scale
     for appt in appointments:
         appt.participants_count = db.query(models.Booking).filter(
             models.Booking.appointment_id == appt.id,
@@ -534,12 +536,10 @@ def get_appointment(db: Session, appointment_id: int, tenant_id: int):
     ).first()
 
 def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int):
-    # 1. Termin holen & prüfen
     appt = get_appointment(db, appointment_id, tenant_id)
     if not appt:
         raise HTTPException(404, "Appointment not found")
         
-    # 2. Prüfen ob schon gebucht
     existing = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.user_id == user_id
@@ -547,24 +547,20 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     
     if existing:
         if existing.status == 'cancelled':
-            # Re-aktivieren
             existing.status = 'confirmed'
             db.commit()
             return existing
         else:
             raise HTTPException(400, "Already booked or on waitlist")
 
-    # 3. Platz prüfen (optional, eigentlich sollte man Overbooking verhindern)
     current_count = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.status == 'confirmed'
     ).count()
     
     if current_count >= appt.max_participants:
-        # Warteliste-Logik könnte hier hin. Für jetzt einfach Fehler oder Warteliste-Status
         raise HTTPException(400, "Appointment is full")
 
-    # 4. Buchen
     booking = models.Booking(
         tenant_id=tenant_id,
         appointment_id=appointment_id,
@@ -591,7 +587,6 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     return {"ok": True}
 
 def get_participants(db: Session, tenant_id: int, appointment_id: int):
-    # List of bookings with User data loaded
     return db.query(models.Booking).options(joinedload(models.Booking.user)).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.tenant_id == tenant_id

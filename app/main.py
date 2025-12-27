@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException, status, UploadFile, File, R
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 
 from . import crud, models, schemas, auth
@@ -301,12 +301,34 @@ def create_transaction(
 
 @app.get("/api/transactions", response_model=List[schemas.Transaction])
 def read_transactions(
+    user_id: Optional[int] = None, # NEU: Filter für spezifischen Kunden
     db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
-    for_staff = (current_user.role == 'mitarbeiter')
-    return crud.get_transactions_for_user(db, current_user.id, tenant.id, for_staff)
+    query = db.query(models.Transaction).filter(models.Transaction.tenant_id == tenant.id)
+
+    if current_user.role == 'kunde' or current_user.role == 'customer':
+        # Kunden sehen NUR ihre eigenen
+        query = query.filter(models.Transaction.user_id == current_user.id)
+    
+    elif current_user.role == 'mitarbeiter' or current_user.role == 'staff':
+        if user_id:
+             # Mitarbeiter schaut sich spezifischen Kunden an
+             query = query.filter(models.Transaction.user_id == user_id)
+        else:
+             # Mitarbeiter Dashboard: Sieht nur was er selbst gebucht hat
+             query = query.filter(models.Transaction.booked_by_id == current_user.id)
+             
+    elif current_user.role == 'admin':
+        if user_id:
+            # Admin filtert nach Kunde
+            query = query.filter(models.Transaction.user_id == user_id)
+        else:
+            # Admin Dashboard: Sieht ALLES (kein Filter)
+            pass
+
+    return query.order_by(models.Transaction.date.desc()).all()
 
 # --- DOGS ---
 @app.put("/api/dogs/{dog_id}", response_model=schemas.Dog)
