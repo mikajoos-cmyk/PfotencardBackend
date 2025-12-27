@@ -162,8 +162,8 @@ class User(UserBase):
     current_level: Optional[Level] = None
     
     # --- FÜGE DIESE ZEILEN HINZU ---
-    documents: List[Document] = []
-    achievements: List[Achievement] = []
+    documents: List['Document'] = []
+    achievements: List['Achievement'] = []
     # -------------------------------
 
     class Config:
