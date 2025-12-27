@@ -341,7 +341,7 @@ def delete_dog(
 
 # --- DOCUMENTS ---
 @app.post("/api/users/{user_id}/documents", response_model=schemas.Document)
-def upload_document(
+async def upload_document(
     user_id: int,
     upload_file: UploadFile = File(...),
     db: Session = Depends(get_db),
