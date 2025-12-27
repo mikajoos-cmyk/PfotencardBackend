@@ -351,11 +351,22 @@ def upload_document(
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != user_id:
         raise HTTPException(403, "Not authorized")
 
-    file_path = os.path.join(UPLOADS_DIR, f"{tenant.id}_{upload_file.filename}")
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(upload_file.file, buffer)
+    file_content = await upload_file.read()
+    file_path_in_bucket = f"{tenant.id}/{user_id}/{upload_file.filename}"
 
-    return crud.create_document(db, user_id, tenant.id, upload_file.filename, upload_file.content_type, file_path)
+    try:
+        supabase.storage.from_("documents").upload(
+            file=file_content,
+            path=file_path_in_bucket,
+            file_options={"content-type": upload_file.content_type, "upsert": "true"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+    # In der DB speichern wir jetzt den Pfad im Bucket, nicht den lokalen Pfad
+    return crud.create_document(db, user_id, tenant.id, upload_file.filename, upload_file.content_type, file_path_in_bucket)
+
+from fastapi.responses import RedirectResponse 
 
 @app.get("/api/documents/{document_id}")
 def read_document(
@@ -365,13 +376,18 @@ def read_document(
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     doc = crud.get_document(db, document_id, tenant.id)
-    if not doc or not os.path.exists(doc.file_path):
+    if not doc:
         raise HTTPException(404, "Document not found")
-        
+
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != doc.user_id:
         raise HTTPException(403, "Not authorized")
-        
-    return FileResponse(path=doc.file_path, filename=doc.file_name)
+
+    # Generiere eine temporäre URL (gültig für 60 Sekunden)
+    try:
+        res = supabase.storage.from_("documents").create_signed_url(doc.file_path, 60)
+        return RedirectResponse(res["signedURL"])
+    except Exception as e:
+         raise HTTPException(404, "File not found in storage")
 
 @app.delete("/api/documents/{document_id}")
 def delete_document(
@@ -386,9 +402,9 @@ def delete_document(
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != doc.user_id:
         raise HTTPException(403, "Not authorized")
 
-    if os.path.exists(doc.file_path):
-        os.remove(doc.file_path)
-        
+    if doc.file_path:
+        supabase.storage.from_("documents").remove([doc.file_path])
+    
     crud.delete_document(db, document_id, tenant.id)
     return {"ok": True}
 
@@ -401,7 +417,7 @@ os.makedirs(PUBLIC_UPLOADS_DIR, exist_ok=True)
 app.mount("/static/uploads", StaticFiles(directory=PUBLIC_UPLOADS_DIR), name="public_uploads")
 
 @app.post("/api/upload/image")
-def upload_public_image(
+async def upload_public_image( # async hinzufügen für await .read()
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
@@ -409,19 +425,26 @@ def upload_public_image(
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
          raise HTTPException(status_code=403, detail="Not authorized")
-         
-    # Unique filename
+
     file_ext = os.path.splitext(file.filename)[1]
     safe_name = f"{tenant.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}{file_ext}"
-    file_path = os.path.join(PUBLIC_UPLOADS_DIR, safe_name)
-    
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
-    # Return URL (relative or absolute)
-    # Assuming standard setup: /static/uploads/...
-    return {"url": f"/static/uploads/{safe_name}"}
 
+    file_content = await file.read()
+
+    try:
+        supabase.storage.from_("public_uploads").upload(
+            path=safe_name,
+            file=file_content,
+            file_options={"content-type": file.content_type, "upsert": "true"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Storage Error: {str(e)}")
+
+    # URL zurückgeben (Nimm die Public URL von Supabase)
+    project_url = settings.SUPABASE_URL
+    public_url = f"{project_url}/storage/v1/object/public/public_uploads/{safe_name}"
+
+    return {"url": public_url}
 
 # --- APPOINTMENTS & BOOKINGS ---
 
