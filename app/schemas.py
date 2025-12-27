@@ -150,6 +150,8 @@ class UserStatusUpdate(BaseModel):
     is_vip: Optional[bool] = None
     is_expert: Optional[bool] = None
 
+# In app/schemas.py
+
 class User(UserBase):
     id: int
     tenant_id: int
@@ -158,6 +160,11 @@ class User(UserBase):
     
     dogs: List[Dog] = []
     current_level: Optional[Level] = None
+    
+    # --- FÜGE DIESE ZEILEN HINZU ---
+    documents: List[Document] = []
+    achievements: List[Achievement] = []
+    # -------------------------------
 
     class Config:
         from_attributes = True

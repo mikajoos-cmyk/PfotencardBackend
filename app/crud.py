@@ -159,7 +159,12 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
 # --- USER ---
 
 def get_user(db: Session, user_id: int, tenant_id: int):
-    return db.query(models.User).filter(
+    return db.query(models.User).options(
+        joinedload(models.User.documents),
+        joinedload(models.User.achievements),
+        joinedload(models.User.dogs),
+        joinedload(models.User.current_level)
+    ).filter(
         models.User.id == user_id, 
         models.User.tenant_id == tenant_id
     ).first()
@@ -171,7 +176,13 @@ def get_user_by_email(db: Session, email: str, tenant_id: int):
     ).first()
 
 def get_users(db: Session, tenant_id: int, skip: int = 0, limit: int = 100, portfolio_of_user_id: Optional[int] = None):
-    query = db.query(models.User).filter(models.User.tenant_id == tenant_id)
+    # Wir laden documents und achievements direkt mit (Eager Loading)
+    query = db.query(models.User).options(
+        joinedload(models.User.documents),
+        joinedload(models.User.achievements),
+        joinedload(models.User.dogs),
+        joinedload(models.User.current_level)
+    ).filter(models.User.tenant_id == tenant_id)
     
     if portfolio_of_user_id:
         customer_ids = db.query(models.Transaction.user_id).filter(
