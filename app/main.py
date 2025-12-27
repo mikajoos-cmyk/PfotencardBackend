@@ -525,6 +525,14 @@ def book_appointment(
     # Jeder Kunde darf buchen (evtl. Level-Checks hier später)
     return crud.create_booking(db, tenant.id, appointment_id, current_user.id)
 
+@app.get("/api/users/me/bookings", response_model=List[schemas.Booking])
+def read_my_bookings(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    return crud.get_user_bookings(db, tenant.id, current_user.id)
+
 @app.delete("/api/appointments/{appointment_id}/book")
 def cancel_appointment_booking(
     appointment_id: int,

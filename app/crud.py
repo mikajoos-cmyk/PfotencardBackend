@@ -603,6 +603,13 @@ def get_participants(db: Session, tenant_id: int, appointment_id: int):
         models.Booking.tenant_id == tenant_id
     ).all()
 
+def get_user_bookings(db: Session, tenant_id: int, user_id: int):
+    return db.query(models.Booking).filter(
+        models.Booking.user_id == user_id,
+        models.Booking.tenant_id == tenant_id,
+        models.Booking.status == 'confirmed'
+    ).all()
+
 def toggle_attendance(db: Session, tenant_id: int, booking_id: int):
     booking = db.query(models.Booking).filter(
         models.Booking.id == booking_id,
