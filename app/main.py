@@ -17,8 +17,6 @@ import secrets
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
-UPLOADS_DIR = "uploads"
-os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 # Supabase Client initialisieren
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
@@ -341,7 +339,7 @@ def delete_dog(
 
 # --- DOCUMENTS ---
 @app.post("/api/users/{user_id}/documents", response_model=schemas.Document)
-async def upload_document(
+async def upload_document(  # <--- WICHTIG: 'async' hinzugefügt
     user_id: int,
     upload_file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -349,22 +347,35 @@ async def upload_document(
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != user_id:
-        raise HTTPException(403, "Not authorized")
+        raise HTTPException(status_code=403, detail="Not authorized")
 
+    # 1. Dateiinhalt lesen (jetzt erlaubt, da async)
     file_content = await upload_file.read()
+    
+    # 2. Pfad für Supabase Storage definieren
     file_path_in_bucket = f"{tenant.id}/{user_id}/{upload_file.filename}"
 
+    # 3. Direkt zu Supabase hochladen (statt lokal speichern)
     try:
         supabase.storage.from_("documents").upload(
-            file=file_content,
             path=file_path_in_bucket,
+            file=file_content,
             file_options={"content-type": upload_file.content_type, "upsert": "true"}
         )
     except Exception as e:
+        print(f"Upload Error: {e}")
+        # Wenn der Upload fehlschlägt, brechen wir ab
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-    # In der DB speichern wir jetzt den Pfad im Bucket, nicht den lokalen Pfad
-    return crud.create_document(db, user_id, tenant.id, upload_file.filename, upload_file.content_type, file_path_in_bucket)
+    # 4. Datenbank-Eintrag erstellen (Speichert den Bucket-Pfad, nicht den lokalen Pfad)
+    return crud.create_document(
+        db, 
+        user_id, 
+        tenant.id, 
+        upload_file.filename, 
+        upload_file.content_type, 
+        file_path_in_bucket
+    )
 
 from fastapi.responses import RedirectResponse 
 
@@ -378,13 +389,14 @@ def read_document(
     doc = crud.get_document(db, document_id, tenant.id)
     if not doc:
         raise HTTPException(404, "Document not found")
-
+        
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != doc.user_id:
         raise HTTPException(403, "Not authorized")
-
-    # Generiere eine temporäre URL (gültig für 60 Sekunden)
+        
+    # Signierte URL von Supabase holen (gültig für 60 Sekunden)
     try:
         res = supabase.storage.from_("documents").create_signed_url(doc.file_path, 60)
+        # Redirect zur Datei bei Supabase
         return RedirectResponse(res["signedURL"])
     except Exception as e:
          raise HTTPException(404, "File not found in storage")
@@ -411,13 +423,8 @@ def delete_document(
 # --- PUBLIC IMAGE UPLOAD (Logos, Badges) ---
 from fastapi.staticfiles import StaticFiles
 
-PUBLIC_UPLOADS_DIR = "public_uploads"
-os.makedirs(PUBLIC_UPLOADS_DIR, exist_ok=True)
-
-app.mount("/static/uploads", StaticFiles(directory=PUBLIC_UPLOADS_DIR), name="public_uploads")
-
 @app.post("/api/upload/image")
-async def upload_public_image( # async hinzufügen für await .read()
+async def upload_public_image(  # <--- WICHTIG: 'async' hinzugefügt
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
@@ -425,12 +432,14 @@ async def upload_public_image( # async hinzufügen für await .read()
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
          raise HTTPException(status_code=403, detail="Not authorized")
-
+         
     file_ext = os.path.splitext(file.filename)[1]
     safe_name = f"{tenant.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}{file_ext}"
-
+    
+    # 1. Inhalt lesen
     file_content = await file.read()
-
+    
+    # 2. Upload in 'public_uploads' Bucket
     try:
         supabase.storage.from_("public_uploads").upload(
             path=safe_name,
@@ -439,11 +448,11 @@ async def upload_public_image( # async hinzufügen für await .read()
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Storage Error: {str(e)}")
-
-    # URL zurückgeben (Nimm die Public URL von Supabase)
+        
+    # 3. Öffentliche URL generieren
     project_url = settings.SUPABASE_URL
     public_url = f"{project_url}/storage/v1/object/public/public_uploads/{safe_name}"
-
+    
     return {"url": public_url}
 
 # --- APPOINTMENTS & BOOKINGS ---
