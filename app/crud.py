@@ -160,6 +160,17 @@ def get_user(db: Session, user_id: int, tenant_id: int):
         models.User.tenant_id == tenant_id
     ).first()
 
+def get_user_by_auth_id(db: Session, auth_id: str, tenant_id: int):
+    return db.query(models.User).options(
+        joinedload(models.User.documents),
+        joinedload(models.User.achievements),
+        joinedload(models.User.dogs),
+        joinedload(models.User.current_level)
+    ).filter(
+        models.User.auth_id == auth_id,
+        models.User.tenant_id == tenant_id
+    ).first()
+
 def get_user_by_email(db: Session, email: str, tenant_id: int):
     return db.query(models.User).filter(
         models.User.email == email, 

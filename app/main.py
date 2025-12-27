@@ -217,6 +217,22 @@ def read_users(
 
     return crud.get_users(db, tenant.id, skip=skip, limit=limit)
 
+@app.get("/api/users/by-auth/{auth_id}", response_model=schemas.User)
+def read_user_by_auth(
+    auth_id: str,
+    db: Session = Depends(get_db),
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+    tenant: models.Tenant = Depends(auth.get_current_tenant)
+):
+    db_user = crud.get_user_by_auth_id(db, auth_id, tenant.id)
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user.role in ['admin', 'mitarbeiter'] or current_user.auth_id == auth_id:
+        return db_user
+    
+    raise HTTPException(status_code=403, detail="Not authorized")
+
 @app.get("/api/users/{user_id}", response_model=schemas.User)
 def read_user(
     user_id: int,
