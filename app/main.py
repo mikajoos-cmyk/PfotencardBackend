@@ -377,7 +377,6 @@ async def upload_document(  # <--- WICHTIG: 'async' hinzugefügt
         file_path_in_bucket
     )
 
-from fastapi.responses import RedirectResponse 
 
 @app.get("/api/documents/{document_id}")
 def read_document(
@@ -396,8 +395,8 @@ def read_document(
     # Signierte URL von Supabase holen (gültig für 60 Sekunden)
     try:
         res = supabase.storage.from_("documents").create_signed_url(doc.file_path, 60)
-        # Redirect zur Datei bei Supabase
-        return RedirectResponse(res["signedURL"])
+        # ÄNDERUNG: Wir geben die URL als JSON zurück, statt direkt umzuleiten
+        return {"url": res["signedURL"]}
     except Exception as e:
          raise HTTPException(404, "File not found in storage")
 
