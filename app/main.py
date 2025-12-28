@@ -155,10 +155,13 @@ def register_tenant(
         if not admin_data.password:
             admin_data.password = secrets.token_urlsafe(16)
 
-        auth_res = supabase.auth.admin.create_user({
+        auth_res = supabase.auth.sign_up({
             "email": admin_data.email,
             "password": admin_data.password,
-            "email_confirm": True
+            "options": {
+                "email_redirect_to": f"https://{tenant_data.subdomain}.pfotencard.de/auth/callback",
+                "data": {"school_name": tenant_data.name}
+            }
         })
         if auth_res.user:
             auth_id = auth_res.user.id
@@ -192,11 +195,13 @@ def create_user(
         if not user.password:
             user.password = secrets.token_urlsafe(16)
 
-        auth_res = supabase.auth.admin.create_user({
-            "email": user.email,
-            "password": user.password,
-            "email_confirm": True
-        })
+        auth_res = supabase.auth.admin.invite_user_by_email(
+            user.email,
+            {
+                "redirectTo": f"https://{tenant.subdomain}.pfotencard.de/update-password",
+                "data": {"school_name": tenant.name}
+            }
+        )
         if auth_res.user:
             auth_id = auth_res.user.id
     except Exception as e:

@@ -528,15 +528,27 @@ def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tena
     return db_appt
 
 def get_appointments(db: Session, tenant_id: int):
-    appointments = db.query(models.Appointment).filter(
-        models.Appointment.tenant_id == tenant_id
-    ).order_by(models.Appointment.start_time.asc()).all()
-    
-    for appt in appointments:
-        appt.participants_count = db.query(models.Booking).filter(
-            models.Booking.appointment_id == appt.id,
+    results = db.query(
+        models.Appointment,
+        func.count(models.Booking.id).label('count')
+    ).outerjoin(
+        models.Booking,
+        and_(
+            models.Booking.appointment_id == models.Appointment.id,
             models.Booking.status == 'confirmed'
-        ).count()
+        )
+    ).filter(
+        models.Appointment.tenant_id == tenant_id
+    ).group_by(
+        models.Appointment.id
+    ).order_by(
+        models.Appointment.start_time.asc()
+    ).all()
+    
+    appointments = []
+    for appt, count in results:
+        appt.participants_count = count
+        appointments.append(appt)
         
     return appointments
 
