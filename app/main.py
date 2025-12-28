@@ -159,8 +159,13 @@ def register_tenant(
             "email": admin_data.email,
             "password": admin_data.password,
             "options": {
-                "email_redirect_to": f"https://{tenant_data.subdomain}.pfotencard.de/auth/callback",
-                "data": {"school_name": tenant_data.name}
+                "data": {
+                    "branding_name": "Pfotencard",
+                    "branding_logo": "https://pfotencard.de/logo.png",
+                    "branding_color": "#22C55E",
+                    "school_name": "Pfotencard"
+                },
+                "email_redirect_to": f"https://{tenant_data.subdomain}.pfotencard.de/auth/callback"
             }
         })
         if auth_res.user:
@@ -172,6 +177,19 @@ def register_tenant(
     crud.create_user(db, admin_data, new_tenant.id, auth_id=auth_id)
     
     return new_tenant
+
+# --- USER REGISTRATION ---
+@app.post("/api/register", response_model=schemas.User)
+def register_user(
+    user: schemas.UserCreate, 
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant)
+):
+    db_user = crud.get_user_by_email(db, email=user.email, tenant_id=tenant.id)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered in this school")
+    
+    return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=str(user.auth_id) if user.auth_id else None)
 
 # --- USERS ---
 @app.post("/api/users", response_model=schemas.User)
@@ -191,15 +209,20 @@ def create_user(
     # In Supabase Auth anlegen
     auth_id = None
     try:
-        # Passwort generieren falls nicht vorhanden
-        if not user.password:
-            user.password = secrets.token_urlsafe(16)
+        tenant_branding = tenant.config.get("branding", {})
+        branding_logo = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
+        branding_color = tenant_branding.get("primary_color") or "#22C55E"
 
         auth_res = supabase.auth.admin.invite_user_by_email(
             user.email,
             {
-                "redirectTo": f"https://{tenant.subdomain}.pfotencard.de/update-password",
-                "data": {"school_name": tenant.name}
+                "data": {
+                    "branding_name": tenant.name,
+                    "branding_logo": tenant.config.get("branding", {}).get("logo_url", ""),
+                    "branding_color": tenant.config.get("branding", {}).get("primary_color", "#22C55E"),
+                    "school_name": tenant.name
+                },
+                "redirect_to": f"https://{tenant.subdomain}.pfotencard.de/update-password"
             }
         )
         if auth_res.user:

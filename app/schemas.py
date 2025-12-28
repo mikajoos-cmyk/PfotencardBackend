@@ -132,6 +132,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: Optional[str] = None 
+    auth_id: Optional[UUID] = None
     dogs: List[DogCreate] = []
 
 class UserUpdate(BaseModel):
