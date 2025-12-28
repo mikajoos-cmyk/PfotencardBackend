@@ -301,6 +301,27 @@ def read_user_by_auth(
     
     raise HTTPException(status_code=403, detail="Not authorized")
 
+# Public endpoint for QR code access (no authentication required)
+@app.get("/api/public/users/{user_id}", response_model=schemas.User)
+def read_user_public(
+    user_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant)
+):
+    """
+    Public endpoint to access customer data via QR code without authentication.
+    Only returns basic customer information.
+    """
+    db_user = crud.get_user(db, user_id, tenant.id)
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Only allow access to customer accounts, not admin/staff
+    if db_user.role not in ['customer', 'kunde']:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    return db_user
+
 @app.get("/api/users/{user_id}", response_model=schemas.User)
 def read_user(
     user_id: int,
