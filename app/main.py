@@ -151,28 +151,37 @@ def register_tenant(
     # 2. Admin in Supabase Auth anlegen
     auth_id = None
     try:
-        # Sicherstellen, dass ein Passwort da ist
         if not admin_data.password:
             admin_data.password = secrets.token_urlsafe(16)
+
+        # --- DEBUG LOG SUPABASE ---
+        print("DEBUG: Starte Supabase Sign Up für Admin...")
+        redirect_url = f"https://{tenant_data.subdomain}.pfotencard.de/auth/callback"
+        print(f"DEBUG: Redirect URL: {redirect_url}")
+        
+        metadata = {
+            "branding_name": "Pfotencard",
+            "branding_logo": "https://pfotencard.de/logo.png", # Sicherstellen dass das Bild existiert!
+            "branding_color": "#22C55E",
+            "school_name": "Pfotencard"
+        }
+        print(f"DEBUG: Metadata: {metadata}")
+        # --- DEBUG LOG END ---
 
         auth_res = supabase.auth.sign_up({
             "email": admin_data.email,
             "password": admin_data.password,
             "options": {
-                "data": {
-                    "branding_name": "Pfotencard",
-                    "branding_logo": "https://pfotencard.de/logo.png",
-                    "branding_color": "#22C55E",
-                    "school_name": "Pfotencard"
-                },
-                "email_redirect_to": f"https://{tenant_data.subdomain}.pfotencard.de/auth/callback"
+                "data": metadata, # Hier werden die Daten übergeben!
+                "email_redirect_to": redirect_url
             }
         })
         if auth_res.user:
             auth_id = auth_res.user.id
+            print(f"DEBUG: Supabase User erstellt mit ID: {auth_id}")
+            
     except Exception as e:
-        print(f"DEBUG: Supabase Registration skipped or failed: {e}")
-
+        print(f"DEBUG: FEHLER bei Supabase Registration: {e}")
     admin_data.role = "admin"
     crud.create_user(db, admin_data, new_tenant.id, auth_id=auth_id)
     
@@ -185,10 +194,11 @@ def register_user(
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
+    print(23232323)
     db_user = crud.get_user_by_email(db, email=user.email, tenant_id=tenant.id)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered in this school")
-    
+    print(23235455435)
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=str(user.auth_id) if user.auth_id else None)
 
 # --- USERS ---
@@ -199,12 +209,14 @@ def create_user(
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
+    print(23232342342423423)
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-
+    print(33332333)
     db_user = crud.get_user_by_email(db, email=user.email, tenant_id=tenant.id)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered in this school")
+    print(44444444)
     
     # In Supabase Auth anlegen
     auth_id = None
@@ -212,23 +224,51 @@ def create_user(
         tenant_branding = tenant.config.get("branding", {})
         branding_logo = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
         branding_color = tenant_branding.get("primary_color") or "#22C55E"
+        
+        metadata = {
+            "branding_name": tenant.name,
+            "branding_logo": branding_logo,
+            "branding_color": branding_color,
+            "school_name": tenant.name
+        }
+        print("--------------------------------------------------")
+        print(f"DEBUG: Sende Invite für {user.email}")
+        print(f"DEBUG: RedirectTo URL: https://{tenant.subdomain}.pfotencard.de/update-password")
+        print(f"DEBUG: Metadata Payload: {metadata}")
+        print("--------------------------------------------------")
+        # Versuch 1: Einladen
+        try:
+            auth_res = supabase.auth.admin.invite_user_by_email(
+                user.email,
+                {
+                    "data": metadata,
+                    "redirectTo": f"https://{tenant.subdomain}.pfotencard.de/update-password"
+                }
+            )
+            if auth_res.user:
+                auth_id = auth_res.user.id
+        except Exception as invite_error:
+            # Fallback: Wenn User schon existiert, Auth-ID suchen und Metadaten updaten
+            print(f"Invite failed (user likely exists): {invite_error}. Updating metadata...")
+            
+            # User ID suchen
+            users_res = supabase.auth.admin.list_users()
+            existing_user = next((u for u in users_res.data.users if u.email == user.email), None) # Access .data.users
+            
+            if existing_user:
+                auth_id = existing_user.id
+                # Metadaten zwingend aktualisieren (für Branding-Wechsel)
+                supabase.auth.admin.update_user_by_id(
+                    auth_id,
+                    {"user_metadata": metadata}
+                )
+            else:
+                raise invite_error
 
-        auth_res = supabase.auth.admin.invite_user_by_email(
-            user.email,
-            {
-                "data": {
-                    "branding_name": tenant.name,
-                    "branding_logo": tenant.config.get("branding", {}).get("logo_url", ""),
-                    "branding_color": tenant.config.get("branding", {}).get("primary_color", "#22C55E"),
-                    "school_name": tenant.name
-                },
-                "redirect_to": f"https://{tenant.subdomain}.pfotencard.de/update-password"
-            }
-        )
-        if auth_res.user:
-            auth_id = auth_res.user.id
     except Exception as e:
-        print(f"DEBUG: Supabase User Registration failed: {e}")
+        print(f"DEBUG: Supabase User Sync failed completely: {e}")
+        # Hier evtl. Fehler werfen, damit kein 'toter' lokaler User entsteht
+        # raise HTTPException(status_code=500, detail="Could not create authentication user")
 
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=auth_id)
 
