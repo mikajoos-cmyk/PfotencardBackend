@@ -389,18 +389,20 @@ class NewsPost(NewsPostBase):
 
 class ChatMessageBase(BaseModel):
     content: str
-    receiver_id: int # An wen geht die Nachricht?
+    # NEU: Optionale Datei-Felder
+    file_url: Optional[str] = None
+    file_type: Optional[str] = None
+    file_name: Optional[str] = None
 
 class ChatMessageCreate(ChatMessageBase):
-    pass
+    receiver_id: int
 
-class ChatMessage(BaseModel):
+class ChatMessage(ChatMessageBase):
     id: int
     tenant_id: int
     sender_id: int
     receiver_id: int
-    content: str
-    is_read: bool = False
+    is_read: bool
     created_at: datetime
 
     class Config:

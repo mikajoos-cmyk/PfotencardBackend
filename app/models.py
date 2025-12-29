@@ -289,6 +289,12 @@ class ChatMessage(Base):
     content = Column(String, nullable=False)
     is_read = Column(Boolean, default=False)
     
+    # --- NEU: Datei-Anhang ---
+    file_url = Column(String(512), nullable=True)
+    file_type = Column(String(50), nullable=True) # z.B. 'image', 'document'
+    file_name = Column(String(255), nullable=True)
+    # -------------------------
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="chat_messages")

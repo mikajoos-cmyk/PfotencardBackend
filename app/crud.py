@@ -775,7 +775,10 @@ def create_chat_message(db: Session, msg: schemas.ChatMessageCreate, sender_id: 
         tenant_id=tenant_id,
         sender_id=sender_id,
         receiver_id=msg.receiver_id,
-        content=msg.content
+        content=msg.content,
+        file_url=msg.file_url,
+        file_type=msg.file_type,
+        file_name=msg.file_name
     )
     db.add(db_msg)
     db.commit()
