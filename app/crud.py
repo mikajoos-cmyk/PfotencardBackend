@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import flag_modified
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, case
 from . import models, schemas, auth
 from fastapi import HTTPException
 import secrets
@@ -797,6 +797,57 @@ def get_chat_history(db: Session, tenant_id: int, user1_id: int, user2_id: int, 
     ).order_by(models.ChatMessage.created_at.asc()).limit(limit).all()
     
     return messages
+
+def get_chat_conversations_for_user(db: Session, user: models.User):
+    """
+    Ermittelt alle Gesprächspartner für den aktuellen User.
+    """
+    # 1. Partner IDs ermitteln (User, mit denen ich interagiert habe)
+    sent_to = db.query(models.ChatMessage.receiver_id).filter(
+        models.ChatMessage.sender_id == user.id
+    )
+    received_from = db.query(models.ChatMessage.sender_id).filter(
+        models.ChatMessage.receiver_id == user.id
+    )
+    
+    partner_ids_query = sent_to.union(received_from)
+    
+    partners = db.query(models.User).filter(
+        models.User.id.in_(partner_ids_query)
+    ).all()
+    
+    results = []
+    # Workaround um datetime import fehler zu vermeiden falls nicht vorhanden, 
+    # wir nutzen einfach None check beim sortieren.
+    from datetime import datetime
+    
+    for partner in partners:
+        # Letzte Nachricht holen
+        last_msg = db.query(models.ChatMessage).filter(
+            or_(
+                and_(models.ChatMessage.sender_id == user.id, models.ChatMessage.receiver_id == partner.id),
+                and_(models.ChatMessage.sender_id == partner.id, models.ChatMessage.receiver_id == user.id)
+            )
+        ).order_by(models.ChatMessage.created_at.desc()).first()
+        
+        # Ungelesene zählen (nur empfangene)
+        unread = db.query(models.ChatMessage).filter(
+            models.ChatMessage.sender_id == partner.id,
+            models.ChatMessage.receiver_id == user.id,
+            models.ChatMessage.is_read == False
+        ).count()
+        
+        results.append({
+            "user": partner,
+            "last_message": last_msg,
+            "unread_count": unread
+        })
+    
+    # Sortieren nach Datum der letzten Nachricht (neueste oben)
+    # Verwende eine Fallback-Zeit für Sortierung wenn keine Nachricht da ist (sollte theoretisch nicht passieren wenn partners via messages gefunden wurden)
+    results.sort(key=lambda x: x["last_message"].created_at if x["last_message"] else datetime.min, reverse=True)
+    
+    return results
 
 def mark_messages_as_read(db: Session, tenant_id: int, user_id: int, other_user_id: int):
     """

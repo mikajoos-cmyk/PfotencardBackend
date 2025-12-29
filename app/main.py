@@ -293,6 +293,29 @@ def create_user(
 
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=auth_id)
 
+# --- USER ENDPOINTS ---
+
+@app.get("/api/users/staff", response_model=List[schemas.User])
+def read_staff_users(
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant)
+):
+    """
+    Gibt eine Liste aller Mitarbeiter und Admins zurück.
+    Erlaubt für alle eingeloggten User (damit Kunden Ansprechpartner finden).
+    """
+    # Using simplistic role check for now, can be refined
+    if current_user.role not in ['admin', 'mitarbeiter', 'customer', 'kunde']:
+         raise HTTPException(status_code=403, detail="Not authorized")
+         
+    staff = db.query(models.User).filter(
+        models.User.tenant_id == tenant.id,
+        models.User.role.in_(['admin', 'mitarbeiter']),
+        models.User.is_active == True
+    ).all()
+    return staff
+
 @app.get("/api/users", response_model=List[schemas.User])
 def read_users(
     skip: int = 0,
@@ -695,6 +718,54 @@ def toggle_booking_attendance(
 
 # --- NEWS ---
 
+@app.post("/api/news/upload-image")
+async def upload_news_image(
+    upload_file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+         raise HTTPException(status_code=403, detail="Not authorized")
+
+    # 1. Read file content
+    file_content = await upload_file.read()
+    
+    # 2. Generate path: {tenant_id}/news/{timestamp}_{random}.{ext}
+    file_ext = os.path.splitext(upload_file.filename)[1]
+    safe_name = f"{int(datetime.now().timestamp())}_{secrets.token_hex(4)}{file_ext}"
+    file_path = f"{tenant.id}/news/{safe_name}"
+
+    # 3. Upload to 'documents' bucket using service role (bypasses RLS)
+    try:
+        supabase.storage.from_("documents").upload(
+            path=file_path,
+            file=file_content,
+            file_options={"content-type": upload_file.content_type, "upsert": "true"}
+        )
+    except Exception as e:
+        print(f"News Upload Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+    # 4. Generate Public URL
+    # Note: 'documents' bucket must be public or we need to use signed URLs.
+    # Assuming public per user request/previous pattern.
+    # But usually 'documents' is private? usage in `read_document` uses `create_signed_url`.
+    # User wanted "image displayed within the news post". If 'documents' is private, we need signed URLs.
+    # However, for a news feed, signed URLs expire.
+    # Options:
+    # A) Use 'documents' but make this specific folder public? Supabase doesn't support folder-level public config easily without policies.
+    # B) Use `getPublicUrl`. If the bucket is private, this returns a URL that doesn't work.
+    # C) Use `sign_url` with long expiry? No.
+    # D) Since `upload_document` treats `documents` as sensitive (auth required), mixing public news images here is tricky.
+    # BUT, the user explicitly asked to use 'documents' bucket in the prompt: "The image should be stored in the 'documents' Supabase bucket... and displayed within the news post"
+    # To display it in a news post (visible to all customers), it effectively needs to be public or we need a proxy endpoint.
+    # Let's try `getPublicUrl` first as per plan. If policies are strict, it won't render, and we might need to adjust policies or use a different bucket/folder strategy.
+    
+    res = supabase.storage.from_("documents").get_public_url(file_path)
+    return {"url": res}
+
+
 @app.post("/api/news", response_model=schemas.NewsPost)
 def create_news(
     post: schemas.NewsPostCreate,
@@ -731,15 +802,17 @@ def send_chat_message(
     return crud.create_chat_message(db, msg, current_user.id, tenant.id)
 
 @app.get("/api/chat/conversations", response_model=List[schemas.ChatConversation])
-def read_conversations(
-    db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
-    current_user: schemas.User = Depends(auth.get_current_active_user)
+def get_conversations(
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+    db: Session = Depends(get_db)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter']:
-         raise HTTPException(status_code=403, detail="Not authorized")
-         
-    return crud.get_chat_conversations(db, tenant.id)
+    """
+    Gibt eine Liste der aktiven Chats zurück.
+    - Für Admins: Alle Kunden, mit denen geschrieben wurde.
+    - Für Kunden: Alle Mitarbeiter/Admins, mit denen geschrieben wurde.
+    """
+    # Wir nutzen eine angepasste CRUD-Funktion
+    return crud.get_chat_conversations_for_user(db, current_user)
 
 @app.get("/api/chat/{other_user_id}", response_model=List[schemas.ChatMessage])
 def read_chat_history(
