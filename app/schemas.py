@@ -363,3 +363,51 @@ class NewsletterSubscriber(NewsletterSubscriberBase):
 
     class Config:
         from_attributes = True
+# --- NEWS ---
+
+class NewsPostBase(BaseModel):
+    title: str
+    content: str
+    image_url: Optional[str] = None
+
+class NewsPostCreate(NewsPostBase):
+    pass
+
+class NewsPost(NewsPostBase):
+    id: int
+    tenant_id: int
+    created_by_id: int
+    created_at: datetime
+    
+    # Optional: Author Display
+    author_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+# --- CHAT ---
+
+class ChatMessageBase(BaseModel):
+    content: str
+    receiver_id: int # An wen geht die Nachricht?
+
+class ChatMessageCreate(ChatMessageBase):
+    pass
+
+class ChatMessage(BaseModel):
+    id: int
+    tenant_id: int
+    sender_id: int
+    receiver_id: int
+    content: str
+    is_read: bool = False
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class ChatConversation(BaseModel):
+    """Für die Admin-Übersicht der Chats"""
+    user: User # Der Kunde
+    last_message: Optional[ChatMessage] = None
+    unread_count: int = 0

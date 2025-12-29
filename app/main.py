@@ -692,3 +692,88 @@ def toggle_booking_attendance(
          
     return crud.toggle_attendance(db, tenant.id, booking_id)
 
+
+# --- NEWS ---
+
+@app.post("/api/news", response_model=schemas.NewsPost)
+def create_news(
+    post: schemas.NewsPostCreate,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+         raise HTTPException(status_code=403, detail="Not authorized")
+         
+    return crud.create_news_post(db, post, current_user.id, tenant.id)
+
+@app.get("/api/news", response_model=List[schemas.NewsPost])
+def read_news(
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user) # Authentication required
+):
+    return crud.get_news_posts(db, tenant.id, skip, limit)
+
+# --- CHAT ---
+
+@app.post("/api/chat", response_model=schemas.ChatMessage)
+def send_chat_message(
+    msg: schemas.ChatMessageCreate,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    # Security: Customer can send to anyone? Or just admins?
+    # For now allow all, but ensuring tenant isolation is in CRUD.
+    return crud.create_chat_message(db, msg, current_user.id, tenant.id)
+
+@app.get("/api/chat/conversations", response_model=List[schemas.ChatConversation])
+def read_conversations(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+         raise HTTPException(status_code=403, detail="Not authorized")
+         
+    return crud.get_chat_conversations(db, tenant.id)
+
+@app.get("/api/chat/{other_user_id}", response_model=List[schemas.ChatMessage])
+def read_chat_history(
+    other_user_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    # Access Control:
+    # Admin/Mitarbeiter can read any chat involving them OR any chat if they are investigating? (Usually just their own or support view)
+    # Customer can only read chats where they are participant.
+    
+    if current_user.role in ['admin', 'mitarbeiter']:
+        # Admin views chat with a specific customer
+        pass 
+    elif current_user.id == other_user_id:
+        # Chat with self? Allowed I guess.
+        pass
+    else:
+        # For customer, check if they are requesting chat with an admin/staff?
+        # Ideally we just check if they are participant in returned messages, but for fetching we need to know permission.
+        # Strict rule: You can only fetch history if you are one of the parties.
+        pass
+        
+    # The CRUD fetches messages where (Sender=Me AND Receiver=Other) OR (Sender=Other AND Receiver=Me)
+    # So effectively restricted to conversation between Me and Other.
+    return crud.get_chat_history(db, tenant.id, current_user.id, other_user_id)
+
+@app.post("/api/chat/{other_user_id}/read")
+def mark_chat_read(
+    other_user_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    crud.mark_messages_as_read(db, tenant.id, current_user.id, other_user_id)
+    return {"ok": True}

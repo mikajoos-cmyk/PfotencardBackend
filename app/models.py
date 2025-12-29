@@ -28,6 +28,8 @@ class Tenant(Base):
     transactions = relationship("Transaction", back_populates="tenant", cascade="all, delete-orphan")
     appointments = relationship("Appointment", back_populates="tenant", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="tenant", cascade="all, delete-orphan")
+    news_posts = relationship("NewsPost", back_populates="tenant", cascade="all, delete-orphan")
+    chat_messages = relationship("ChatMessage", back_populates="tenant", cascade="all, delete-orphan")
 
 
 # --- 2. KONFIGURATION (Leistungen & Level) ---
@@ -255,4 +257,41 @@ class NewsletterSubscriber(Base):
     # Quelle der Anmeldung (z.B. 'marketing_site', 'school_registration')
     source = Column(String(50), nullable=True) 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    unsubscribed_at = Column(DateTime(timezone=True), nullable=True)
+
+# --- NEWS & CHAT ENTWICKLUNG ---
+
+class NewsPost(Base):
+    __tablename__ = 'news_posts'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    created_by_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    
+    title = Column(String(255), nullable=False)
+    content = Column(String, nullable=False) # Text Content
+    image_url = Column(String(512), nullable=True) # Optionales Bild
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    tenant = relationship("Tenant", back_populates="news_posts")
+    author = relationship("User", foreign_keys=[created_by_id])
+
+
+class ChatMessage(Base):
+    __tablename__ = 'chat_messages'
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    
+    sender_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    receiver_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    
+    content = Column(String, nullable=False)
+    is_read = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    tenant = relationship("Tenant", back_populates="chat_messages")
+    sender = relationship("User", foreign_keys=[sender_id])
+    receiver = relationship("User", foreign_keys=[receiver_id])
+

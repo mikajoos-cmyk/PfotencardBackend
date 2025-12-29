@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import flag_modified
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, or_
 from . import models, schemas, auth
 from fastapi import HTTPException
 import secrets
@@ -737,4 +737,133 @@ def unsubscribe_newsletter(db: Session, email: str):
         db.commit()
         db.refresh(subscriber)
         return True
-    return False
+
+# --- NEWS ---
+
+def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, tenant_id: int):
+    db_post = models.NewsPost(
+        tenant_id=tenant_id,
+        created_by_id=author_id,
+        title=post.title,
+        content=post.content,
+        image_url=post.image_url
+    )
+    db.add(db_post)
+    db.commit()
+    db.refresh(db_post)
+    return db_post
+
+def get_news_posts(db: Session, tenant_id: int, skip: int = 0, limit: int = 50):
+    posts = db.query(models.NewsPost).options(
+        joinedload(models.NewsPost.author)
+    ).filter(
+        models.NewsPost.tenant_id == tenant_id
+    ).order_by(models.NewsPost.created_at.desc()).offset(skip).limit(limit).all()
+    
+    # Optional: Map author name if needed manually, or let schemas handle it via ORM
+    return posts
+
+# --- CHAT ---
+
+def create_chat_message(db: Session, msg: schemas.ChatMessageCreate, sender_id: int, tenant_id: int):
+    # Verify receiver exists and belongs to same tenant
+    receiver = get_user(db, msg.receiver_id, tenant_id)
+    if not receiver:
+        raise HTTPException(404, "Receiver not found")
+
+    db_msg = models.ChatMessage(
+        tenant_id=tenant_id,
+        sender_id=sender_id,
+        receiver_id=msg.receiver_id,
+        content=msg.content
+    )
+    db.add(db_msg)
+    db.commit()
+    db.refresh(db_msg)
+    return db_msg
+
+def get_chat_history(db: Session, tenant_id: int, user1_id: int, user2_id: int, limit: int = 100):
+    """
+    Holt die Chat-Historie zwischen zwei Nutzern (egal wer Sender/Empfänger ist).
+    Sortiert nach Datum aufsteigend (älteste zuerst).
+    """
+    messages = db.query(models.ChatMessage).filter(
+        models.ChatMessage.tenant_id == tenant_id,
+        # (Sender = U1 AND Receiver = U2) OR (Sender = U2 AND Receiver = U1)
+        and_(
+            models.ChatMessage.sender_id.in_([user1_id, user2_id]),
+            models.ChatMessage.receiver_id.in_([user1_id, user2_id])
+        )
+    ).order_by(models.ChatMessage.created_at.asc()).limit(limit).all()
+    
+    return messages
+
+def mark_messages_as_read(db: Session, tenant_id: int, user_id: int, other_user_id: int):
+    """
+    Markiert alle Nachrichten VON other_user_id AN user_id als gelesen.
+    """
+    db.query(models.ChatMessage).filter(
+        models.ChatMessage.tenant_id == tenant_id,
+        models.ChatMessage.sender_id == other_user_id,
+        models.ChatMessage.receiver_id == user_id,
+        models.ChatMessage.is_read == False
+    ).update({"is_read": True})
+    db.commit()
+
+
+def get_chat_conversations(db: Session, tenant_id: int):
+    """
+    Für Admins: Gibt eine Liste aller User zurück, mit denen es Nachrichten gibt.
+    Inkl. der letzten Nachricht und Ungelesen-Status.
+    """
+    # 1. Finde alle User-IDs, die Nachrichten gesendet oder empfangen haben (außer Admins/Mitarbeiter untereinander ist weniger relevant, hier Fokus auf Kunden)
+    # Wir holen 'Kunden', die entweder gesendet haben oder empfangen haben.
+    
+    # Subquery für letzte Nachricht pro Konversation wäre komplex.
+    # Einfacher: Wir holen alle Kunden des Tenants und schauen, ob Chats existieren.
+    # Da das teuer sein kann bei vielen Kunden, machen wir es über die Nachrichten Tabelle.
+    
+    # Alle UserIDs die involviert sind
+    senders = db.query(models.ChatMessage.sender_id).filter(models.ChatMessage.tenant_id == tenant_id).distinct()
+    receivers = db.query(models.ChatMessage.receiver_id).filter(models.ChatMessage.tenant_id == tenant_id).distinct()
+    
+    user_ids = set()
+    for s in senders: user_ids.add(s[0])
+    for r in receivers: user_ids.add(r[0])
+    
+    # User Details laden
+    users = db.query(models.User).filter(
+        models.User.id.in_(user_ids), 
+        models.User.role.in_(['kunde', 'customer']) # Nur Kunden anzeigen
+    ).all()
+    
+    conversations = []
+    
+    for user in users:
+        # Letzte Nachricht holen
+        last_msg = db.query(models.ChatMessage).filter(
+            models.ChatMessage.tenant_id == tenant_id,
+            or_(
+                models.ChatMessage.sender_id == user.id,
+                models.ChatMessage.receiver_id == user.id
+            )
+        ).order_by(models.ChatMessage.created_at.desc()).first()
+        
+        # Ungelesene Zählen (Nachrichten VOM Kunden AN Irgendwen (Admins))
+        # Da wir im Admin Kontext sind: Nachrichten die der Kunde geschickt hat und die noch nicht gelesen sind.
+        unread_count = db.query(models.ChatMessage).filter(
+            models.ChatMessage.tenant_id == tenant_id,
+            models.ChatMessage.sender_id == user.id,
+            models.ChatMessage.is_read == False
+        ).count()
+        
+        conversations.append({
+            "user": user,
+            "last_message": last_msg,
+            "unread_count": unread_count
+        })
+        
+    # Sortieren nach Datum der letzten Nachricht (neueste oben)
+    conversations.sort(key=lambda x: x["last_message"].created_at if x["last_message"] else datetime.min, reverse=True)
+    
+    return conversations
