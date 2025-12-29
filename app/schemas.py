@@ -345,3 +345,21 @@ class Appointment(AppointmentBase):
 
     class Config:
         from_attributes = True
+
+
+# --- NEWSLETTER ---
+
+class NewsletterSubscriberBase(BaseModel):
+    email: EmailStr
+    source: Optional[str] = "marketing_site"
+
+class NewsletterSubscriberCreate(NewsletterSubscriberBase):
+    pass
+
+class NewsletterSubscriber(NewsletterSubscriberBase):
+    id: int
+    is_subscribed: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -702,3 +702,39 @@ def toggle_attendance(db: Session, tenant_id: int, booking_id: int):
     db.commit()
     db.refresh(booking)
     return booking
+
+# --- NEWSLETTER LOGIC ---
+
+def add_newsletter_subscriber(db: Session, email: str, source: str):
+    subscriber = db.query(models.NewsletterSubscriber).filter(models.NewsletterSubscriber.email == email).first()
+    
+    if subscriber:
+        # Falls User existiert aber abgemeldet war -> Reaktivieren
+        if not subscriber.is_subscribed:
+            subscriber.is_subscribed = True
+            subscriber.unsubscribed_at = None
+            subscriber.source = source # Quelle aktualisieren
+            db.commit()
+            db.refresh(subscriber)
+        return subscriber
+    else:
+        # Neuen Subscriber anlegen
+        new_subscriber = models.NewsletterSubscriber(
+            email=email,
+            source=source,
+            is_subscribed=True
+        )
+        db.add(new_subscriber)
+        db.commit()
+        db.refresh(new_subscriber)
+        return new_subscriber
+
+def unsubscribe_newsletter(db: Session, email: str):
+    subscriber = db.query(models.NewsletterSubscriber).filter(models.NewsletterSubscriber.email == email).first()
+    if subscriber:
+        subscriber.is_subscribed = False
+        subscriber.unsubscribed_at = func.now()
+        db.commit()
+        db.refresh(subscriber)
+        return True
+    return False

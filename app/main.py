@@ -124,6 +124,19 @@ def update_subscription(data: schemas.SubscriptionUpdate, db: Session = Depends(
     db.commit()
     return {"message": "Subscription updated successfully", "valid_until": tenant.subscription_ends_at}
 
+
+# --- NEWSLETTER ENDPOINT (Öffentlich für Marketing-Seite) ---
+
+@app.post("/api/newsletter/subscribe", response_model=schemas.NewsletterSubscriber)
+def subscribe_to_newsletter(
+    data: schemas.NewsletterSubscriberCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    Fügt eine E-Mail zur globalen Marketing-Liste hinzu.
+    """
+    return crud.add_newsletter_subscriber(db, data.email, data.source)
+
 # --- TENANT REGISTRATION ---
 @app.post("/api/tenants/register", response_model=schemas.Tenant)
 def register_tenant(
@@ -148,6 +161,14 @@ def register_tenant(
     db.commit()
     db.refresh(new_tenant)
     
+    # --- NEU: Hundeschule (Admin) automatisch zum Newsletter hinzufügen ---
+    # Wir fangen Fehler ab, damit die Registrierung nicht scheitert, nur weil der Newsletter-Eintrag fehlschlägt
+    try:
+        crud.add_newsletter_subscriber(db, admin_data.email, "school_registration")
+    except Exception as e:
+        print(f"Warnung: Konnte Admin nicht zum Newsletter hinzufügen: {e}")
+    # ---------------------------------------------------------------------
+
     # 2. Admin in Supabase Auth anlegen
     auth_id = None
     try:

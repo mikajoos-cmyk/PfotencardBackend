@@ -241,3 +241,18 @@ class Booking(Base):
     tenant = relationship("Tenant", back_populates="bookings")
     appointment = relationship("Appointment", back_populates="bookings")
     user = relationship("User", back_populates="bookings")
+
+
+# --- 5. MARKETING & NEWSLETTER ---
+
+class NewsletterSubscriber(Base):
+    __tablename__ = 'newsletter_subscribers'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    # Boolean Spalte für Abmeldung (True = Aktiv, False = Abgemeldet)
+    is_subscribed = Column(Boolean, default=True, nullable=False)
+    # Quelle der Anmeldung (z.B. 'marketing_site', 'school_registration')
+    source = Column(String(50), nullable=True) 
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    unsubscribed_at = Column(DateTime(timezone=True), nullable=True)
