@@ -336,12 +336,66 @@ def check_level_up_eligibility(db: Session, user: models.User) -> bool:
     if not next_level:
         return False
 
-    requirements = db.query(models.LevelRequirement).filter(
+    requirements = db.query(models.LevelRequirement).options(
+        joinedload(models.LevelRequirement.training_type)
+    ).filter(
         models.LevelRequirement.level_id == current_level.id,
         models.LevelRequirement.is_additional == False
     ).all()
 
     if not requirements:
+        return True
+
+    # Split requirements into exam and non-exam
+    exam_reqs = [r for r in requirements if r.training_type and r.training_type.category == 'exam']
+    non_exam_reqs = [r for r in requirements if not (r.training_type and r.training_type.category == 'exam')]
+
+    unconsumed_achievements = db.query(
+        models.Achievement.training_type_id, 
+        func.count(models.Achievement.id)
+    ).filter(
+        models.Achievement.user_id == user.id,
+        models.Achievement.is_consumed == False,
+        models.Achievement.tenant_id == user.tenant_id
+    ).group_by(models.Achievement.training_type_id).all()
+    
+    achievement_map = {TypeId: Count for TypeId, Count in unconsumed_achievements}
+
+    # 1. Check non-exam requirements first
+    for req in non_exam_reqs:
+        available = achievement_map.get(req.training_type_id, 0)
+        if available < req.required_count:
+            return False
+
+    # 2. Only if all non-exam requirements are met, check exams
+    for req in exam_reqs:
+        available = achievement_map.get(req.training_type_id, 0)
+        if available < req.required_count:
+            return False
+
+    return True
+
+
+def are_non_exam_requirements_met(db: Session, user: models.User, current_level: models.Level = None) -> bool:
+    if not current_level:
+        if not user.current_level_id:
+            return False
+        current_level = db.query(models.Level).filter(models.Level.id == user.current_level_id).first()
+        if not current_level: return False
+
+    requirements = db.query(models.LevelRequirement).options(
+        joinedload(models.LevelRequirement.training_type)
+    ).filter(
+        models.LevelRequirement.level_id == current_level.id,
+        models.LevelRequirement.is_additional == False
+    ).all()
+
+    if not requirements:
+        return True
+
+    # Check non-exam requirements
+    non_exam_reqs = [r for r in requirements if not (r.training_type and r.training_type.category == 'exam')]
+    if not non_exam_reqs:
         return True
 
     unconsumed_achievements = db.query(
@@ -355,11 +409,11 @@ def check_level_up_eligibility(db: Session, user: models.User) -> bool:
     
     achievement_map = {TypeId: Count for TypeId, Count in unconsumed_achievements}
 
-    for req in requirements:
+    for req in non_exam_reqs:
         available = achievement_map.get(req.training_type_id, 0)
         if available < req.required_count:
             return False
-
+            
     return True
 
 def perform_level_up(db: Session, user_id: int, tenant_id: int):
@@ -376,12 +430,13 @@ def perform_level_up(db: Session, user_id: int, tenant_id: int):
     ).all()
 
     for req in requirements:
+        # Mark ALL unconsumed achievements of this type as consumed, even if they exceed the required count
         achievements_to_consume = db.query(models.Achievement).filter(
             models.Achievement.user_id == user.id,
             models.Achievement.tenant_id == tenant_id,
             models.Achievement.training_type_id == req.training_type_id,
             models.Achievement.is_consumed == False
-        ).order_by(models.Achievement.date_achieved.asc()).limit(req.required_count).all()
+        ).all()
         
         for ach in achievements_to_consume:
             ach.is_consumed = True
@@ -453,6 +508,7 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
     db.refresh(db_tx)
     return db_tx
 
+
 def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None):
     ach = models.Achievement(
         tenant_id=tenant_id,
@@ -460,6 +516,17 @@ def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_
         training_type_id=training_type_id,
         transaction_id=transaction_id
     )
+
+    # CHECK: Premature Exam?
+    # check if 'exam' category
+    tt = db.query(models.TrainingType).filter(models.TrainingType.id == training_type_id).first()
+    if tt and tt.category == 'exam':
+        user = get_user(db, user_id, tenant_id)
+        if user:
+             if not are_non_exam_requirements_met(db, user):
+                 # Premature exam! Mark as consumed so it doesn't count.
+                 ach.is_consumed = True
+
     db.add(ach)
     return ach
 

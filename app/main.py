@@ -392,6 +392,20 @@ def manual_level_up(
     
     return crud.update_user_level(db, user_id, level_update.level_id)
 
+# --- PROPER LEVEL UP ENDPOINT ---
+@app.post("/api/users/{user_id}/level-up", response_model=schemas.User)
+def perform_level_up_endpoint(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+    tenant: models.Tenant = Depends(auth.get_current_tenant)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # Calls the logic that validates requirements and consumes achievements
+    return crud.perform_level_up(db, user_id, tenant.id)
+
 # --- TRANSACTIONS ---
 @app.post("/api/transactions", response_model=schemas.Transaction)
 def create_transaction(
