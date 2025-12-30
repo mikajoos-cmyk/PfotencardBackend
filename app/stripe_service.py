@@ -35,6 +35,10 @@ def get_price_id(plan_name: str, cycle: str):
     return None
 
 def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str):
+    """
+    Erstellt eine Subscription für Stripe Elements (Embedded Formular).
+    Handhabt sowohl sofortige Zahlungen als auch Testphasen (SetupIntent).
+    """
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -44,7 +48,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         raise HTTPException(status_code=400, detail="Invalid plan")
 
     try:
-        # 1. Customer erstellen oder holen
+        # 1. Customer erstellen/holen
         if not tenant.stripe_customer_id:
             customer = stripe.Customer.create(
                 email=user_email,
@@ -52,36 +56,47 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 metadata={"tenant_id": tenant.id}
             )
             tenant.stripe_customer_id = customer.id
-            db.commit() # Nur Customer ID speichern!
+            db.commit()
         
         customer_id = tenant.stripe_customer_id
-        
-        # Base URL für Redirects (Subdomain beachten)
-        base_url = f"https://{tenant.subdomain}.pfotencard.de"
 
-        # 2. Checkout Session erstellen
-        checkout_session = stripe.checkout.Session.create(
+        # 2. Subscription erstellen
+        # WICHTIG: Wir fragen hier AUCH nach 'pending_setup_intent' für Testphasen!
+        subscription = stripe.Subscription.create(
             customer=customer_id,
-            payment_method_types=['card'],
-            line_items=[{'price': price_id, 'quantity': 1}],
-            mode='subscription',
-            allow_promotion_codes=True,
-            subscription_data={
-                'trial_period_days': 14,
-                'metadata': {
-                    'tenant_id': tenant.id,
-                    'plan_name': plan # WICHTIG: Plan im Abo speichern für den Webhook
-                }
-            },
-            success_url=f"{base_url}/dashboard?subscription_success=true",
-            cancel_url=f"{base_url}/settings?canceled=true",
+            items=[{"price": price_id}],
+            trial_period_days=14,
+            payment_behavior='default_incomplete',
+            payment_settings={'save_default_payment_method': 'on_subscription'},
+            expand=['latest_invoice.payment_intent', 'pending_setup_intent'],
+            metadata={
+                "tenant_id": tenant.id,
+                "plan_name": plan
+            }
         )
 
-        # 3. WICHTIG: Hier NICHTS mehr in die Datenbank speichern! 
-        # Kein tenant.plan = ...
-        # Das macht erst der Webhook, wenn wirklich gezahlt wurde.
+        tenant.stripe_subscription_id = subscription.id
+        db.commit()
 
-        return {"url": checkout_session.url}
+        # 3. Client Secret ermitteln (Das Herzstück für dein Frontend)
+        client_secret = None
+        
+        # Fall A: Testphase (Geld wird später eingezogen -> SetupIntent)
+        if subscription.pending_setup_intent:
+            client_secret = subscription.pending_setup_intent.client_secret
+            
+        # Fall B: Sofortzahlung (Keine Testphase oder Testphase vorbei -> PaymentIntent)
+        elif subscription.latest_invoice and subscription.latest_invoice.payment_intent:
+            client_secret = subscription.latest_invoice.payment_intent.client_secret
+
+        if not client_secret:
+            raise HTTPException(status_code=500, detail="Konnte kein Client Secret von Stripe generieren.")
+
+        # Antwort für dein Frontend (Embedded Form)
+        return {
+            "subscriptionId": subscription.id,
+            "clientSecret": client_secret
+        }
 
     except Exception as e:
         print(f"Stripe Error: {str(e)}")
