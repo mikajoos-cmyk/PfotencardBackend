@@ -162,28 +162,33 @@ async def handle_subscription_update(subscription):
     try:
         customer_id = subscription['customer']
         
-        # Tenant anhand der Stripe Customer ID finden
         tenant = db.query(models.Tenant).filter(models.Tenant.stripe_customer_id == customer_id).first()
         
         if tenant:
-            # Status prüfen
             status = subscription['status']
             
             # Laufzeit aktualisieren
             current_period_end = datetime.fromtimestamp(subscription['current_period_end'], tz=timezone.utc)
             tenant.subscription_ends_at = current_period_end
+            tenant.stripe_subscription_id = subscription['id']
             
-            # Wenn das Abo aktiv oder in der Testphase ist -> Account aktiv
+            # --- NEU: Plan aus Metadaten lesen und setzen ---
+            # Das holt den Plan ('pro', 'starter'), den wir oben in stripe_service.py gespeichert haben
+            plan_name = subscription.get('metadata', {}).get('plan_name')
+            if plan_name:
+                tenant.plan = plan_name
+            # -----------------------------------------------
+
             if status in ['active', 'trialing']:
                 tenant.is_active = True
-            
-            # Wenn unpaid oder past_due -> Ggf. sperren oder Warnung setzen
             elif status in ['unpaid', 'past_due', 'canceled']:
-                # Optional: tenant.is_active = False or alert
+                # Optional: Logik für Sperrung
                 pass 
 
             db.commit()
-            print(f"Webhook: Updated subscription for tenant {tenant.name} (Status: {status})")
+            print(f"Webhook: Updated subscription for tenant {tenant.name} (Plan: {plan_name}, Status: {status})")
+    except Exception as e:
+        print(f"Webhook Error: {e}")
     finally:
         db.close()
 
