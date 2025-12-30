@@ -234,7 +234,12 @@ def create_subscription(
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    # Nur Admins
+    # 1. Sicherheits-Check: Ist der User wirklich da?
+    if not current_user:
+        print("FEHLER: create_subscription aufgerufen, aber current_user ist None!")
+        raise HTTPException(status_code=401, detail="Authentication failed (User is None).")
+
+    # 2. Rollen-Check
     if current_user.role != 'admin':
         raise HTTPException(status_code=403, detail="Not authorized")
         

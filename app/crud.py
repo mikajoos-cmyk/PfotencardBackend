@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_, func, or_, case
-from . import models, schemas, auth
+from . import models, schemas
 from fastapi import HTTPException
 import secrets
 from typing import List, Optional
@@ -206,6 +206,7 @@ def search_users(db: Session, tenant_id: int, search_term: str):
     ).all()
 
 def create_user(db: Session, user: schemas.UserCreate, tenant_id: int, auth_id: Optional[str] = None):
+    from . import auth
     if not user.password and not auth_id:
         user.password = secrets.token_urlsafe(16)
 
@@ -238,6 +239,7 @@ def create_user(db: Session, user: schemas.UserCreate, tenant_id: int, auth_id: 
     return db_user
 
 def update_user(db: Session, user_id: int, tenant_id: int, user: schemas.UserUpdate):
+    from . import auth  
     db_user = get_user(db, user_id, tenant_id)
     if not db_user:
         return None
