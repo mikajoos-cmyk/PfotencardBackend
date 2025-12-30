@@ -38,6 +38,10 @@ class TenantStatus(BaseModel):
     subscription_valid: bool = False
     subscription_ends_at: Optional[datetime] = None
     plan: Optional[str] = None
+    
+    # NEU: Damit das Frontend weiß, ob eine Zahlung hinterlegt ist
+    has_payment_method: bool = False 
+    in_trial: bool = False
 
 # NEU: Request für das Abo-Update
 class SubscriptionUpdate(BaseModel):

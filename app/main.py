@@ -98,16 +98,30 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
     if not tenant:
         return {"exists": False}
     
+    now = datetime.now(timezone.utc)
     is_valid = True
-    if tenant.subscription_ends_at and tenant.subscription_ends_at < datetime.now(timezone.utc):
+    
+    # Check ob abgelaufen
+    if tenant.subscription_ends_at and tenant.subscription_ends_at < now:
         is_valid = False
-        
+
+    # Check ob wirkliches Stripe Abo existiert
+    has_stripe = True if tenant.stripe_subscription_id else False
+    
+    # Check ob Trial (Gültig, aber kein Stripe Abo ODER Stripe Abo im Status Trialing)
+    # Vereinfacht: Wenn kein Stripe ID da ist, aber subscription_valid ist True -> Registrierungs-Trial
+    in_trial = False
+    if is_valid and not has_stripe:
+        in_trial = True
+
     return {
         "exists": True, 
         "name": tenant.name,
         "subscription_valid": is_valid,
         "subscription_ends_at": tenant.subscription_ends_at,
-        "plan": tenant.plan
+        "plan": tenant.plan,
+        "has_payment_method": has_stripe,
+        "in_trial": in_trial
     }
 
 @app.post("/api/tenants/subscribe")
