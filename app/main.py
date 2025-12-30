@@ -270,62 +270,68 @@ def register_tenant(
     if crud.get_tenant_by_subdomain(db, tenant_data.subdomain):
         raise HTTPException(status_code=400, detail="Subdomain already taken")
         
+    # Wir setzen hier KEINEN Trial-End-Date fest, das vom gewählten Plan abhängt,
+    # sondern starten neutral. Der echte Trial beginnt erst mit dem Stripe-Abo.
+    # Falls du einen generellen Testzeitraum für JEDEN neuen Account willst (auch ohne Stripe),
+    # kannst du trial_end drinlassen, aber der Plan MUSS 'starter' sein.
+    
     trial_end = datetime.now(timezone.utc) + timedelta(days=14)
     
     # 1. Tenant erstellen
     new_tenant = models.Tenant(
         name=tenant_data.name,
         subdomain=tenant_data.subdomain,
-        plan=tenant_data.plan,
+        
+        # WICHTIG: Hier erzwingen wir "starter", egal was das Frontend schickt!
+        # Der User hat ja noch nicht bezahlt / keine Karte hinterlegt.
+        plan="starter", 
+        
         config=tenant_data.config.model_dump(),
-        subscription_ends_at=trial_end
+        
+        # Optional: Du kannst das hier auf None setzen, wenn der Trial erst 
+        # nach Zahlungsdaten-Eingabe starten soll.
+        # Wenn du es so lässt, hat er 14 Tage "Starter"-Trial (falls relevant).
+        subscription_ends_at=trial_end 
     )
     db.add(new_tenant)
     db.commit()
     db.refresh(new_tenant)
     
-    # --- NEU: Hundeschule (Admin) automatisch zum Newsletter hinzufügen ---
-    # Wir fangen Fehler ab, damit die Registrierung nicht scheitert, nur weil der Newsletter-Eintrag fehlschlägt
+    # --- Newsletter Logic (bleibt gleich) ---
     try:
         crud.add_newsletter_subscriber(db, admin_data.email, "school_registration")
     except Exception as e:
         print(f"Warnung: Konnte Admin nicht zum Newsletter hinzufügen: {e}")
-    # ---------------------------------------------------------------------
 
-    # 2. Admin in Supabase Auth anlegen
+    # 2. Admin in Supabase Auth anlegen (bleibt gleich)
     auth_id = None
     try:
         if not admin_data.password:
             admin_data.password = secrets.token_urlsafe(16)
 
-        # --- DEBUG LOG SUPABASE ---
-        print("DEBUG: Starte Supabase Sign Up für Admin...")
         redirect_url = f"https://{tenant_data.subdomain}.pfotencard.de/auth/callback"
-        print(f"DEBUG: Redirect URL: {redirect_url}")
         
         metadata = {
             "branding_name": "Pfotencard",
-            "branding_logo": "https://pfotencard.de/logo.png", # Sicherstellen dass das Bild existiert!
+            "branding_logo": "https://pfotencard.de/logo.png",
             "branding_color": "#22C55E",
             "school_name": "Pfotencard"
         }
-        print(f"DEBUG: Metadata: {metadata}")
-        # --- DEBUG LOG END ---
 
         auth_res = supabase.auth.sign_up({
             "email": admin_data.email,
             "password": admin_data.password,
             "options": {
-                "data": metadata, # Hier werden die Daten übergeben!
+                "data": metadata,
                 "email_redirect_to": redirect_url
             }
         })
         if auth_res.user:
             auth_id = auth_res.user.id
-            print(f"DEBUG: Supabase User erstellt mit ID: {auth_id}")
             
     except Exception as e:
         print(f"DEBUG: FEHLER bei Supabase Registration: {e}")
+
     admin_data.role = "admin"
     crud.create_user(db, admin_data, new_tenant.id, auth_id=auth_id)
     

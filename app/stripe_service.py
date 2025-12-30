@@ -8,9 +8,8 @@ stripe.api_key = settings.STRIPE_SECRET_KEY
 
 def get_price_id(plan_name: str, cycle: str):
     plan = plan_name.lower()
-    cycle = cycle.lower() # 'monthly' oder 'yearly'
-
-    # Mapping Struktur: plan -> cycle -> ID
+    cycle = cycle.lower()
+    
     prices = {
         "starter": {
             "monthly": settings.STRIPE_PRICE_ID_STARTER_MONTHLY,
@@ -25,20 +24,12 @@ def get_price_id(plan_name: str, cycle: str):
             "yearly": settings.STRIPE_PRICE_ID_ENTERPRISE_YEARLY
         }
     }
-    
-    # Fallback für 'verband' auf 'enterprise' mappen, falls nötig
     if plan == 'verband': plan = 'enterprise'
-
     if plan in prices and cycle in prices[plan]:
         return prices[plan][cycle]
-    
     return None
 
 def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str):
-    """
-    Erstellt eine Subscription für Stripe Elements (Embedded Formular).
-    Handhabt sowohl sofortige Zahlungen als auch Testphasen (SetupIntent).
-    """
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -48,7 +39,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         raise HTTPException(status_code=400, detail="Invalid plan")
 
     try:
-        # 1. Customer erstellen/holen
+        # 1. Customer sicherstellen
         if not tenant.stripe_customer_id:
             customer = stripe.Customer.create(
                 email=user_email,
@@ -60,8 +51,51 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         
         customer_id = tenant.stripe_customer_id
 
-        # 2. Subscription erstellen
-        # WICHTIG: Wir fragen hier AUCH nach 'pending_setup_intent' für Testphasen!
+        # -------------------------------------------------------
+        # FALL A: ÄNDERUNG (Upgrade/Downgrade eines bestehenden Abos)
+        # -------------------------------------------------------
+        if tenant.stripe_subscription_id:
+            try:
+                # Altes Abo laden
+                subscription = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
+                
+                # Wenn das Abo aktiv oder in Trial ist -> Updaten
+                if subscription.status in ['active', 'trialing', 'past_due']:
+                    # Wir brauchen die ID des Items, das wir austauschen wollen (z.B. Starter -> Pro)
+                    item_id = subscription['items']['data'][0].id
+                    
+                    updated_sub = stripe.Subscription.modify(
+                        tenant.stripe_subscription_id,
+                        items=[{
+                            'id': item_id,
+                            'price': price_id, # Neuer Preis
+                        }],
+                        metadata={
+                            "tenant_id": tenant.id,
+                            "plan_name": plan # Wichtig für Webhook
+                        },
+                        proration_behavior='create_prorations', # Verrechnung Restbetrag
+                        payment_behavior='default_incomplete', # Erlaubt Payment Element Flow
+                        expand=['latest_invoice.payment_intent']
+                    )
+                    
+                    # Client Secret für eventuelle Nachzahlung zurückgeben
+                    client_secret = None
+                    if updated_sub.latest_invoice and updated_sub.latest_invoice.payment_intent:
+                        client_secret = updated_sub.latest_invoice.payment_intent.client_secret
+                    
+                    return {
+                        "subscriptionId": updated_sub.id,
+                        "clientSecret": client_secret, # Kann null sein bei reinem Swap ohne Kosten
+                        "status": "updated"
+                    }
+            except stripe.error.InvalidRequestError:
+                # Abo ID war in DB, existiert aber bei Stripe nicht mehr -> Fallthrough zu Neu erstellen
+                pass
+
+        # -------------------------------------------------------
+        # FALL B: NEUABSCHLUSS (Erstes Abo)
+        # -------------------------------------------------------
         subscription = stripe.Subscription.create(
             customer=customer_id,
             items=[{"price": price_id}],
@@ -78,24 +112,16 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         tenant.stripe_subscription_id = subscription.id
         db.commit()
 
-        # 3. Client Secret ermitteln (Das Herzstück für dein Frontend)
         client_secret = None
-        
-        # Fall A: Testphase (Geld wird später eingezogen -> SetupIntent)
         if subscription.pending_setup_intent:
             client_secret = subscription.pending_setup_intent.client_secret
-            
-        # Fall B: Sofortzahlung (Keine Testphase oder Testphase vorbei -> PaymentIntent)
         elif subscription.latest_invoice and subscription.latest_invoice.payment_intent:
             client_secret = subscription.latest_invoice.payment_intent.client_secret
 
-        if not client_secret:
-            raise HTTPException(status_code=500, detail="Konnte kein Client Secret von Stripe generieren.")
-
-        # Antwort für dein Frontend (Embedded Form)
         return {
             "subscriptionId": subscription.id,
-            "clientSecret": client_secret
+            "clientSecret": client_secret,
+            "status": "created"
         }
 
     except Exception as e:
@@ -106,21 +132,19 @@ def cancel_subscription(db: Session, tenant_id: int):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant or not tenant.stripe_subscription_id:
         raise HTTPException(status_code=400, detail="No active subscription")
-
     try:
         stripe.Subscription.modify(
             tenant.stripe_subscription_id,
             cancel_at_period_end=True
         )
-        return {"message": "Subscription will be cancelled at the end of the period"}
+        return {"message": "Subscription cancelled at period end"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+         raise HTTPException(status_code=400, detail=str(e))
 
 def get_billing_portal_url(db: Session, tenant_id: int, return_url: str):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant or not tenant.stripe_customer_id:
-        raise HTTPException(status_code=400, detail="No stripe customer")
-
+         raise HTTPException(status_code=400, detail="No stripe customer")
     session = stripe.billing_portal.Session.create(
         customer=tenant.stripe_customer_id,
         return_url=return_url,
