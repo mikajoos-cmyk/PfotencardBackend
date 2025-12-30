@@ -10,13 +10,12 @@ from datetime import datetime, timedelta, timezone
 import secrets
 import stripe
 
-models.Base.metadata.create_all(bind=engine)
-
 from . import crud, models, schemas, auth, stripe_service 
 from .database import engine, get_db, SessionLocal
 from .config import settings
 from supabase import create_client, Client
 
+models.Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
 # Supabase Client initialisieren
