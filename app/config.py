@@ -8,6 +8,17 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 525600 # 1 Jahr (365 * 24 * 60)
 
+    # Stripe Integration
+    STRIPE_SECRET_KEY: str
+    STRIPE_WEBHOOK_SECRET: str
+    STRIPE_PRICE_ID_STARTER_MONTHLY: str
+    STRIPE_PRICE_ID_PRO_MONTHLY: str
+    STRIPE_PRICE_ID_ENTERPRISE_MONTHLY: str
+    
+    STRIPE_PRICE_ID_STARTER_YEARLY: str
+    STRIPE_PRICE_ID_PRO_YEARLY: str
+    STRIPE_PRICE_ID_ENTERPRISE_YEARLY: str
+
     # Neue Schreibweise für Pydantic v2
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,20 +1,21 @@
 import os
 import shutil
 from starlette.responses import FileResponse
-from fastapi import Depends, FastAPI, HTTPException, status, UploadFile, File, Request
+from fastapi import Depends, FastAPI, HTTPException, status, UploadFile, File, Request, Header
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
-
-from . import crud, models, schemas, auth
-from .database import engine, get_db
-from .config import settings
-from supabase import create_client, Client
 import secrets
+import stripe
 
 models.Base.metadata.create_all(bind=engine)
+
+from . import crud, models, schemas, auth, stripe_service 
+from .database import engine, get_db, SessionLocal
+from .config import settings
+from supabase import create_client, Client
 
 app = FastAPI()
 
@@ -120,9 +121,127 @@ def update_subscription(data: schemas.SubscriptionUpdate, db: Session = Depends(
     tenant.subscription_ends_at = datetime.now(timezone.utc) + timedelta(days=365)
     tenant.is_active = True
     
-    db.add(tenant)
     db.commit()
     return {"message": "Subscription updated successfully", "valid_until": tenant.subscription_ends_at}
+
+
+# --- STRIPE WEBHOOK ---
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request, stripe_signature: str = Header(None)):
+    payload = await request.body()
+    sig_header = stripe_signature
+    endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, endpoint_secret
+        )
+    except ValueError:
+        # Invalid payload
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        # Invalid signature
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    # --- EVENT HANDLING ---
+    
+    # 1. Abo wurde aktualisiert (z.B. verlängert, Plan geändert oder gekündigt)
+    if event['type'] == 'customer.subscription.updated':
+        subscription = event['data']['object']
+        await handle_subscription_update(subscription)
+
+    # 2. Abo wurde gelöscht (z.B. nach Ablauf der Kündigungsfrist)
+    elif event['type'] == 'customer.subscription.deleted':
+        subscription = event['data']['object']
+        await handle_subscription_deleted(subscription)
+
+    return {"status": "success"}
+
+async def handle_subscription_update(subscription):
+    db = SessionLocal() 
+    try:
+        customer_id = subscription['customer']
+        
+        # Tenant anhand der Stripe Customer ID finden
+        tenant = db.query(models.Tenant).filter(models.Tenant.stripe_customer_id == customer_id).first()
+        
+        if tenant:
+            # Status prüfen
+            status = subscription['status']
+            
+            # Laufzeit aktualisieren
+            current_period_end = datetime.fromtimestamp(subscription['current_period_end'], tz=timezone.utc)
+            tenant.subscription_ends_at = current_period_end
+            
+            # Wenn das Abo aktiv oder in der Testphase ist -> Account aktiv
+            if status in ['active', 'trialing']:
+                tenant.is_active = True
+            
+            # Wenn unpaid oder past_due -> Ggf. sperren oder Warnung setzen
+            elif status in ['unpaid', 'past_due', 'canceled']:
+                # Optional: tenant.is_active = False or alert
+                pass 
+
+            db.commit()
+            print(f"Webhook: Updated subscription for tenant {tenant.name} (Status: {status})")
+    finally:
+        db.close()
+
+async def handle_subscription_deleted(subscription):
+    db = SessionLocal()
+    try:
+        customer_id = subscription['customer']
+        tenant = db.query(models.Tenant).filter(models.Tenant.stripe_customer_id == customer_id).first()
+        
+        if tenant:
+            # Abo ist endgültig vorbei -> Zurück auf Starter oder deaktivieren
+            tenant.plan = 'starter' 
+            # Datum auf "jetzt" setzen, damit Checks fehlschlagen
+            tenant.subscription_ends_at = datetime.now(timezone.utc)
+            
+            db.commit()
+            print(f"Webhook: Subscription deleted for tenant {tenant.name}")
+    finally:
+        db.close()
+
+
+# --- STRIPE INTEGRATION ---
+
+@app.post("/api/stripe/create-subscription")
+def create_subscription(
+    data: schemas.SubscriptionUpdate,
+    cycle: str = "monthly",
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    # Nur Admins
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    return stripe_service.create_checkout_session(db, tenant.id, data.plan, cycle, current_user.email)
+
+@app.post("/api/stripe/cancel")
+def cancel_subscription_endpoint(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return stripe_service.cancel_subscription(db, tenant.id)
+
+@app.get("/api/stripe/portal")
+def get_portal_url(
+    return_url: str,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return stripe_service.get_billing_portal_url(db, tenant.id, return_url)
 
 
 # --- NEWSLETTER ENDPOINT (Öffentlich für Marketing-Seite) ---

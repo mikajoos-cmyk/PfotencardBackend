@@ -10,3 +10,4 @@ pydantic-settings==2.3.4
 psycopg2-binary
 supabase
 jose
+stripe

@@ -19,6 +19,10 @@ class Tenant(Base):
     
     # NEU: Abo-Laufzeit
     subscription_ends_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # NEU: Stripe Integration
+    stripe_customer_id = Column(String(255), nullable=True, index=True)
+    stripe_subscription_id = Column(String(255), nullable=True)
 
     # Beziehungen (Ein Tenant hat viele...)
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
