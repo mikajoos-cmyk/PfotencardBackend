@@ -44,7 +44,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         raise HTTPException(status_code=400, detail="Invalid plan")
 
     try:
-        # 1. Customer erstellen oder holen
+        # 1. Customer erstellen oder holen (Bleibt gleich)
         if not tenant.stripe_customer_id:
             customer = stripe.Customer.create(
                 email=user_email,
@@ -56,27 +56,45 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         
         customer_id = tenant.stripe_customer_id
 
-        # 2. Subscription erstellen (incomplete, wartet auf Zahlung)
-        subscription = stripe.Subscription.create(
+        # 2. URL für Redirect bauen
+        # Wir nutzen die Subdomain, damit der Nutzer zur richtigen App zurückkommt
+        base_url = f"https://{tenant.subdomain}.pfotencard.de"
+        # Falls du lokal testest (localhost), müsstest du das hier ggf. anpassen oder eine Env-Variable nutzen.
+        # Für Production ist die Subdomain-Logik aber korrekt.
+
+        # 3. Checkout Session erstellen (ANSTATT Subscription.create)
+        checkout_session = stripe.checkout.Session.create(
             customer=customer_id,
-            items=[{"price": price_id}],
-            trial_period_days=14,
-            payment_behavior='default_incomplete',
-            payment_settings={'save_default_payment_method': 'on_subscription'},
-            expand=['latest_invoice.payment_intent'],
+            payment_method_types=['card'], # Hier kannst du auch 'paypal' hinzufügen, wenn aktiviert
+            line_items=[
+                {
+                    'price': price_id,
+                    'quantity': 1,
+                },
+            ],
+            mode='subscription',
+            allow_promotion_codes=True, # Optional: Erlaubt Gutscheincodes
+            subscription_data={
+                'trial_period_days': 14,
+                'metadata': {'tenant_id': tenant.id}
+            },
+            # Wohin soll der User nach der Zahlung geleitet werden?
+            success_url=f"{base_url}/dashboard?subscription_success=true",
+            cancel_url=f"{base_url}/settings?canceled=true",
         )
 
-        tenant.stripe_subscription_id = subscription.id
+        # WICHTIG: Wir speichern hier noch nichts in der DB (außer Customer ID).
+        # Das Update von 'plan' und 'subscription_ends_at' passiert erst,
+        # wenn der Webhook 'checkout.session.completed' oder 'customer.subscription.created' empfängt.
+        # Aber wir können den Plan optimistisch setzen, wenn du willst:
         tenant.plan = plan 
         db.commit()
 
-        # 3. Client Secret an Frontend zurückgeben
-        return {
-            "subscriptionId": subscription.id,
-            "clientSecret": subscription.latest_invoice.payment_intent.client_secret,
-        }
+        # 4. URL an Frontend zurückgeben
+        return {"url": checkout_session.url}
 
     except Exception as e:
+        print(f"Stripe Error: {str(e)}") # Hilft beim Debuggen in Vercel Logs
         raise HTTPException(status_code=400, detail=str(e))
 
 def cancel_subscription(db: Session, tenant_id: int):
