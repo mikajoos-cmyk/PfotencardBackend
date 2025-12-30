@@ -144,6 +144,8 @@ async def get_current_active_user(
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
 
+    return user
+
 def verify_active_subscription(tenant: models.Tenant = Depends(get_current_tenant)):
     """
     Blockiert den Zugriff, wenn das Abo abgelaufen ist.
