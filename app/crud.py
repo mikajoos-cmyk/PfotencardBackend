@@ -24,10 +24,15 @@ def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
         models.TrainingType.tenant_id == tenant_id
     ).all()
     
+    appointments = db.query(models.Appointment).filter(
+        models.Appointment.tenant_id == tenant_id
+    ).order_by(models.Appointment.start_time.desc()).all()
+    
     return schemas.AppConfig(
         tenant=tenant,
         levels=levels,
-        training_types=training_types
+        training_types=training_types,
+        appointments=appointments
     )
 
 def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.SettingsUpdate):
@@ -741,26 +746,92 @@ def unsubscribe_newsletter(db: Session, email: str):
 # --- NEWS ---
 
 def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, tenant_id: int):
+    # Fetch target objects
+    target_levels = []
+    if post.target_level_ids:
+        target_levels = db.query(models.Level).filter(
+            models.Level.id.in_(post.target_level_ids),
+            models.Level.tenant_id == tenant_id
+        ).all()
+        
+    target_appointments = []
+    if post.target_appointment_ids:
+        target_appointments = db.query(models.Appointment).filter(
+            models.Appointment.id.in_(post.target_appointment_ids),
+            models.Appointment.tenant_id == tenant_id
+        ).all()
+
     db_post = models.NewsPost(
         tenant_id=tenant_id,
         created_by_id=author_id,
         title=post.title,
         content=post.content,
-        image_url=post.image_url
+        image_url=post.image_url,
+        target_levels=target_levels,
+        target_appointments=target_appointments
     )
     db.add(db_post)
     db.commit()
     db.refresh(db_post)
     return db_post
 
-def get_news_posts(db: Session, tenant_id: int, skip: int = 0, limit: int = 50):
-    posts = db.query(models.NewsPost).options(
-        joinedload(models.NewsPost.author)
+def get_news_posts(db: Session, tenant_id: int, current_user: models.User, skip: int = 0, limit: int = 50):
+    query = db.query(models.NewsPost).options(
+        joinedload(models.NewsPost.author),
+        joinedload(models.NewsPost.target_levels),
+        joinedload(models.NewsPost.target_appointments)
     ).filter(
         models.NewsPost.tenant_id == tenant_id
-    ).order_by(models.NewsPost.created_at.desc()).offset(skip).limit(limit).all()
+    )
+
+    # Filter for customers
+    if current_user.role in ['kunde', 'customer']:
+        # Post is visible if:
+        # 1. No target levels AND no target trainings (Target: All)
+        # OR 2. Current user's level is in target_levels
+        # OR 3. User has a confirmed booking for an appointment in target_appointments
+        
+        user_bookings = db.query(models.Booking.appointment_id).filter(
+            models.Booking.user_id == current_user.id,
+            models.Booking.tenant_id == tenant_id,
+            models.Booking.status == "confirmed"
+        ).all()
+        user_appointment_ids = [b[0] for b in user_bookings]
+
+        # In SQL this is a bit more complex with many-to-many. 
+        # Easier with a subquery or OR conditions if we can represent them cleanly.
+        # Alternatively, we fetch and filter in Python, but that's not ideal for pagination.
+        
+        # Let's try to do it in SQL.
+        # Condition 1: No targets
+        cond_no_targets = and_(
+            ~models.NewsPost.target_levels.any(),
+            ~models.NewsPost.target_appointments.any()
+        )
+        
+        # Condition 2: Matching level
+        cond_matching_level = False
+        if current_user.current_level_id:
+            cond_matching_level = models.NewsPost.target_levels.any(models.Level.id == current_user.current_level_id)
+            
+        # Condition 3: Matching appointment
+        cond_matching_appointment = False
+        if user_appointment_ids:
+            cond_matching_appointment = models.NewsPost.target_appointments.any(models.Appointment.id.in_(user_appointment_ids))
+            
+        filters = [cond_no_targets]
+        if cond_matching_level is not False: filters.append(cond_matching_level)
+        if cond_matching_appointment is not False: filters.append(cond_matching_appointment)
+        
+        query = query.filter(or_(*filters))
+
+    posts = query.order_by(models.NewsPost.created_at.desc()).offset(skip).limit(limit).all()
     
-    # Optional: Map author name if needed manually, or let schemas handle it via ORM
+    # Map target IDs back to schema
+    for post in posts:
+        post.target_level_ids = [l.id for l in post.target_levels]
+        post.target_appointment_ids = [a.id for a in post.target_appointments]
+        
     return posts
 
 # --- CHAT ---

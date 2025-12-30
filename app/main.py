@@ -786,7 +786,7 @@ def read_news(
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user) # Authentication required
 ):
-    return crud.get_news_posts(db, tenant.id, skip, limit)
+    return crud.get_news_posts(db, tenant.id, current_user, skip, limit)
 
 # --- CHAT ---
 

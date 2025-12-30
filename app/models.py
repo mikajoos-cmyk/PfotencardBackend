@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Date, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Date, Boolean, UniqueConstraint, Table
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -258,6 +258,21 @@ class NewsletterSubscriber(Base):
     source = Column(String(50), nullable=True) 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+# Zuordnungstabellen für News-Zielgruppen
+news_target_levels = Table(
+    'news_target_levels',
+    Base.metadata,
+    Column('news_post_id', Integer, ForeignKey('news_posts.id', ondelete="CASCADE"), primary_key=True),
+    Column('level_id', Integer, ForeignKey('levels.id', ondelete="CASCADE"), primary_key=True)
+)
+
+news_target_appointments = Table(
+    'news_target_appointments',
+    Base.metadata,
+    Column('news_post_id', Integer, ForeignKey('news_posts.id', ondelete="CASCADE"), primary_key=True),
+    Column('appointment_id', Integer, ForeignKey('appointments.id', ondelete="CASCADE"), primary_key=True)
+)
+
 # --- NEWS & CHAT ENTWICKLUNG ---
 
 class NewsPost(Base):
@@ -275,6 +290,14 @@ class NewsPost(Base):
 
     tenant = relationship("Tenant", back_populates="news_posts")
     author = relationship("User", foreign_keys=[created_by_id])
+    
+    @property
+    def author_name(self):
+        return self.author.name if self.author else "Unbekannt"
+
+    # NEU: Zielgruppen
+    target_levels = relationship("Level", secondary=news_target_levels)
+    target_appointments = relationship("Appointment", secondary=news_target_appointments)
 
 
 class ChatMessage(Base):

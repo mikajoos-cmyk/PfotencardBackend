@@ -252,6 +252,7 @@ class AppConfig(BaseModel):
     tenant: Tenant
     levels: List[Level]
     training_types: List[TrainingType]
+    appointments: List['Appointment'] = []
 
 # --- SETTINGS UPDATE SCHEMAS (NEU) ---
 
@@ -369,6 +370,8 @@ class NewsPostBase(BaseModel):
     title: str
     content: str
     image_url: Optional[str] = None
+    target_level_ids: List[int] = []
+    target_appointment_ids: List[int] = []
 
 class NewsPostCreate(NewsPostBase):
     pass
@@ -378,6 +381,9 @@ class NewsPost(NewsPostBase):
     tenant_id: int
     created_by_id: int
     created_at: datetime
+    
+    target_level_ids: List[int] = []
+    target_appointment_ids: List[int] = []
     
     # Optional: Author Display
     author_name: Optional[str] = None
