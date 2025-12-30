@@ -48,8 +48,8 @@ def read_app_config(
 def update_settings(
     settings: schemas.SettingsUpdate,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     # Nur Admins dürfen Einstellungen ändern
     if current_user.role != 'admin':
@@ -270,28 +270,17 @@ def register_tenant(
     if crud.get_tenant_by_subdomain(db, tenant_data.subdomain):
         raise HTTPException(status_code=400, detail="Subdomain already taken")
         
-    # Wir setzen hier KEINEN Trial-End-Date fest, das vom gewählten Plan abhängt,
-    # sondern starten neutral. Der echte Trial beginnt erst mit dem Stripe-Abo.
-    # Falls du einen generellen Testzeitraum für JEDEN neuen Account willst (auch ohne Stripe),
-    # kannst du trial_end drinlassen, aber der Plan MUSS 'starter' sein.
-    
+    # 1. 14 Tage Testzeitraum berechnen
     trial_end = datetime.now(timezone.utc) + timedelta(days=14)
     
-    # 1. Tenant erstellen
+    # 2. Tenant erstellen - IMMER als 'enterprise' starten
     new_tenant = models.Tenant(
         name=tenant_data.name,
         subdomain=tenant_data.subdomain,
-        
-        # WICHTIG: Hier erzwingen wir "starter", egal was das Frontend schickt!
-        # Der User hat ja noch nicht bezahlt / keine Karte hinterlegt.
-        plan="starter", 
-        
+        plan="enterprise",  # <--- ÄNDERUNG: Startet direkt im höchsten Plan
         config=tenant_data.config.model_dump(),
-        
-        # Optional: Du kannst das hier auf None setzen, wenn der Trial erst 
-        # nach Zahlungsdaten-Eingabe starten soll.
-        # Wenn du es so lässt, hat er 14 Tage "Starter"-Trial (falls relevant).
-        subscription_ends_at=trial_end 
+        subscription_ends_at=trial_end, # <--- ÄNDERUNG: Datum ist gesetzt
+        is_active=True
     )
     db.add(new_tenant)
     db.commit()
@@ -356,8 +345,8 @@ def register_user(
 def create_user(
     user: schemas.UserCreate, 
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     print(23232342342423423)
     if current_user.role not in ['admin', 'mitarbeiter']:
@@ -517,8 +506,8 @@ def update_user_endpoint(
     user_id: int,
     user_update: schemas.UserUpdate,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.id != user_id and current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -544,8 +533,8 @@ def update_user_status(
     user_id: int,
     status: schemas.UserStatusUpdate,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -557,8 +546,8 @@ def manual_level_up(
     user_id: int,
     level_update: schemas.UserLevelUpdate,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -570,8 +559,8 @@ def manual_level_up(
 def perform_level_up_endpoint(
     user_id: int,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -584,8 +573,8 @@ def perform_level_up_endpoint(
 def create_transaction(
     transaction: schemas.TransactionCreate,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
          raise HTTPException(status_code=403, detail="Not authorized")
@@ -629,8 +618,8 @@ def update_dog(
     dog_id: int,
     dog: schemas.DogBase,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     db_dog = crud.get_dog(db, dog_id, tenant.id)
     if not db_dog: raise HTTPException(404, "Dog not found")
@@ -644,8 +633,8 @@ def update_dog(
 def delete_dog(
     dog_id: int,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(403, "Not authorized")
@@ -658,8 +647,8 @@ async def upload_document(  # <--- WICHTIG: 'async' hinzugefügt
     user_id: int,
     upload_file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != user_id:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -719,8 +708,8 @@ def read_document(
 def delete_document(
     document_id: int,
     db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     doc = crud.get_document(db, document_id, tenant.id)
     if not doc: raise HTTPException(404, "Document not found")
@@ -741,7 +730,7 @@ from fastapi.staticfiles import StaticFiles
 async def upload_public_image(  # <--- WICHTIG: 'async' hinzugefügt
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
@@ -775,7 +764,7 @@ async def upload_public_image(  # <--- WICHTIG: 'async' hinzugefügt
 def create_appointment(
     appointment: schemas.AppointmentCreate,
     db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
@@ -796,7 +785,7 @@ def read_appointments(
 def book_appointment(
     appointment_id: int,
     db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     # Jeder Kunde darf buchen (evtl. Level-Checks hier später)
@@ -814,7 +803,7 @@ def read_my_bookings(
 def cancel_appointment_booking(
     appointment_id: int,
     db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     # Eigene Buchung stornieren
@@ -836,7 +825,7 @@ def read_participants(
 def toggle_booking_attendance(
     booking_id: int,
     db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
@@ -851,7 +840,7 @@ def toggle_booking_attendance(
 async def upload_news_image(
     upload_file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
@@ -899,7 +888,7 @@ async def upload_news_image(
 def create_news(
     post: schemas.NewsPostCreate,
     db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
@@ -923,7 +912,7 @@ def read_news(
 def send_chat_message(
     msg: schemas.ChatMessageCreate,
     db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     # Security: Customer can send to anyone? Or just admins?

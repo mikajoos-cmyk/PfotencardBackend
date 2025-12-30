@@ -144,4 +144,17 @@ async def get_current_active_user(
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
 
-    return user
+def verify_active_subscription(tenant: models.Tenant = Depends(get_current_tenant)):
+    """
+    Blockiert den Zugriff, wenn das Abo abgelaufen ist.
+    Wird für alle Schreib-Operationen (POST, PUT, DELETE) verwendet.
+    """
+    now = datetime.now(timezone.utc)
+    
+    # Toleranz: Wir geben evtl. 24h Puffer, damit nicht mitten am Tag abgeschaltet wird
+    if tenant.subscription_ends_at and tenant.subscription_ends_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED, # Spezieller Code für Frontend
+            detail="Subscription expired. Please update your payment details."
+        )
+    return tenant

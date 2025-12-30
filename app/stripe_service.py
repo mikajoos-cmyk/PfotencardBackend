@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import stripe
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -37,6 +38,20 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
     price_id = get_price_id(plan, cycle)
     if not price_id:
         raise HTTPException(status_code=400, detail="Invalid plan")
+
+    # --- NEU: Dynamische Berechnung der Trial-Tage ---
+    trial_days = 0
+    now = datetime.now(timezone.utc)
+    
+    if tenant.subscription_ends_at and tenant.subscription_ends_at > now:
+        # Berechne verbleibende Tage
+        delta = tenant.subscription_ends_at - now
+        trial_days = delta.days + 1 # +1 Puffer, damit es nicht heute endet
+        if trial_days > 14: trial_days = 14 # Max 14 Tage (Sicherheit)
+    else:
+        # Abo abgelaufen -> Sofort zahlen (kein Trial)
+        trial_days = 0
+    # ------------------------------------------------
 
     try:
         # 1. Customer sicherstellen
@@ -96,18 +111,24 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         # -------------------------------------------------------
         # FALL B: NEUABSCHLUSS (Erstes Abo)
         # -------------------------------------------------------
-        subscription = stripe.Subscription.create(
-            customer=customer_id,
-            items=[{"price": price_id}],
-            trial_period_days=14,
-            payment_behavior='default_incomplete',
-            payment_settings={'save_default_payment_method': 'on_subscription'},
-            expand=['latest_invoice.payment_intent', 'pending_setup_intent'],
-            metadata={
+        
+        subscription_data = {
+            'customer': customer_id,
+            'items': [{"price": price_id}],
+            'payment_behavior': 'default_incomplete',
+            'payment_settings': {'save_default_payment_method': 'on_subscription'},
+            'expand': ['latest_invoice.payment_intent', 'pending_setup_intent'],
+            'metadata': {
                 "tenant_id": tenant.id,
                 "plan_name": plan
             }
-        )
+        }
+        
+        # Nur Trial setzen, wenn > 0
+        if trial_days > 0:
+            subscription_data['trial_period_days'] = trial_days
+
+        subscription = stripe.Subscription.create(**subscription_data)
 
         tenant.stripe_subscription_id = subscription.id
         db.commit()
