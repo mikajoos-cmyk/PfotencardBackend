@@ -43,6 +43,14 @@ class TenantStatus(BaseModel):
     has_payment_method: bool = False 
     in_trial: bool = False
 
+class SubscriptionDetails(BaseModel):
+    plan: Optional[str] = None
+    status: Optional[str] = None
+    cancel_at_period_end: bool = False
+    current_period_end: Optional[datetime] = None
+    next_payment_amount: Optional[float] = None # Der Preis, der als nächstes abgebucht wird
+    next_payment_date: Optional[datetime] = None
+
 # NEU: Request für das Abo-Update
 class SubscriptionUpdate(BaseModel):
     subdomain: str

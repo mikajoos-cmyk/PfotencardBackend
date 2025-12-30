@@ -85,6 +85,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                             'id': item_id,
                             'price': price_id, # Neuer Preis
                         }],
+                        cancel_at_period_end=False, # <--- WICHTIG: Kündigung zurücknehmen!
                         metadata={
                             "tenant_id": tenant.id,
                             "plan_name": plan # Wichtig für Webhook
@@ -171,3 +172,44 @@ def get_billing_portal_url(db: Session, tenant_id: int, return_url: str):
         return_url=return_url,
     )
     return {"url": session.url}
+
+def get_subscription_details(db: Session, tenant_id: int):
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant or not tenant.stripe_subscription_id:
+        return None
+    
+    try:
+        # Abo laden
+        sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
+        
+        details = {
+            "plan": sub.metadata.get("plan_name", tenant.plan),
+            "status": sub.status,
+            "cancel_at_period_end": sub.cancel_at_period_end,
+            "current_period_end": datetime.fromtimestamp(sub.current_period_end, tz=timezone.utc),
+            "next_payment_amount": 0.0,
+            "next_payment_date": None
+        }
+
+        # Wenn das Abo aktiv und NICHT gekündigt ist -> Nächste Rechnungsvorschau holen
+        if not sub.cancel_at_period_end and sub.status in ['active', 'trialing']:
+            try:
+                invoice = stripe.Invoice.upcoming(customer=tenant.stripe_customer_id)
+                # Stripe Beträge sind in Cents -> durch 100 teilen
+                details["next_payment_amount"] = invoice.amount_due / 100.0 
+                # Das Datum der nächsten Zahlung
+                if invoice.next_payment_attempt:
+                    details["next_payment_date"] = datetime.fromtimestamp(invoice.next_payment_attempt, tz=timezone.utc)
+                else:
+                    # Fallback auf Periodenende
+                    details["next_payment_date"] = datetime.fromtimestamp(sub.current_period_end, tz=timezone.utc)
+            except stripe.error.InvalidRequestError:
+                # Keine kommende Rechnung (kann passieren bei speziellen Status)
+                pass
+        
+        return details
+
+    except Exception as e:
+        print(f"Stripe Error in details: {e}")
+        # Wir werfen keinen Fehler, sondern geben None zurück, damit die Seite nicht crasht
+        return None

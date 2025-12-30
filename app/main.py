@@ -255,6 +255,17 @@ def cancel_subscription_endpoint(
         raise HTTPException(status_code=403, detail="Not authorized")
     return stripe_service.cancel_subscription(db, tenant.id)
 
+@app.get("/api/stripe/details", response_model=Optional[schemas.SubscriptionDetails])
+def get_subscription_details_endpoint(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    return stripe_service.get_subscription_details(db, tenant.id)
+
 @app.get("/api/stripe/portal")
 def get_portal_url(
     return_url: str,
