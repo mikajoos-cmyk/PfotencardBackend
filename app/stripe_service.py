@@ -75,7 +75,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                             'id': item_id,
                             'price': price_id,
                         }],
-                        cancel_at_period_end=False, # Re-activate if cancelled
+                        cancel_at_period_end=False,
                         metadata={
                             "tenant_id": tenant.id,
                             "plan_name": plan
@@ -85,9 +85,16 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         expand=['latest_invoice.payment_intent']
                     )
                     
+                    # Client Secret für eventuelle Nachzahlung zurückgeben
                     client_secret = None
-                    if updated_sub.latest_invoice and updated_sub.latest_invoice.payment_intent:
-                        client_secret = updated_sub.latest_invoice.payment_intent.client_secret
+                    # ÄNDERUNG: Sicherer Zugriff via .get(), da Attributzugriff deprecated ist
+                    if updated_sub.latest_invoice:
+                        invoice = updated_sub.latest_invoice
+                        # Prüfen ob invoice ein Objekt ist (hat .get) und payment_intent existiert
+                        payment_intent = invoice.get('payment_intent') if hasattr(invoice, 'get') else None
+                        
+                        if payment_intent:
+                            client_secret = payment_intent.client_secret
                     
                     return {
                         "subscriptionId": updated_sub.id,
@@ -120,8 +127,13 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         client_secret = None
         if subscription.pending_setup_intent:
             client_secret = subscription.pending_setup_intent.client_secret
-        elif subscription.latest_invoice and subscription.latest_invoice.payment_intent:
-            client_secret = subscription.latest_invoice.payment_intent.client_secret
+        elif subscription.latest_invoice:
+            # ÄNDERUNG: Sicherer Zugriff via .get() statt .payment_intent
+            invoice = subscription.latest_invoice
+            payment_intent = invoice.get('payment_intent') if hasattr(invoice, 'get') else None
+            
+            if payment_intent:
+                client_secret = payment_intent.client_secret
 
         return {
             "subscriptionId": subscription.id,
