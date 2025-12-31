@@ -7,6 +7,13 @@ from . import models
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
+# Standard-Preise für Fallback (falls Stripe API mal keine Vorschau liefert)
+STANDARD_PRICES = {
+    "starter": {"month": 29.00, "year": 290.00},
+    "pro": {"month": 79.00, "year": 790.00},
+    "enterprise": {"month": 199.00, "year": 1990.00}
+}
+
 def get_price_id(plan_name: str, cycle: str):
     plan = plan_name.lower()
     cycle = cycle.lower()
@@ -56,6 +63,28 @@ def extract_client_secret(obj):
         except AttributeError: pass
     return None
 
+def get_fallback_price(plan_name: str, subscription):
+    """Ermittelt den Standardpreis basierend auf dem Intervall im Abo"""
+    try:
+        # Versuche Intervall aus Subscription Items zu lesen
+        is_dict = isinstance(subscription, dict)
+        items = subscription.get('items') if is_dict else subscription.items
+        data = items.get('data') if isinstance(items, dict) else items.data
+        
+        interval = 'month' # Default
+        if data and len(data) > 0:
+            price = data[0].get('price') if isinstance(data[0], dict) else data[0].price
+            recurring = price.get('recurring') if isinstance(price, dict) else price.recurring
+            interval = recurring.get('interval') if isinstance(recurring, dict) else recurring.interval
+            
+        plan_key = plan_name.lower() if plan_name else 'starter'
+        if plan_key == 'verband': plan_key = 'enterprise'
+        
+        return STANDARD_PRICES.get(plan_key, {}).get(interval, 0.0)
+    except Exception as e:
+        print(f"Error calculating fallback price: {e}")
+        return 0.0
+
 def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscription):
     """
     Aktualisiert den Tenant SOFORT mit den Daten von Stripe.
@@ -79,7 +108,6 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
         tenant.stripe_subscription_status = status
         tenant.cancel_at_period_end = cancel_at_period_end
         
-        # Plan aus Metadaten
         plan_name = metadata.get('plan_name')
         if plan_name:
             tenant.plan = plan_name
@@ -88,14 +116,16 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
             tenant.is_active = True
 
         # 3. Nächste Zahlung berechnen
-        # Standard: Reset, falls gekündigt
+        # Standard-Reset
+        tenant.upcoming_plan = None 
+        
         if cancel_at_period_end:
+            # Wenn gekündigt, gibt es keine nächste Zahlung
             tenant.next_payment_amount = 0.0
             tenant.next_payment_date = None
-            tenant.upcoming_plan = None
         elif status in ['active', 'trialing'] and tenant.stripe_customer_id:
             try:
-                # Invoice Preview abrufen
+                # Versuch 1: Live von Stripe (Genauester Wert inkl. Proration/Guthaben)
                 upcoming = stripe.Invoice.upcoming(
                     customer=tenant.stripe_customer_id,
                     subscription=sub_id
@@ -109,7 +139,6 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                     tenant.next_payment_date = tenant.subscription_ends_at
                 
                 # Plan-Wechsel Logik
-                tenant.upcoming_plan = None # Reset standardmäßig
                 if upcoming.lines and upcoming.lines.data:
                     next_price_id = upcoming.lines.data[0].price.id
                     next_plan_name = get_plan_name_from_price_id(next_price_id)
@@ -117,23 +146,21 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                     if next_plan_name and next_plan_name != tenant.plan:
                         tenant.upcoming_plan = next_plan_name
 
-            except stripe.error.InvalidRequestError as e:
-                # Fallback: Wenn Stripe noch keine Invoice hat (z.B. direkt nach Un-Cancel),
-                # nehmen wir das bekannte Periodenende als nächstes Zahlungsdatum.
-                print(f"Info: No upcoming invoice yet, using fallback date: {e}")
-                tenant.next_payment_date = tenant.subscription_ends_at
-                # Betrag lassen wir auf dem alten Wert oder 0, da wir ihn nicht raten wollen
-                # (Oder man könnte den Standardpreis des Plans nehmen, aber das ist riskant wegen Proration)
-                
             except Exception as e:
-                print(f"Warning: Unexpected error fetching invoice: {e}")
-                # Auch hier Fallback aufs Datum, damit zumindest etwas angezeigt wird
+                # Versuch 2: Fallback (Wenn Stripe API 'Rechnung wird noch berechnet' Fehler wirft)
+                print(f"Info: Could not fetch upcoming invoice ({str(e)}). Using fallback calculation.")
+                
+                # Datum = Ende der aktuellen Periode
                 tenant.next_payment_date = tenant.subscription_ends_at
+                
+                # Betrag = Standardpreis des aktuellen Plans
+                fallback_amount = get_fallback_price(tenant.plan, subscription)
+                tenant.next_payment_amount = fallback_amount
 
         db.add(tenant)
         db.commit()
         db.refresh(tenant)
-        print(f"Updated tenant {tenant.id}. Status: {status}, Cancelled: {cancel_at_period_end}, Next Bill: {tenant.next_payment_date}")
+        print(f"Updated tenant {tenant.id}. Status: {status}, Amount: {tenant.next_payment_amount}")
 
     except Exception as e:
         print(f"CRITICAL Error updating tenant from sub: {e}")
@@ -189,7 +216,6 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         expand=['latest_invoice.payment_intent']
                     )
                     
-                    # WICHTIG: DB sofort aktualisieren
                     update_tenant_from_subscription(db, tenant, updated_sub)
                     
                     client_secret = extract_client_secret(updated_sub.latest_invoice)
