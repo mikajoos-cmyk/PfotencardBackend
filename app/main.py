@@ -272,6 +272,16 @@ def get_portal_url(
         raise HTTPException(status_code=403, detail="Not authorized")
     return stripe_service.get_billing_portal_url(db, tenant.id, return_url)
 
+@app.get("/api/stripe/invoices", response_model=List[schemas.Invoice])
+def get_invoices_endpoint(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return stripe_service.get_invoices(db, tenant.id)
+
 @app.post("/api/newsletter/subscribe", response_model=schemas.NewsletterSubscriber)
 def subscribe_to_newsletter(data: schemas.NewsletterSubscriberCreate, db: Session = Depends(get_db)):
     return crud.add_newsletter_subscriber(db, data.email, data.source)

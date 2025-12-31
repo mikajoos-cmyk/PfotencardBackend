@@ -293,3 +293,31 @@ def get_subscription_details(db: Session, tenant_id: int):
             "plan": sub.metadata.get("plan_name", tenant.plan)
         }
     except Exception: return None
+
+def get_invoices(db: Session, tenant_id: int, limit: int = 12):
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant or not tenant.stripe_customer_id:
+        return []
+    
+    try:
+        invoices = stripe.Invoice.list(
+            customer=tenant.stripe_customer_id,
+            limit=limit,
+            status='paid'
+        )
+        
+        result = []
+        for inv in invoices.data:
+            result.append({
+                "id": inv.id,
+                "number": inv.number,
+                "created": datetime.fromtimestamp(inv.created, tz=timezone.utc),
+                "amount": inv.total / 100.0,
+                "status": inv.status,
+                "pdf_url": inv.invoice_pdf,
+                "hosted_url": inv.hosted_invoice_url
+            })
+        return result
+    except Exception as e:
+        print(f"Error fetching invoices: {e}")
+        return []

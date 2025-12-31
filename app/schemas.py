@@ -363,3 +363,12 @@ class ChatConversation(BaseModel):
     user: User 
     last_message: Optional[ChatMessage] = None
     unread_count: int = 0
+
+class Invoice(BaseModel):
+    id: str
+    number: Optional[str]
+    created: datetime
+    amount: float
+    status: str
+    pdf_url: Optional[str]
+    hosted_url: Optional[str]
