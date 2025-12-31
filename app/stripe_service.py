@@ -88,7 +88,7 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
             tenant.is_active = True
 
         # 3. Nächste Zahlung berechnen
-        # Wir setzen Reset-Werte nur, wenn wir sicher sind, dass wir sie nicht brauchen (geküdigt)
+        # Standard: Reset, falls gekündigt
         if cancel_at_period_end:
             tenant.next_payment_amount = 0.0
             tenant.next_payment_date = None
@@ -114,55 +114,26 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                     next_price_id = upcoming.lines.data[0].price.id
                     next_plan_name = get_plan_name_from_price_id(next_price_id)
                     
-                    # Nur wenn der nächste Plan anders ist als der aktuelle
                     if next_plan_name and next_plan_name != tenant.plan:
                         tenant.upcoming_plan = next_plan_name
-                        print(f"Upcoming switch detected: {tenant.plan} -> {next_plan_name}")
 
             except stripe.error.InvalidRequestError as e:
-                # Das passiert oft, wenn man gerade erst subscribed hat und Stripe noch keine Invoice hat
-                print(f"Info: No upcoming invoice available yet, using subscription data: {e}")
-                
-                # FALLBACK: Berechne aus Subscription-Daten statt Reset auf 0
-                # Extrahiere Preis aus den Subscription Items
-                items = get('items')
-                if items:
-                    items_data = items.get('data') if isinstance(items, dict) else items.data
-                    if items_data and len(items_data) > 0:
-                        price_obj = items_data[0].get('price') if isinstance(items_data[0], dict) else items_data[0].price
-                        if price_obj:
-                            unit_amount = price_obj.get('unit_amount') if isinstance(price_obj, dict) else price_obj.unit_amount
-                            if unit_amount:
-                                tenant.next_payment_amount = unit_amount / 100.0
-                                print(f"Extracted amount from subscription items: {tenant.next_payment_amount}")
-                
-                # Nutze current_period_end als nächstes Zahlungsdatum
-                if current_period_end:
-                    tenant.next_payment_date = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
-                    print(f"Using period end as next payment date: {tenant.next_payment_date}")
-                
-                # Plan-Wechsel kann nicht ermittelt werden ohne Invoice
-                tenant.upcoming_plan = None
+                # Fallback: Wenn Stripe noch keine Invoice hat (z.B. direkt nach Un-Cancel),
+                # nehmen wir das bekannte Periodenende als nächstes Zahlungsdatum.
+                print(f"Info: No upcoming invoice yet, using fallback date: {e}")
+                tenant.next_payment_date = tenant.subscription_ends_at
+                # Betrag lassen wir auf dem alten Wert oder 0, da wir ihn nicht raten wollen
+                # (Oder man könnte den Standardpreis des Plans nehmen, aber das ist riskant wegen Proration)
                 
             except Exception as e:
                 print(f"Warning: Unexpected error fetching invoice: {e}")
-                # Auch hier Fallback statt Reset
-                items = get('items')
-                if items:
-                    items_data = items.get('data') if isinstance(items, dict) else items.data
-                    if items_data and len(items_data) > 0:
-                        price_obj = items_data[0].get('price') if isinstance(items_data[0], dict) else items_data[0].price
-                        if price_obj:
-                            unit_amount = price_obj.get('unit_amount') if isinstance(price_obj, dict) else price_obj.unit_amount
-                            if unit_amount:
-                                tenant.next_payment_amount = unit_amount / 100.0
-                if current_period_end:
-                    tenant.next_payment_date = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
+                # Auch hier Fallback aufs Datum, damit zumindest etwas angezeigt wird
+                tenant.next_payment_date = tenant.subscription_ends_at
 
         db.add(tenant)
         db.commit()
         db.refresh(tenant)
-        print(f"Updated tenant {tenant.id} from sub {sub_id}. Status: {status}, Cancelled: {cancel_at_period_end}")
+        print(f"Updated tenant {tenant.id}. Status: {status}, Cancelled: {cancel_at_period_end}, Next Bill: {tenant.next_payment_date}")
 
     except Exception as e:
         print(f"CRITICAL Error updating tenant from sub: {e}")
