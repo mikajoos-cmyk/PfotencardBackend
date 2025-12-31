@@ -1,3 +1,4 @@
+# app/models.py
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Date, Boolean, UniqueConstraint, Table
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
@@ -17,12 +18,16 @@ class Tenant(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # NEU: Abo-Laufzeit
+    # Abo-Laufzeit
     subscription_ends_at = Column(DateTime(timezone=True), nullable=True)
     
-    # NEU: Stripe Integration
+    # Stripe Integration
     stripe_customer_id = Column(String(255), nullable=True, index=True)
     stripe_subscription_id = Column(String(255), nullable=True)
+    
+    # NEU: Status direkt in DB speichern für einfachere Abfragen
+    stripe_subscription_status = Column(String(50), nullable=True) # active, trialing, past_due, canceled, etc.
+    cancel_at_period_end = Column(Boolean, default=False) # True wenn gekündigt zum Laufzeitende
 
     # Beziehungen (Ein Tenant hat viele...)
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -327,4 +332,3 @@ class ChatMessage(Base):
     tenant = relationship("Tenant", back_populates="chat_messages")
     sender = relationship("User", foreign_keys=[sender_id])
     receiver = relationship("User", foreign_keys=[receiver_id])
-

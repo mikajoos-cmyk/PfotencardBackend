@@ -1,3 +1,4 @@
+# app/schemas.py
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
@@ -27,6 +28,10 @@ class Tenant(TenantBase):
     id: int
     created_at: datetime
     subscription_ends_at: Optional[datetime] = None
+    
+    # NEU: Felder für Status im Schema
+    stripe_subscription_status: Optional[str] = None
+    cancel_at_period_end: bool = False
 
     class Config:
         from_attributes = True
@@ -42,6 +47,10 @@ class TenantStatus(BaseModel):
     # NEU: Damit das Frontend weiß, ob eine Zahlung hinterlegt ist
     has_payment_method: bool = False 
     in_trial: bool = False
+    
+    # NEU: Status-Felder auch im Status-Check zurückgeben
+    stripe_subscription_status: Optional[str] = None
+    cancel_at_period_end: bool = False
 
 class SubscriptionDetails(BaseModel):
     plan: Optional[str] = None

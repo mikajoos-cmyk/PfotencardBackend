@@ -1,3 +1,4 @@
+# app/main.py
 import os
 import shutil
 from starlette.responses import FileResponse
@@ -121,7 +122,11 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "subscription_ends_at": tenant.subscription_ends_at,
         "plan": tenant.plan,
         "has_payment_method": has_stripe,
-        "in_trial": in_trial
+        "in_trial": in_trial,
+        
+        # NEU: Diese Werte kommen jetzt direkt aus der DB (via Webhook gesynct)
+        "stripe_subscription_status": tenant.stripe_subscription_status,
+        "cancel_at_period_end": tenant.cancel_at_period_end
     }
 
 @app.post("/api/tenants/subscribe")
@@ -180,18 +185,21 @@ async def handle_subscription_update(subscription):
         
         if tenant:
             status = subscription['status']
+            cancel_at_period_end = subscription['cancel_at_period_end']
             
             # Laufzeit aktualisieren
             current_period_end = datetime.fromtimestamp(subscription['current_period_end'], tz=timezone.utc)
             tenant.subscription_ends_at = current_period_end
             tenant.stripe_subscription_id = subscription['id']
             
-            # --- NEU: Plan aus Metadaten lesen und setzen ---
-            # Das holt den Plan ('pro', 'starter'), den wir oben in stripe_service.py gespeichert haben
+            # NEU: Status direkt speichern
+            tenant.stripe_subscription_status = status
+            tenant.cancel_at_period_end = cancel_at_period_end
+            
+            # Plan aus Metadaten lesen und setzen
             plan_name = subscription.get('metadata', {}).get('plan_name')
             if plan_name:
                 tenant.plan = plan_name
-            # -----------------------------------------------
 
             if status in ['active', 'trialing']:
                 tenant.is_active = True
@@ -200,7 +208,7 @@ async def handle_subscription_update(subscription):
                 pass 
 
             db.commit()
-            print(f"Webhook: Updated subscription for tenant {tenant.name} (Plan: {plan_name}, Status: {status})")
+            print(f"Webhook: Updated subscription for tenant {tenant.name} (Plan: {plan_name}, Status: {status}, Canceling: {cancel_at_period_end})")
     except Exception as e:
         print(f"Webhook Error: {e}")
     finally:
@@ -217,6 +225,8 @@ async def handle_subscription_deleted(subscription):
             tenant.plan = 'starter' 
             # Datum auf "jetzt" setzen, damit Checks fehlschlagen
             tenant.subscription_ends_at = datetime.now(timezone.utc)
+            tenant.stripe_subscription_status = 'canceled'
+            tenant.cancel_at_period_end = False # Ist ja schon gelöscht
             
             db.commit()
             print(f"Webhook: Subscription deleted for tenant {tenant.name}")
