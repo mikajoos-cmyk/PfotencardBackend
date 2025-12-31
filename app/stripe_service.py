@@ -7,13 +7,6 @@ from . import models
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
-# Standard-Preise für Fallback (falls Stripe API mal keine Vorschau liefert)
-STANDARD_PRICES = {
-    "starter": {"month": 29.00, "year": 290.00},
-    "pro": {"month": 79.00, "year": 790.00},
-    "enterprise": {"month": 199.00, "year": 1990.00}
-}
-
 def get_price_id(plan_name: str, cycle: str):
     plan = plan_name.lower()
     cycle = cycle.lower()
@@ -38,7 +31,6 @@ def get_price_id(plan_name: str, cycle: str):
     return None
 
 def get_plan_name_from_price_id(price_id: str):
-    """Ermittelt den Plan-Namen anhand der Stripe Price ID"""
     s = settings
     if price_id in [s.STRIPE_PRICE_ID_STARTER_MONTHLY, s.STRIPE_PRICE_ID_STARTER_YEARLY]: return "starter"
     if price_id in [s.STRIPE_PRICE_ID_PRO_MONTHLY, s.STRIPE_PRICE_ID_PRO_YEARLY]: return "pro"
@@ -63,33 +55,13 @@ def extract_client_secret(obj):
         except AttributeError: pass
     return None
 
-def get_fallback_price(plan_name: str, subscription):
-    """Ermittelt den Standardpreis basierend auf dem Intervall im Abo"""
-    try:
-        # Versuche Intervall aus Subscription Items zu lesen
-        is_dict = isinstance(subscription, dict)
-        items = subscription.get('items') if is_dict else subscription.items
-        data = items.get('data') if isinstance(items, dict) else items.data
-        
-        interval = 'month' # Default
-        if data and len(data) > 0:
-            price = data[0].get('price') if isinstance(data[0], dict) else data[0].price
-            recurring = price.get('recurring') if isinstance(price, dict) else price.recurring
-            interval = recurring.get('interval') if isinstance(recurring, dict) else recurring.interval
-            
-        plan_key = plan_name.lower() if plan_name else 'starter'
-        if plan_key == 'verband': plan_key = 'enterprise'
-        
-        return STANDARD_PRICES.get(plan_key, {}).get(interval, 0.0)
-    except Exception as e:
-        print(f"Error calculating fallback price: {e}")
-        return 0.0
-
 def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscription):
     """
     Aktualisiert den Tenant SOFORT mit den Daten von Stripe.
+    Liest Preise direkt aus dem Abo, falls Invoice 0 ist (Trial).
     """
     try:
+        # Helper für Objekt/Dict Zugriff
         is_dict = isinstance(subscription, dict)
         get = lambda k: subscription.get(k) if is_dict else getattr(subscription, k, None)
         
@@ -98,11 +70,15 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
         status = get('status')
         cancel_at_period_end = get('cancel_at_period_end')
         current_period_end = get('current_period_end')
+        trial_end = get('trial_end')
         metadata = get('metadata') or {}
         
-        # 2. DB Update (Status & Laufzeit)
-        if current_period_end:
-            tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
+        # 2. DB Update (Laufzeit)
+        # Wenn im Trial: Das Ende ist das Trial-Ende, nicht das Perioden-Ende
+        if status == 'trialing' and trial_end:
+             tenant.subscription_ends_at = datetime.fromtimestamp(trial_end, tz=timezone.utc)
+        elif current_period_end:
+             tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
         
         tenant.stripe_subscription_id = sub_id
         tenant.stripe_subscription_status = status
@@ -116,51 +92,66 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
             tenant.is_active = True
 
         # 3. Nächste Zahlung berechnen
-        # Standard-Reset
-        tenant.upcoming_plan = None 
         
-        if cancel_at_period_end:
-            # Wenn gekündigt, gibt es keine nächste Zahlung
-            tenant.next_payment_amount = 0.0
-            tenant.next_payment_date = None
-        elif status in ['active', 'trialing'] and tenant.stripe_customer_id:
+        # A) Standardwerte setzen
+        tenant.next_payment_amount = 0.0
+        # Datum ist standardmäßig das Abo-Ende (bei Active = Renewal, bei Trial = Erste Zahlung)
+        tenant.next_payment_date = tenant.subscription_ends_at
+        tenant.upcoming_plan = None
+
+        if not cancel_at_period_end and status in ['active', 'trialing']:
+            # B) Versuch über Invoice (deckt Proration/Guthaben ab)
             try:
-                # Versuch 1: Live von Stripe (Genauester Wert inkl. Proration/Guthaben)
-                upcoming = stripe.Invoice.upcoming(
-                    customer=tenant.stripe_customer_id,
-                    subscription=sub_id
-                )
-                
-                tenant.next_payment_amount = upcoming.amount_due / 100.0
-                
-                if upcoming.next_payment_attempt:
-                    tenant.next_payment_date = datetime.fromtimestamp(upcoming.next_payment_attempt, tz=timezone.utc)
-                else:
-                    tenant.next_payment_date = tenant.subscription_ends_at
-                
-                # Plan-Wechsel Logik
-                if upcoming.lines and upcoming.lines.data:
-                    next_price_id = upcoming.lines.data[0].price.id
-                    next_plan_name = get_plan_name_from_price_id(next_price_id)
+                if tenant.stripe_customer_id:
+                    upcoming = stripe.Invoice.upcoming(
+                        customer=tenant.stripe_customer_id,
+                        subscription=sub_id
+                    )
                     
-                    if next_plan_name and next_plan_name != tenant.plan:
-                        tenant.upcoming_plan = next_plan_name
+                    # Betrag speichern (wenn > 0)
+                    if upcoming.amount_due > 0:
+                        tenant.next_payment_amount = upcoming.amount_due / 100.0
+                    
+                    # Datum speichern (falls vorhanden)
+                    if upcoming.next_payment_attempt:
+                        tenant.next_payment_date = datetime.fromtimestamp(upcoming.next_payment_attempt, tz=timezone.utc)
+                    
+                    # Plan-Wechsel erkennen
+                    if upcoming.lines and upcoming.lines.data:
+                        next_price_id = upcoming.lines.data[0].price.id
+                        next_plan_name = get_plan_name_from_price_id(next_price_id)
+                        if next_plan_name and next_plan_name != tenant.plan:
+                            tenant.upcoming_plan = next_plan_name
 
             except Exception as e:
-                # Versuch 2: Fallback (Wenn Stripe API 'Rechnung wird noch berechnet' Fehler wirft)
-                print(f"Info: Could not fetch upcoming invoice ({str(e)}). Using fallback calculation.")
-                
-                # Datum = Ende der aktuellen Periode
-                tenant.next_payment_date = tenant.subscription_ends_at
-                
-                # Betrag = Standardpreis des aktuellen Plans
-                fallback_amount = get_fallback_price(tenant.plan, subscription)
-                tenant.next_payment_amount = fallback_amount
+                print(f"Info: Upcoming invoice fetch failed/skipped: {e}")
+
+            # C) FALLBACK / TRIAL FIX:
+            # Wenn der Betrag immer noch 0 ist (typisch für Trial), holen wir den
+            # "echten" Preis direkt aus dem Subscription Item.
+            if tenant.next_payment_amount == 0.0:
+                try:
+                    items = get('items')
+                    data = items.get('data') if isinstance(items, dict) else items.data
+                    if data and len(data) > 0:
+                        # Wir nehmen das erste Item (Haupt-Abo)
+                        first_item = data[0]
+                        price_obj = first_item.get('price') if isinstance(first_item, dict) else first_item.price
+                        unit_amount = price_obj.get('unit_amount') if isinstance(price_obj, dict) else price_obj.unit_amount
+                        quantity = first_item.get('quantity') if isinstance(first_item, dict) else first_item.quantity
+                        
+                        if unit_amount:
+                            # Preis berechnen (Menge * Einzelpreis)
+                            calculated_amount = (unit_amount * (quantity or 1)) / 100.0
+                            tenant.next_payment_amount = calculated_amount
+                            print(f"Used subscription item fallback price: {calculated_amount}")
+                except Exception as e:
+                    print(f"Error extracting fallback price: {e}")
 
         db.add(tenant)
         db.commit()
         db.refresh(tenant)
-        print(f"Updated tenant {tenant.id}. Status: {status}, Amount: {tenant.next_payment_amount}")
+        print(f"Updated tenant {tenant.id}. Status: {status}, Next Bill: {tenant.next_payment_amount} at {tenant.next_payment_date}")
 
     except Exception as e:
         print(f"CRITICAL Error updating tenant from sub: {e}")
@@ -175,6 +166,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
     if not price_id:
         raise HTTPException(status_code=400, detail="Invalid plan")
 
+    # Trial Berechnung
     trial_days = 0
     now = datetime.now(timezone.utc)
     if tenant.subscription_ends_at and tenant.subscription_ends_at > now:
@@ -216,6 +208,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         expand=['latest_invoice.payment_intent']
                     )
                     
+                    # SOFORT DB UPDATE
                     update_tenant_from_subscription(db, tenant, updated_sub)
                     
                     client_secret = extract_client_secret(updated_sub.latest_invoice)
@@ -244,6 +237,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
 
         subscription = stripe.Subscription.create(**subscription_data)
         
+        # SOFORT DB UPDATE
         update_tenant_from_subscription(db, tenant, subscription)
 
         client_secret = None
