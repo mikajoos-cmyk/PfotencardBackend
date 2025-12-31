@@ -180,80 +180,23 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
 async def handle_subscription_update(subscription):
     db = SessionLocal() 
     try:
-        # 1. Versuche Tenant über Metadata ID zu finden (Robust)
+        # 1. Tenant finden (Robust über Metadata oder CustomerID)
         tenant_id = subscription.get('metadata', {}).get('tenant_id')
         tenant = None
         
         if tenant_id:
             tenant = db.query(models.Tenant).filter(models.Tenant.id == int(tenant_id)).first()
             
-        # 2. Fallback: Suche über Stripe Customer ID
         if not tenant:
             customer_id = subscription.get('customer')
             if customer_id:
                 tenant = db.query(models.Tenant).filter(models.Tenant.stripe_customer_id == customer_id).first()
         
         if tenant:
-            # 1. Basis-Daten updaten
-            status = subscription.get('status')
-            cancel_at_period_end = subscription.get('cancel_at_period_end')
-            current_period_end = subscription.get('current_period_end')
-            
-            if current_period_end:
-                tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
-            
-            tenant.stripe_subscription_id = subscription.get('id')
-            tenant.stripe_subscription_status = status
-            tenant.cancel_at_period_end = cancel_at_period_end
-            
-            # Aktueller Plan (aus Metadaten oder Fallback)
-            plan_name = subscription.get('metadata', {}).get('plan_name')
-            if plan_name:
-                tenant.plan = plan_name
-
-            if status in ['active', 'trialing']:
-                tenant.is_active = True
-
-            # --- NEU: VORSCHAU AUF NÄCHSTE RECHNUNG LADEN ---
-            # Wir holen die "Upcoming Invoice" von Stripe, um zu sehen, was als nächstes passiert.
-            if not cancel_at_period_end and status in ['active', 'trialing']:
-                try:
-                    upcoming = stripe.Invoice.upcoming(customer=tenant.stripe_customer_id)
-                    
-                    # Betrag (in Cents -> Euro)
-                    tenant.next_payment_amount = upcoming.amount_due / 100.0
-                    
-                    # Datum
-                    if upcoming.next_payment_attempt:
-                        tenant.next_payment_date = datetime.fromtimestamp(upcoming.next_payment_attempt, tz=timezone.utc)
-                    else:
-                        tenant.next_payment_date = tenant.subscription_ends_at
-
-                    # Zukünftiger Plan?
-                    # Wir schauen uns das erste Line-Item der kommenden Rechnung an
-                    if upcoming.lines and upcoming.lines.data:
-                        next_price_id = upcoming.lines.data[0].price.id
-                        next_plan_name = get_plan_name_from_price_id(next_price_id)
-                        
-                        # Wenn der nächste Plan anders ist als der jetzige -> Wechsel steht an
-                        if next_plan_name and next_plan_name != tenant.plan:
-                            tenant.upcoming_plan = next_plan_name
-                        else:
-                            tenant.upcoming_plan = None # Kein Wechsel
-                except Exception as e:
-                    print(f"Could not fetch upcoming invoice: {e}")
-                    # Bei Fehlern (z.B. kein Abo mehr) Felder resetten
-                    tenant.next_payment_amount = 0.0
-                    tenant.next_payment_date = None
-                    tenant.upcoming_plan = None
-            else:
-                # Bei Kündigung gibt es keine nächste Zahlung
-                tenant.next_payment_amount = 0.0
-                tenant.next_payment_date = None
-                tenant.upcoming_plan = None
-
-            db.commit()
-            print(f"Webhook success: Updated tenant {tenant.id} status={status}, next_bill={tenant.next_payment_amount}€")
+            # WICHTIG: Nutze die zentrale Logik aus stripe_service!
+            # Diese Funktion schreibt Status, Plan UND die "Next Payment" Infos in die DB.
+            stripe_service.update_tenant_from_subscription(db, tenant, subscription)
+            print(f"Webhook success: Tenant {tenant.id} updated via service logic")
         else:
             print(f"Webhook warning: Tenant not found for subscription {subscription.get('id')}")
             
