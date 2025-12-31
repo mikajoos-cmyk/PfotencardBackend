@@ -28,6 +28,12 @@ class Tenant(Base):
     # NEU: Status direkt in DB speichern für einfachere Abfragen
     stripe_subscription_status = Column(String(50), nullable=True) # active, trialing, past_due, canceled, etc.
     cancel_at_period_end = Column(Boolean, default=False) # True wenn gekündigt zum Laufzeitende
+    
+    # --- NEU: Vorschau auf nächste Zahlung & Wechsel ---
+    next_payment_amount = Column(Float, default=0.0)
+    next_payment_date = Column(DateTime(timezone=True), nullable=True)
+    upcoming_plan = Column(String(50), nullable=True) # z.B. 'pro' wenn ein Wechsel ansteht
+    # ---------------------------------------------------
 
     # Beziehungen (Ein Tenant hat viele...)
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")

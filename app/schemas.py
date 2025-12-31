@@ -45,6 +45,11 @@ class TenantStatus(BaseModel):
     # NEU: WICHTIG - Diese Felder müssen hier rein!
     stripe_subscription_status: Optional[str] = None
     cancel_at_period_end: bool = False
+    
+    # NEU: Vorschau-Daten
+    next_payment_amount: Optional[float] = None
+    next_payment_date: Optional[datetime] = None
+    upcoming_plan: Optional[str] = None
 
 class SubscriptionDetails(BaseModel):
     plan: Optional[str] = None

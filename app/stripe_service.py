@@ -31,6 +31,35 @@ def get_price_id(plan_name: str, cycle: str):
         return prices[plan][cycle]
     return None
 
+def extract_client_secret(invoice):
+    """Hilfsfunktion zum sicheren Extrahieren des Client Secrets aus einer Invoice"""
+    if not invoice:
+        return None
+        
+    # Versuche payment_intent zu holen (Dictionary-Zugriff für Stripe Objekte)
+    payment_intent = None
+    try:
+        # Prio 1: Dictionary Access (Standard für neue Stripe Libs)
+        payment_intent = invoice['payment_intent']
+    except (TypeError, KeyError, AttributeError):
+        try:
+            # Prio 2: Attribut Access (Fallback)
+            payment_intent = invoice.payment_intent
+        except AttributeError:
+            pass
+            
+    if not payment_intent:
+        return None
+        
+    # Client Secret aus Payment Intent holen
+    try:
+        return payment_intent['client_secret']
+    except (TypeError, KeyError, AttributeError):
+        try:
+            return payment_intent.client_secret
+        except AttributeError:
+            return None
+
 def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant:
@@ -62,6 +91,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         
         customer_id = tenant.stripe_customer_id
 
+        # FALL A: Update
         if tenant.stripe_subscription_id:
             try:
                 subscription = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
@@ -85,25 +115,18 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         expand=['latest_invoice.payment_intent']
                     )
                     
-                    # Client Secret für eventuelle Nachzahlung zurückgeben
-                    client_secret = None
-                    # ÄNDERUNG: Sicherer Zugriff via .get(), da Attributzugriff deprecated ist
-                    if updated_sub.latest_invoice:
-                        invoice = updated_sub.latest_invoice
-                        # Prüfen ob invoice ein Objekt ist (hat .get) und payment_intent existiert
-                        payment_intent = invoice.get('payment_intent') if hasattr(invoice, 'get') else None
-                        
-                        if payment_intent:
-                            client_secret = payment_intent.client_secret
+                    client_secret = extract_client_secret(updated_sub.latest_invoice)
                     
                     return {
                         "subscriptionId": updated_sub.id,
                         "clientSecret": client_secret,
-                        "status": "updated"
+                        "status": "updated",
+                        "message": "Dein Plan wurde erfolgreich geändert."
                     }
             except stripe.error.InvalidRequestError:
                 pass
 
+        # FALL B: Neu
         subscription_data = {
             'customer': customer_id,
             'items': [{"price": price_id}],
@@ -126,14 +149,13 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
 
         client_secret = None
         if subscription.pending_setup_intent:
-            client_secret = subscription.pending_setup_intent.client_secret
-        elif subscription.latest_invoice:
-            # ÄNDERUNG: Sicherer Zugriff via .get() statt .payment_intent
-            invoice = subscription.latest_invoice
-            payment_intent = invoice.get('payment_intent') if hasattr(invoice, 'get') else None
-            
-            if payment_intent:
-                client_secret = payment_intent.client_secret
+            # Setup Intent hat auch dict access
+            try:
+                client_secret = subscription.pending_setup_intent['client_secret']
+            except (TypeError, KeyError):
+                client_secret = subscription.pending_setup_intent.client_secret
+        else:
+            client_secret = extract_client_secret(subscription.latest_invoice)
 
         return {
             "subscriptionId": subscription.id,
@@ -174,10 +196,9 @@ def get_subscription_details(db: Session, tenant_id: int):
         return None
     
     try:
-        # Abo laden
         sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
         
-        # Sicherer Zugriff auf Attribute (manchmal Dict, manchmal Objekt bei Stripe Libs)
+        # Sicherer Zugriff
         cancel_at_period_end = sub.get('cancel_at_period_end') if isinstance(sub, dict) else sub.cancel_at_period_end
         status = sub.get('status') if isinstance(sub, dict) else sub.status
         current_period_end = sub.get('current_period_end') if isinstance(sub, dict) else sub.current_period_end
@@ -192,7 +213,6 @@ def get_subscription_details(db: Session, tenant_id: int):
             "next_payment_date": None
         }
 
-        # Wenn aktiv und NICHT gekündigt -> Vorschau laden
         if not cancel_at_period_end and status in ['active', 'trialing']:
             try:
                 invoice = stripe.Invoice.upcoming(customer=tenant.stripe_customer_id)
