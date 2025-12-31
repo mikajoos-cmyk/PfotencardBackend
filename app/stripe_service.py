@@ -121,14 +121,43 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
 
             except stripe.error.InvalidRequestError as e:
                 # Das passiert oft, wenn man gerade erst subscribed hat und Stripe noch keine Invoice hat
-                print(f"Info: No upcoming invoice available yet: {e}")
-                # Wir lassen die alten Werte stehen oder setzen 0, wenn es kritisch ist
-                # Hier sicherer Reset, um keine falschen Daten anzuzeigen
-                tenant.next_payment_amount = 0.0
-                tenant.next_payment_date = None
+                print(f"Info: No upcoming invoice available yet, using subscription data: {e}")
+                
+                # FALLBACK: Berechne aus Subscription-Daten statt Reset auf 0
+                # Extrahiere Preis aus den Subscription Items
+                items = get('items')
+                if items:
+                    items_data = items.get('data') if isinstance(items, dict) else items.data
+                    if items_data and len(items_data) > 0:
+                        price_obj = items_data[0].get('price') if isinstance(items_data[0], dict) else items_data[0].price
+                        if price_obj:
+                            unit_amount = price_obj.get('unit_amount') if isinstance(price_obj, dict) else price_obj.unit_amount
+                            if unit_amount:
+                                tenant.next_payment_amount = unit_amount / 100.0
+                                print(f"Extracted amount from subscription items: {tenant.next_payment_amount}")
+                
+                # Nutze current_period_end als nächstes Zahlungsdatum
+                if current_period_end:
+                    tenant.next_payment_date = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
+                    print(f"Using period end as next payment date: {tenant.next_payment_date}")
+                
+                # Plan-Wechsel kann nicht ermittelt werden ohne Invoice
                 tenant.upcoming_plan = None
+                
             except Exception as e:
                 print(f"Warning: Unexpected error fetching invoice: {e}")
+                # Auch hier Fallback statt Reset
+                items = get('items')
+                if items:
+                    items_data = items.get('data') if isinstance(items, dict) else items.data
+                    if items_data and len(items_data) > 0:
+                        price_obj = items_data[0].get('price') if isinstance(items_data[0], dict) else items_data[0].price
+                        if price_obj:
+                            unit_amount = price_obj.get('unit_amount') if isinstance(price_obj, dict) else price_obj.unit_amount
+                            if unit_amount:
+                                tenant.next_payment_amount = unit_amount / 100.0
+                if current_period_end:
+                    tenant.next_payment_date = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
 
         db.add(tenant)
         db.commit()
