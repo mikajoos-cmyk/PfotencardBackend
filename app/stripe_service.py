@@ -1,3 +1,4 @@
+# app/stripe_service.py
 from datetime import datetime, timezone
 import stripe
 from fastapi import HTTPException
@@ -59,6 +60,7 @@ def extract_client_secret(obj):
 def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscription):
     """
     Aktualisiert den Tenant SOFORT mit den Daten von Stripe.
+    Robust gegen API-Fehler bei Invoice-Vorschau.
     """
     try:
         # Helper für Objekt/Dict Zugriff
@@ -108,6 +110,9 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                 # Datum speichern
                 if upcoming.next_payment_attempt:
                     tenant.next_payment_date = datetime.fromtimestamp(upcoming.next_payment_attempt, tz=timezone.utc)
+                else:
+                    # Fallback auf Periodenende, falls kein explizites Zahlungsdatum
+                    tenant.next_payment_date = tenant.subscription_ends_at
                 
                 # Plan-Wechsel erkennen
                 if upcoming.lines and upcoming.lines.data:
@@ -260,13 +265,12 @@ def get_billing_portal_url(db: Session, tenant_id: int, return_url: str):
     return {"url": session.url}
 
 def get_subscription_details(db: Session, tenant_id: int):
+    # Fallback
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant or not tenant.stripe_subscription_id:
         return None
     try:
         sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
-        # Wir geben hier zur Sicherheit auch nochmal die Live-Daten zurück, 
-        # falls die DB mal out-of-sync wäre (obwohl update_tenant_from_subscription das verhindern soll)
         return {
             "status": sub.status,
             "plan": sub.metadata.get("plan_name", tenant.plan)
