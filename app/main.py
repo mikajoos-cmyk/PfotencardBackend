@@ -19,14 +19,13 @@ from supabase import create_client, Client
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
-# Supabase Client initialisieren
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
 origins_regex = r"https://(.*\.)?pfotencard\.de|http://localhost:\d+"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=origins_regex, # Hier Regex nutzen statt allow_origins
+    allow_origin_regex=origins_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -36,7 +35,6 @@ app.add_middleware(
 def read_root():
     return {"message": "Pfotencard Multi-Tenant API is running"}
 
-# --- CONFIG ENDPOINT ---
 @app.get("/api/config", response_model=schemas.AppConfig)
 def read_app_config(
     db: Session = Depends(get_db),
@@ -44,7 +42,6 @@ def read_app_config(
 ):
     return crud.get_app_config(db, tenant.id)
 
-# --- SETTINGS ENDPOINT (NEU) ---
 @app.put("/api/settings")
 def update_settings(
     settings: schemas.SettingsUpdate,
@@ -52,14 +49,11 @@ def update_settings(
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
-    # Nur Admins dürfen Einstellungen ändern
     if current_user.role != 'admin':
         raise HTTPException(status_code=403, detail="Not authorized")
-        
     crud.update_tenant_settings(db, tenant.id, settings)
     return {"message": "Settings updated successfully"}
 
-# --- AUTHENTICATION ---
 @app.post("/api/login", response_model=schemas.Token)
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -67,25 +61,18 @@ async def login_for_access_token(
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     user = crud.get_user_by_email(db, email=form_data.username, tenant_id=tenant.id)
-    
     if not user or not auth.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-        
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
         data={"sub": user.email, "tenant_id": tenant.id}, 
         expires_delta=access_token_expires
     )
-    
-    return {
-        "access_token": access_token, 
-        "token_type": "bearer", 
-        "user": user
-    }
+    return {"access_token": access_token, "token_type": "bearer", "user": user}
 
 @app.get("/api/users/me", response_model=schemas.User)
 async def read_users_me(current_user: schemas.User = Depends(auth.get_current_active_user)):
@@ -102,17 +89,18 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
     is_valid = True
     
-    # Check ob abgelaufen
     if tenant.subscription_ends_at and tenant.subscription_ends_at < now:
         is_valid = False
 
-    # Check ob wirkliches Stripe Abo existiert
     has_stripe = True if tenant.stripe_subscription_id else False
     
-    # Check ob Trial (Gültig, aber kein Stripe Abo ODER Stripe Abo im Status Trialing)
-    # Vereinfacht: Wenn kein Stripe ID da ist, aber subscription_valid ist True -> Registrierungs-Trial
+    # Trial Logik verbessert: Auch Stripe Trial status berücksichtigen
     in_trial = False
+    # Wenn "Registrierungs-Trial" ohne Stripe 
     if is_valid and not has_stripe:
+        in_trial = True
+    # Oder wenn Stripe-Status 'trialing' ist
+    elif tenant.stripe_subscription_status == 'trialing':
         in_trial = True
 
     return {
@@ -124,7 +112,7 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "has_payment_method": has_stripe,
         "in_trial": in_trial,
         
-        # NEU: Diese Werte kommen jetzt direkt aus der DB (via Webhook gesynct)
+        # NEU: Die DB-Werte zurückgeben
         "stripe_subscription_status": tenant.stripe_subscription_status,
         "cancel_at_period_end": tenant.cancel_at_period_end
     }
@@ -143,7 +131,7 @@ def update_subscription(data: schemas.SubscriptionUpdate, db: Session = Depends(
     return {"message": "Subscription updated successfully", "valid_until": tenant.subscription_ends_at}
 
 
-# --- STRIPE WEBHOOK ---
+# --- STRIPE WEBHOOK (AKTUALISIERT) ---
 
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request, stripe_signature: str = Header(None)):
@@ -156,20 +144,15 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
             payload, sig_header, endpoint_secret
         )
     except ValueError:
-        # Invalid payload
         raise HTTPException(status_code=400, detail="Invalid payload")
     except stripe.error.SignatureVerificationError:
-        # Invalid signature
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     # --- EVENT HANDLING ---
-    
-    # 1. Abo wurde aktualisiert (z.B. verlängert, Plan geändert oder gekündigt)
     if event['type'] == 'customer.subscription.updated':
         subscription = event['data']['object']
         await handle_subscription_update(subscription)
 
-    # 2. Abo wurde gelöscht (z.B. nach Ablauf der Kündigungsfrist)
     elif event['type'] == 'customer.subscription.deleted':
         subscription = event['data']['object']
         await handle_subscription_deleted(subscription)
@@ -179,36 +162,49 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
 async def handle_subscription_update(subscription):
     db = SessionLocal() 
     try:
-        customer_id = subscription['customer']
+        # 1. Versuche Tenant über Metadata ID zu finden (Robust)
+        tenant_id = subscription.get('metadata', {}).get('tenant_id')
+        tenant = None
         
-        tenant = db.query(models.Tenant).filter(models.Tenant.stripe_customer_id == customer_id).first()
+        if tenant_id:
+            tenant = db.query(models.Tenant).filter(models.Tenant.id == int(tenant_id)).first()
+            
+        # 2. Fallback: Suche über Stripe Customer ID
+        if not tenant:
+            customer_id = subscription.get('customer')
+            if customer_id:
+                tenant = db.query(models.Tenant).filter(models.Tenant.stripe_customer_id == customer_id).first()
         
         if tenant:
-            status = subscription['status']
-            cancel_at_period_end = subscription['cancel_at_period_end']
+            # Werte extrahieren (sicheres .get)
+            status = subscription.get('status')
+            cancel_at_period_end = subscription.get('cancel_at_period_end')
+            current_period_end = subscription.get('current_period_end')
             
-            # Laufzeit aktualisieren
-            current_period_end = datetime.fromtimestamp(subscription['current_period_end'], tz=timezone.utc)
-            tenant.subscription_ends_at = current_period_end
-            tenant.stripe_subscription_id = subscription['id']
+            # DB Updates
+            if current_period_end:
+                tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
             
-            # NEU: Status direkt speichern
+            tenant.stripe_subscription_id = subscription.get('id')
             tenant.stripe_subscription_status = status
             tenant.cancel_at_period_end = cancel_at_period_end
             
-            # Plan aus Metadaten lesen und setzen
+            # Plan Name aus Metadata
             plan_name = subscription.get('metadata', {}).get('plan_name')
             if plan_name:
                 tenant.plan = plan_name
 
+            # Active/Inactive Logic
             if status in ['active', 'trialing']:
                 tenant.is_active = True
             elif status in ['unpaid', 'past_due', 'canceled']:
-                # Optional: Logik für Sperrung
                 pass 
 
             db.commit()
-            print(f"Webhook: Updated subscription for tenant {tenant.name} (Plan: {plan_name}, Status: {status}, Canceling: {cancel_at_period_end})")
+            print(f"Webhook success: Updated tenant {tenant.id} status to {status}, cancel_at_period_end={cancel_at_period_end}")
+        else:
+            print(f"Webhook warning: Tenant not found for subscription {subscription.get('id')}")
+            
     except Exception as e:
         print(f"Webhook Error: {e}")
     finally:
@@ -217,16 +213,14 @@ async def handle_subscription_update(subscription):
 async def handle_subscription_deleted(subscription):
     db = SessionLocal()
     try:
-        customer_id = subscription['customer']
+        customer_id = subscription.get('customer')
         tenant = db.query(models.Tenant).filter(models.Tenant.stripe_customer_id == customer_id).first()
         
         if tenant:
-            # Abo ist endgültig vorbei -> Zurück auf Starter oder deaktivieren
             tenant.plan = 'starter' 
-            # Datum auf "jetzt" setzen, damit Checks fehlschlagen
             tenant.subscription_ends_at = datetime.now(timezone.utc)
             tenant.stripe_subscription_status = 'canceled'
-            tenant.cancel_at_period_end = False # Ist ja schon gelöscht
+            tenant.cancel_at_period_end = False 
             
             db.commit()
             print(f"Webhook: Subscription deleted for tenant {tenant.name}")
@@ -244,12 +238,8 @@ def create_subscription(
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    # 1. Sicherheits-Check: Ist der User wirklich da?
     if not current_user:
-        print("FEHLER: create_subscription aufgerufen, aber current_user ist None!")
-        raise HTTPException(status_code=401, detail="Authentication failed (User is None).")
-
-    # 2. Rollen-Check
+        raise HTTPException(status_code=401, detail="Authentication failed")
     if current_user.role != 'admin':
         raise HTTPException(status_code=403, detail="Not authorized")
         
@@ -273,7 +263,6 @@ def get_subscription_details_endpoint(
 ):
     if current_user.role != 'admin':
         raise HTTPException(status_code=403, detail="Not authorized")
-        
     return stripe_service.get_subscription_details(db, tenant.id)
 
 @app.get("/api/stripe/portal")
@@ -287,100 +276,62 @@ def get_portal_url(
         raise HTTPException(status_code=403, detail="Not authorized")
     return stripe_service.get_billing_portal_url(db, tenant.id, return_url)
 
-
-# --- NEWSLETTER ENDPOINT (Öffentlich für Marketing-Seite) ---
-
 @app.post("/api/newsletter/subscribe", response_model=schemas.NewsletterSubscriber)
-def subscribe_to_newsletter(
-    data: schemas.NewsletterSubscriberCreate,
-    db: Session = Depends(get_db)
-):
-    """
-    Fügt eine E-Mail zur globalen Marketing-Liste hinzu.
-    """
+def subscribe_to_newsletter(data: schemas.NewsletterSubscriberCreate, db: Session = Depends(get_db)):
     return crud.add_newsletter_subscriber(db, data.email, data.source)
 
-# --- TENANT REGISTRATION ---
 @app.post("/api/tenants/register", response_model=schemas.Tenant)
-def register_tenant(
-    tenant_data: schemas.TenantCreate, 
-    admin_data: schemas.UserCreate,
-    db: Session = Depends(get_db)
-):
+def register_tenant(tenant_data: schemas.TenantCreate, admin_data: schemas.UserCreate, db: Session = Depends(get_db)):
     if crud.get_tenant_by_subdomain(db, tenant_data.subdomain):
         raise HTTPException(status_code=400, detail="Subdomain already taken")
-        
-    # 1. 14 Tage Testzeitraum berechnen
-    trial_end = datetime.now(timezone.utc) + timedelta(days=14)
     
-    # 2. Tenant erstellen - IMMER als 'enterprise' starten
+    trial_end = datetime.now(timezone.utc) + timedelta(days=14)
     new_tenant = models.Tenant(
         name=tenant_data.name,
         subdomain=tenant_data.subdomain,
-        plan="enterprise",  # <--- ÄNDERUNG: Startet direkt im höchsten Plan
+        plan="enterprise",
         config=tenant_data.config.model_dump(),
-        subscription_ends_at=trial_end, # <--- ÄNDERUNG: Datum ist gesetzt
+        subscription_ends_at=trial_end,
         is_active=True
     )
     db.add(new_tenant)
     db.commit()
     db.refresh(new_tenant)
     
-    # --- Newsletter Logic (bleibt gleich) ---
     try:
         crud.add_newsletter_subscriber(db, admin_data.email, "school_registration")
-    except Exception as e:
-        print(f"Warnung: Konnte Admin nicht zum Newsletter hinzufügen: {e}")
+    except: pass
 
-    # 2. Admin in Supabase Auth anlegen (bleibt gleich)
     auth_id = None
     try:
-        if not admin_data.password:
-            admin_data.password = secrets.token_urlsafe(16)
-
+        if not admin_data.password: admin_data.password = secrets.token_urlsafe(16)
         redirect_url = f"https://{tenant_data.subdomain}.pfotencard.de/auth/callback"
-        
         metadata = {
             "branding_name": "Pfotencard",
             "branding_logo": "https://pfotencard.de/logo.png",
             "branding_color": "#22C55E",
             "school_name": "Pfotencard"
         }
-
         auth_res = supabase.auth.sign_up({
             "email": admin_data.email,
             "password": admin_data.password,
-            "options": {
-                "data": metadata,
-                "email_redirect_to": redirect_url
-            }
+            "options": {"data": metadata, "email_redirect_to": redirect_url}
         })
-        if auth_res.user:
-            auth_id = auth_res.user.id
-            
+        if auth_res.user: auth_id = auth_res.user.id
     except Exception as e:
-        print(f"DEBUG: FEHLER bei Supabase Registration: {e}")
+        print(f"Supabase error: {e}")
 
     admin_data.role = "admin"
     crud.create_user(db, admin_data, new_tenant.id, auth_id=auth_id)
-    
     return new_tenant
 
-# --- USER REGISTRATION ---
 @app.post("/api/register", response_model=schemas.User)
-def register_user(
-    user: schemas.UserCreate, 
-    db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
-):
-    print(23232323)
+def register_user(user: schemas.UserCreate, db: Session = Depends(get_db), tenant: models.Tenant = Depends(auth.get_current_tenant)):
     db_user = crud.get_user_by_email(db, email=user.email, tenant_id=tenant.id)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered in this school")
-    print(23235455435)
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=str(user.auth_id) if user.auth_id else None)
 
-# --- USERS ---
 @app.post("/api/users", response_model=schemas.User)
 def create_user(
     user: schemas.UserCreate, 
@@ -388,70 +339,37 @@ def create_user(
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
-    print(23232342342423423)
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    print(33332333)
     db_user = crud.get_user_by_email(db, email=user.email, tenant_id=tenant.id)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered in this school")
-    print(44444444)
     
-    # In Supabase Auth anlegen
     auth_id = None
     try:
         tenant_branding = tenant.config.get("branding", {})
-        branding_logo = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
-        branding_color = tenant_branding.get("primary_color") or "#22C55E"
-        
         metadata = {
             "branding_name": tenant.name,
-            "branding_logo": branding_logo,
-            "branding_color": branding_color,
+            "branding_logo": tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png",
+            "branding_color": tenant_branding.get("primary_color") or "#22C55E",
             "school_name": tenant.name
         }
-        print("--------------------------------------------------")
-        print(f"DEBUG: Sende Invite für {user.email}")
-        print(f"DEBUG: RedirectTo URL: https://{tenant.subdomain}.pfotencard.de/update-password")
-        print(f"DEBUG: Metadata Payload: {metadata}")
-        print("--------------------------------------------------")
-        # Versuch 1: Einladen
         try:
             auth_res = supabase.auth.admin.invite_user_by_email(
                 user.email,
-                {
-                    "data": metadata,
-                    "redirectTo": f"https://{tenant.subdomain}.pfotencard.de/update-password"
-                }
+                {"data": metadata, "redirectTo": f"https://{tenant.subdomain}.pfotencard.de/update-password"}
             )
-            if auth_res.user:
-                auth_id = auth_res.user.id
-        except Exception as invite_error:
-            # Fallback: Wenn User schon existiert, Auth-ID suchen und Metadaten updaten
-            print(f"Invite failed (user likely exists): {invite_error}. Updating metadata...")
-            
-            # User ID suchen
+            if auth_res.user: auth_id = auth_res.user.id
+        except Exception:
             users_res = supabase.auth.admin.list_users()
-            existing_user = next((u for u in users_res.data.users if u.email == user.email), None) # Access .data.users
-            
-            if existing_user:
-                auth_id = existing_user.id
-                # Metadaten zwingend aktualisieren (für Branding-Wechsel)
-                supabase.auth.admin.update_user_by_id(
-                    auth_id,
-                    {"user_metadata": metadata}
-                )
-            else:
-                raise invite_error
-
+            existing = next((u for u in users_res.data.users if u.email == user.email), None)
+            if existing:
+                auth_id = existing.id
+                supabase.auth.admin.update_user_by_id(auth_id, {"user_metadata": metadata})
     except Exception as e:
-        print(f"DEBUG: Supabase User Sync failed completely: {e}")
-        # Hier evtl. Fehler werfen, damit kein 'toter' lokaler User entsteht
-        # raise HTTPException(status_code=500, detail="Could not create authentication user")
+        print(f"Supabase User Sync failed: {e}")
 
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=auth_id)
-
-# --- USER ENDPOINTS ---
 
 @app.get("/api/users/staff", response_model=List[schemas.User])
 def read_staff_users(
@@ -459,14 +377,8 @@ def read_staff_users(
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
-    """
-    Gibt eine Liste aller Mitarbeiter und Admins zurück.
-    Erlaubt für alle eingeloggten User (damit Kunden Ansprechpartner finden).
-    """
-    # Using simplistic role check for now, can be refined
     if current_user.role not in ['admin', 'mitarbeiter', 'customer', 'kunde']:
          raise HTTPException(status_code=403, detail="Not authorized")
-         
     staff = db.query(models.User).filter(
         models.User.tenant_id == tenant.id,
         models.User.role.in_(['admin', 'mitarbeiter']),
@@ -476,533 +388,318 @@ def read_staff_users(
 
 @app.get("/api/users", response_model=List[schemas.User])
 def read_users(
-    skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db),
+    skip: int = 0, limit: int = 100, db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-
     return crud.get_users(db, tenant.id, skip=skip, limit=limit)
 
 @app.get("/api/users/by-auth/{auth_id}", response_model=schemas.User)
 def read_user_by_auth(
-    auth_id: str,
-    db: Session = Depends(get_db),
+    auth_id: str, db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     db_user = crud.get_user_by_auth_id(db, auth_id, tenant.id)
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
-
+    if not db_user: raise HTTPException(status_code=404, detail="User not found")
     if current_user.role in ['admin', 'mitarbeiter'] or current_user.auth_id == auth_id:
         return db_user
-    
     raise HTTPException(status_code=403, detail="Not authorized")
 
-# Public endpoint for QR code access (no authentication required)
 @app.get("/api/public/users/{auth_id}", response_model=schemas.User)
-def read_user_public(
-    auth_id: str,
-    db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant)
-):
-    """
-    Public endpoint to access customer data via QR code without authentication.
-    Uses auth_id (UUID) for better security.
-    Only returns basic customer information.
-    """
+def read_user_public(auth_id: str, db: Session = Depends(get_db), tenant: models.Tenant = Depends(auth.get_current_tenant)):
     db_user = crud.get_user_by_auth_id(db, auth_id, tenant.id)
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Only allow access to customer accounts, not admin/staff
-    if db_user.role not in ['customer', 'kunde']:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
+    if not db_user: raise HTTPException(status_code=404, detail="User not found")
+    if db_user.role not in ['customer', 'kunde']: raise HTTPException(status_code=403, detail="Not authorized")
     return db_user
 
 @app.get("/api/users/{user_id}", response_model=schemas.User)
 def read_user(
-    user_id: int,
-    db: Session = Depends(get_db),
+    user_id: int, db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     db_user = crud.get_user(db, user_id, tenant.id)
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
-
+    if not db_user: raise HTTPException(status_code=404, detail="User not found")
     if current_user.role in ['admin', 'mitarbeiter'] or current_user.id == user_id:
         return db_user
-    
     raise HTTPException(status_code=403, detail="Not authorized")
 
 @app.put("/api/users/{user_id}", response_model=schemas.User)
 def update_user_endpoint(
-    user_id: int,
-    user_update: schemas.UserUpdate,
-    db: Session = Depends(get_db),
+    user_id: int, user_update: schemas.UserUpdate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.id != user_id and current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-        
     updated = crud.update_user(db, user_id, tenant.id, user_update)
-    if not updated:
-        raise HTTPException(status_code=404, detail="User not found")
-        
-    # Passwort in Supabase synchronisieren, falls geändert
+    if not updated: raise HTTPException(status_code=404, detail="User not found")
     if user_update.password and updated.auth_id:
         try:
-            supabase.auth.admin.update_user_by_id(
-                str(updated.auth_id),
-                {"password": user_update.password}
-            )
-        except Exception as e:
-            print(f"DEBUG: Supabase Password Sync failed: {e}")
-            
+            supabase.auth.admin.update_user_by_id(str(updated.auth_id), {"password": user_update.password})
+        except: pass
     return updated
 
 @app.put("/api/users/{user_id}/status", response_model=schemas.User)
 def update_user_status(
-    user_id: int,
-    status: schemas.UserStatusUpdate,
-    db: Session = Depends(get_db),
+    user_id: int, status: schemas.UserStatusUpdate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-        
     return crud.update_user_status(db, user_id, tenant.id, status)
 
 @app.put("/api/users/{user_id}/level", response_model=schemas.User)
 def manual_level_up(
-    user_id: int,
-    level_update: schemas.UserLevelUpdate,
-    db: Session = Depends(get_db),
+    user_id: int, level_update: schemas.UserLevelUpdate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
     return crud.update_user_level(db, user_id, level_update.level_id)
 
-# --- PROPER LEVEL UP ENDPOINT ---
 @app.post("/api/users/{user_id}/level-up", response_model=schemas.User)
 def perform_level_up_endpoint(
-    user_id: int,
-    db: Session = Depends(get_db),
+    user_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
-    # Calls the logic that validates requirements and consumes achievements
     return crud.perform_level_up(db, user_id, tenant.id)
 
-# --- TRANSACTIONS ---
 @app.post("/api/transactions", response_model=schemas.Transaction)
 def create_transaction(
-    transaction: schemas.TransactionCreate,
-    db: Session = Depends(get_db),
+    transaction: schemas.TransactionCreate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
          raise HTTPException(status_code=403, detail="Not authorized")
-         
     return crud.create_transaction(db, transaction, current_user.id, tenant.id)
 
 @app.get("/api/transactions", response_model=List[schemas.Transaction])
 def read_transactions(
-    user_id: Optional[int] = None, # NEU: Filter für spezifischen Kunden
-    db: Session = Depends(get_db),
+    user_id: Optional[int] = None, db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     query = db.query(models.Transaction).filter(models.Transaction.tenant_id == tenant.id)
-
-    if current_user.role == 'kunde' or current_user.role == 'customer':
-        # Kunden sehen NUR ihre eigenen
+    if current_user.role in ['kunde', 'customer']:
         query = query.filter(models.Transaction.user_id == current_user.id)
-    
-    elif current_user.role == 'mitarbeiter' or current_user.role == 'staff':
-        if user_id:
-             # Mitarbeiter schaut sich spezifischen Kunden an
-             query = query.filter(models.Transaction.user_id == user_id)
-        else:
-             # Mitarbeiter Dashboard: Sieht nur was er selbst gebucht hat
-             query = query.filter(models.Transaction.booked_by_id == current_user.id)
-             
-    elif current_user.role == 'admin':
-        if user_id:
-            # Admin filtert nach Kunde
-            query = query.filter(models.Transaction.user_id == user_id)
-        else:
-            # Admin Dashboard: Sieht ALLES (kein Filter)
-            pass
-
+    elif current_user.role in ['mitarbeiter', 'staff'] and not user_id:
+        query = query.filter(models.Transaction.booked_by_id == current_user.id)
+    elif user_id:
+        query = query.filter(models.Transaction.user_id == user_id)
     return query.order_by(models.Transaction.date.desc()).all()
 
-# --- DOGS ---
 @app.put("/api/dogs/{dog_id}", response_model=schemas.Dog)
 def update_dog(
-    dog_id: int,
-    dog: schemas.DogBase,
-    db: Session = Depends(get_db),
+    dog_id: int, dog: schemas.DogBase, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     db_dog = crud.get_dog(db, dog_id, tenant.id)
     if not db_dog: raise HTTPException(404, "Dog not found")
-    
     if current_user.role not in ['admin', 'mitarbeiter'] and db_dog.owner_id != current_user.id:
         raise HTTPException(403, "Not authorized")
-        
     return crud.update_dog(db, dog_id, tenant.id, dog)
 
 @app.delete("/api/dogs/{dog_id}")
 def delete_dog(
-    dog_id: int,
-    db: Session = Depends(get_db),
+    dog_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(403, "Not authorized")
-    
     return crud.delete_dog(db, dog_id, tenant.id)
 
-# --- DOCUMENTS ---
 @app.post("/api/users/{user_id}/documents", response_model=schemas.Document)
-async def upload_document(  # <--- WICHTIG: 'async' hinzugefügt
-    user_id: int,
-    upload_file: UploadFile = File(...),
+async def upload_document(
+    user_id: int, upload_file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != user_id:
         raise HTTPException(status_code=403, detail="Not authorized")
-
-    # 1. Dateiinhalt lesen (jetzt erlaubt, da async)
     file_content = await upload_file.read()
-    
-    # 2. Pfad für Supabase Storage definieren
     file_path_in_bucket = f"{tenant.id}/{user_id}/{upload_file.filename}"
-
-    # 3. Direkt zu Supabase hochladen (statt lokal speichern)
     try:
         supabase.storage.from_("documents").upload(
-            path=file_path_in_bucket,
-            file=file_content,
+            path=file_path_in_bucket, file=file_content,
             file_options={"content-type": upload_file.content_type, "upsert": "true"}
         )
     except Exception as e:
-        print(f"Upload Error: {e}")
-        # Wenn der Upload fehlschlägt, brechen wir ab
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-    # 4. Datenbank-Eintrag erstellen (Speichert den Bucket-Pfad, nicht den lokalen Pfad)
-    return crud.create_document(
-        db, 
-        user_id, 
-        tenant.id, 
-        upload_file.filename, 
-        upload_file.content_type, 
-        file_path_in_bucket
-    )
-
+    return crud.create_document(db, user_id, tenant.id, upload_file.filename, upload_file.content_type, file_path_in_bucket)
 
 @app.get("/api/documents/{document_id}")
 def read_document(
-    document_id: int,
-    db: Session = Depends(get_db),
+    document_id: int, db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     doc = crud.get_document(db, document_id, tenant.id)
-    if not doc:
-        raise HTTPException(404, "Document not found")
-        
+    if not doc: raise HTTPException(404, "Document not found")
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != doc.user_id:
         raise HTTPException(403, "Not authorized")
-        
-    # Signierte URL von Supabase holen (gültig für 60 Sekunden)
     try:
         res = supabase.storage.from_("documents").create_signed_url(doc.file_path, 60)
-        # ÄNDERUNG: Wir geben die URL als JSON zurück, statt direkt umzuleiten
         return {"url": res["signedURL"]}
-    except Exception as e:
-         raise HTTPException(404, "File not found in storage")
+    except Exception: raise HTTPException(404, "File not found")
 
 @app.delete("/api/documents/{document_id}")
 def delete_document(
-    document_id: int,
-    db: Session = Depends(get_db),
+    document_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     doc = crud.get_document(db, document_id, tenant.id)
     if not doc: raise HTTPException(404, "Document not found")
-    
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != doc.user_id:
         raise HTTPException(403, "Not authorized")
-
-    if doc.file_path:
-        supabase.storage.from_("documents").remove([doc.file_path])
-    
+    if doc.file_path: supabase.storage.from_("documents").remove([doc.file_path])
     crud.delete_document(db, document_id, tenant.id)
     return {"ok": True}
 
-# --- PUBLIC IMAGE UPLOAD (Logos, Badges) ---
-from fastapi.staticfiles import StaticFiles
-
 @app.post("/api/upload/image")
-async def upload_public_image(  # <--- WICHTIG: 'async' hinzugefügt
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
+async def upload_public_image(
+    file: UploadFile = File(...), db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter']:
-         raise HTTPException(status_code=403, detail="Not authorized")
-         
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     file_ext = os.path.splitext(file.filename)[1]
     safe_name = f"{tenant.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}{file_ext}"
-    
-    # 1. Inhalt lesen
     file_content = await file.read()
-    
-    # 2. Upload in 'public_uploads' Bucket
     try:
         supabase.storage.from_("public_uploads").upload(
-            path=safe_name,
-            file=file_content,
+            path=safe_name, file=file_content,
             file_options={"content-type": file.content_type, "upsert": "true"}
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Storage Error: {str(e)}")
-        
-    # 3. Öffentliche URL generieren
-    project_url = settings.SUPABASE_URL
-    public_url = f"{project_url}/storage/v1/object/public/public_uploads/{safe_name}"
-    
-    return {"url": public_url}
-
-# --- APPOINTMENTS & BOOKINGS ---
+    except Exception as e: raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    return {"url": f"{settings.SUPABASE_URL}/storage/v1/object/public/public_uploads/{safe_name}"}
 
 @app.post("/api/appointments", response_model=schemas.Appointment)
 def create_appointment(
-    appointment: schemas.AppointmentCreate,
-    db: Session = Depends(get_db),
+    appointment: schemas.AppointmentCreate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter']:
-         raise HTTPException(status_code=403, detail="Not authorized")
-         
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     return crud.create_appointment(db, appointment, tenant.id)
 
 @app.get("/api/appointments", response_model=List[schemas.Appointment])
 def read_appointments(
-    db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    db: Session = Depends(get_db), tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    # Jeder eingeloggte User darf Termine sehen
     return crud.get_appointments(db, tenant.id)
 
 @app.post("/api/appointments/{appointment_id}/book", response_model=schemas.Booking)
 def book_appointment(
-    appointment_id: int,
-    db: Session = Depends(get_db),
+    appointment_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    # Jeder Kunde darf buchen (evtl. Level-Checks hier später)
     return crud.create_booking(db, tenant.id, appointment_id, current_user.id)
 
 @app.get("/api/users/me/bookings", response_model=List[schemas.Booking])
 def read_my_bookings(
-    db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    db: Session = Depends(get_db), tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     return crud.get_user_bookings(db, tenant.id, current_user.id)
 
 @app.delete("/api/appointments/{appointment_id}/book")
 def cancel_appointment_booking(
-    appointment_id: int,
-    db: Session = Depends(get_db),
+    appointment_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    # Eigene Buchung stornieren
     return crud.cancel_booking(db, tenant.id, appointment_id, current_user.id)
 
 @app.get("/api/appointments/{appointment_id}/participants", response_model=List[schemas.Booking])
 def read_participants(
-    appointment_id: int,
-    db: Session = Depends(get_db),
+    appointment_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter']:
-         raise HTTPException(status_code=403, detail="Not authorized")
-         
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     return crud.get_participants(db, tenant.id, appointment_id)
 
 @app.put("/api/bookings/{booking_id}/attendance", response_model=schemas.Booking)
 def toggle_booking_attendance(
-    booking_id: int,
-    db: Session = Depends(get_db),
+    booking_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter']:
-         raise HTTPException(status_code=403, detail="Not authorized")
-         
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     return crud.toggle_attendance(db, tenant.id, booking_id)
-
-
-# --- NEWS ---
 
 @app.post("/api/news/upload-image")
 async def upload_news_image(
-    upload_file: UploadFile = File(...),
-    db: Session = Depends(get_db),
+    upload_file: UploadFile = File(...), db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter']:
-         raise HTTPException(status_code=403, detail="Not authorized")
-
-    # 1. Read file content
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     file_content = await upload_file.read()
-    
-    # 2. Generate path: {tenant_id}/news/{timestamp}_{random}.{ext}
     file_ext = os.path.splitext(upload_file.filename)[1]
     safe_name = f"{int(datetime.now().timestamp())}_{secrets.token_hex(4)}{file_ext}"
     file_path = f"{tenant.id}/news/{safe_name}"
-
-    # 3. Upload to 'documents' bucket using service role (bypasses RLS)
     try:
-        supabase.storage.from_("documents").upload(
-            path=file_path,
-            file=file_content,
-            file_options={"content-type": upload_file.content_type, "upsert": "true"}
-        )
-    except Exception as e:
-        print(f"News Upload Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-    # 4. Generate Public URL
-    # Note: 'documents' bucket must be public or we need to use signed URLs.
-    # Assuming public per user request/previous pattern.
-    # But usually 'documents' is private? usage in `read_document` uses `create_signed_url`.
-    # User wanted "image displayed within the news post". If 'documents' is private, we need signed URLs.
-    # However, for a news feed, signed URLs expire.
-    # Options:
-    # A) Use 'documents' but make this specific folder public? Supabase doesn't support folder-level public config easily without policies.
-    # B) Use `getPublicUrl`. If the bucket is private, this returns a URL that doesn't work.
-    # C) Use `sign_url` with long expiry? No.
-    # D) Since `upload_document` treats `documents` as sensitive (auth required), mixing public news images here is tricky.
-    # BUT, the user explicitly asked to use 'documents' bucket in the prompt: "The image should be stored in the 'documents' Supabase bucket... and displayed within the news post"
-    # To display it in a news post (visible to all customers), it effectively needs to be public or we need a proxy endpoint.
-    # Let's try `getPublicUrl` first as per plan. If policies are strict, it won't render, and we might need to adjust policies or use a different bucket/folder strategy.
-    
-    res = supabase.storage.from_("documents").get_public_url(file_path)
-    return {"url": res}
-
+        supabase.storage.from_("documents").upload(path=file_path, file=file_content, file_options={"content-type": upload_file.content_type, "upsert": "true"})
+    except Exception as e: raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    return {"url": supabase.storage.from_("documents").get_public_url(file_path)}
 
 @app.post("/api/news", response_model=schemas.NewsPost)
 def create_news(
-    post: schemas.NewsPostCreate,
-    db: Session = Depends(get_db),
+    post: schemas.NewsPostCreate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter']:
-         raise HTTPException(status_code=403, detail="Not authorized")
-         
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     return crud.create_news_post(db, post, current_user.id, tenant.id)
 
 @app.get("/api/news", response_model=List[schemas.NewsPost])
 def read_news(
-    skip: int = 0,
-    limit: int = 50,
-    db: Session = Depends(get_db),
+    skip: int = 0, limit: int = 50, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
-    current_user: schemas.User = Depends(auth.get_current_active_user) # Authentication required
+    current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     return crud.get_news_posts(db, tenant.id, current_user, skip, limit)
 
-# --- CHAT ---
-
 @app.post("/api/chat", response_model=schemas.ChatMessage)
 def send_chat_message(
-    msg: schemas.ChatMessageCreate,
-    db: Session = Depends(get_db),
+    msg: schemas.ChatMessageCreate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    # Security: Customer can send to anyone? Or just admins?
-    # For now allow all, but ensuring tenant isolation is in CRUD.
     return crud.create_chat_message(db, msg, current_user.id, tenant.id)
 
 @app.get("/api/chat/conversations", response_model=List[schemas.ChatConversation])
-def get_conversations(
-    current_user: schemas.User = Depends(auth.get_current_active_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Gibt eine Liste der aktiven Chats zurück.
-    - Für Admins: Alle Kunden, mit denen geschrieben wurde.
-    - Für Kunden: Alle Mitarbeiter/Admins, mit denen geschrieben wurde.
-    """
-    # Wir nutzen eine angepasste CRUD-Funktion
+def get_conversations(current_user: schemas.User = Depends(auth.get_current_active_user), db: Session = Depends(get_db)):
     return crud.get_chat_conversations_for_user(db, current_user)
 
 @app.get("/api/chat/{other_user_id}", response_model=List[schemas.ChatMessage])
 def read_chat_history(
-    other_user_id: int,
-    db: Session = Depends(get_db),
+    other_user_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    # Access Control:
-    # Admin/Mitarbeiter can read any chat involving them OR any chat if they are investigating? (Usually just their own or support view)
-    # Customer can only read chats where they are participant.
-    
-    if current_user.role in ['admin', 'mitarbeiter']:
-        # Admin views chat with a specific customer
-        pass 
-    elif current_user.id == other_user_id:
-        # Chat with self? Allowed I guess.
-        pass
-    else:
-        # For customer, check if they are requesting chat with an admin/staff?
-        # Ideally we just check if they are participant in returned messages, but for fetching we need to know permission.
-        # Strict rule: You can only fetch history if you are one of the parties.
-        pass
-        
-    # The CRUD fetches messages where (Sender=Me AND Receiver=Other) OR (Sender=Other AND Receiver=Me)
-    # So effectively restricted to conversation between Me and Other.
     return crud.get_chat_history(db, tenant.id, current_user.id, other_user_id)
 
 @app.post("/api/chat/{other_user_id}/read")
 def mark_chat_read(
-    other_user_id: int,
-    db: Session = Depends(get_db),
+    other_user_id: int, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
