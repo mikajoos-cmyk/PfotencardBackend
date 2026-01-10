@@ -53,6 +53,7 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
 
     # 1. Update Tenant Basic Info & Config
     tenant.name = settings.school_name
+    tenant.support_email = settings.support_email
     
     # Sicherstellen, dass config ein Dict ist
     current_config = dict(tenant.config) if tenant.config else {}

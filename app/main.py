@@ -130,7 +130,11 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
     }
 
 # Sicherheit: Nur mit Secret Key ausführbar
-CRON_SECRET = os.getenv("CRON_SECRET", "change_me_in_production")
+from .config import settings
+CRON_SECRET = settings.CRON_SECRET
+if not CRON_SECRET:
+    # Warnung loggen oder Exception werfen, um das Deployment zu stoppen
+    raise RuntimeError("CRON_SECRET env var is missing")
 
 @app.delete("/api/cron/cleanup-abandoned-tenants")
 def cleanup_abandoned_tenants(x_cron_secret: str = Header(None), db: Session = Depends(get_db)):
@@ -343,6 +347,7 @@ def register_tenant(tenant_data: schemas.TenantCreate, admin_data: schemas.UserC
     new_tenant = models.Tenant(
         name=tenant_data.name,
         subdomain=tenant_data.subdomain,
+        support_email=tenant_data.support_email,
         plan="enterprise",
         config=tenant_data.config.model_dump(),
         subscription_ends_at=trial_end,

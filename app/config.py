@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     STRIPE_PRICE_ID_PRO_YEARLY: str
     STRIPE_PRICE_ID_ENTERPRISE_YEARLY: str
 
+    CRON_SECRET: str
+
     # Neue Schreibweise für Pydantic v2
     model_config = SettingsConfigDict(
         env_file=".env",
