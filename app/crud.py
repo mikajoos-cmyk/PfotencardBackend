@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_, func, or_, case
-from . import models, schemas
+from . import models, schemas, storage_service
 from fastapi import HTTPException
 import secrets
 from typing import List, Optional
@@ -10,6 +10,18 @@ from typing import List, Optional
 
 def get_tenant_by_subdomain(db: Session, subdomain: str):
     return db.query(models.Tenant).filter(models.Tenant.subdomain == subdomain).first()
+
+def delete_tenant(db: Session, tenant_id: int):
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant: return None
+    
+    # 1. Physical Storage Cleanup
+    storage_service.delete_tenant_storage(tenant_id)
+    
+    # 2. Database Delete (Cascades through ON DELETE CASCADE)
+    db.delete(tenant)
+    db.commit()
+    return {"ok": True}
 
 def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
@@ -290,6 +302,11 @@ def update_user_level(db: Session, user_id: int, new_level_id: int):
 def delete_user(db: Session, user_id: int, tenant_id: int):
     db_user = get_user(db, user_id, tenant_id)
     if not db_user: return None
+    
+    # 1. Physical Storage Cleanup
+    storage_service.delete_user_storage(tenant_id, user_id)
+    
+    # 2. Database Delete (Cascades through ON DELETE CASCADE)
     db.delete(db_user)
     db.commit()
     return {"ok": True}
@@ -323,10 +340,16 @@ def update_dog(db: Session, dog_id: int, tenant_id: int, dog: schemas.DogBase):
 
 def delete_dog(db: Session, dog_id: int, tenant_id: int):
     db_dog = get_dog(db, dog_id, tenant_id)
-    if not db_dog: return None
+    if not db_dog:
+        return None
+        
+    image_path_to_delete = db_dog.image_url # Falls du die URL/Pfad speicherst
+    
     db.delete(db_dog)
     db.commit()
-    return {"ok": True}
+    
+    return {"ok": True, "image_path": image_path_to_delete}
+
 
 # --- LEVEL & ACHIEVEMENTS LOGIC (DYNAMISCH) ---
 
@@ -576,12 +599,23 @@ def get_document(db: Session, document_id: int, tenant_id: int):
     ).first()
 
 def delete_document(db: Session, document_id: int, tenant_id: int):
-    doc = get_document(db, document_id, tenant_id)
-    if doc:
-        db.delete(doc)
-        db.commit()
-        return True
-    return False
+    # Erst das Dokument holen, um den Dateipfad zu kennen
+    db_document = db.query(models.Document).filter(
+        models.Document.id == document_id,
+        models.Document.tenant_id == tenant_id
+    ).first()
+    
+    if not db_document:
+        return None
+
+    file_path_to_delete = db_document.file_path  # Speichere Pfad vor dem Löschen
+    
+    db.delete(db_document)
+    db.commit()
+    
+    # Gib den Pfad zurück, damit der Controller weiß, was er im Storage löschen muss
+    return {"ok": True, "file_path": file_path_to_delete}
+
 
 
 # --- APPOINTMENTS & BOOKINGS ---

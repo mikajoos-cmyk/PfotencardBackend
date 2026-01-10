@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 import secrets
 import stripe
 
-from . import crud, models, schemas, auth, stripe_service 
+from . import crud, models, schemas, auth, stripe_service, legal
+from .storage_service import delete_file_from_storage, delete_folder_from_storage
 from .database import engine, get_db, SessionLocal
 from .config import settings
 from supabase import create_client, Client
@@ -30,6 +31,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+app.include_router(legal.router, prefix="/api/legal", tags=["legal"])
 
 @app.get("/")
 def read_root():
@@ -119,8 +122,53 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         # NEU: Vorschau-Daten
         "next_payment_amount": tenant.next_payment_amount,
         "next_payment_date": tenant.next_payment_date,
-        "upcoming_plan": tenant.upcoming_plan
+        "upcoming_plan": tenant.upcoming_plan,
+        
+        # NEU: AVV Status
+        "avv_accepted_at": tenant.avv_accepted_at,
+        "avv_version": tenant.avv_accepted_version
     }
+
+# Sicherheit: Nur mit Secret Key ausführbar
+CRON_SECRET = os.getenv("CRON_SECRET", "change_me_in_production")
+
+@app.delete("/api/cron/cleanup-abandoned-tenants")
+def cleanup_abandoned_tenants(x_cron_secret: str = Header(None), db: Session = Depends(get_db)):
+    """
+    Löscht Tenants, die vor >30 Tagen erstellt wurden, aber KEIN aktives Abo haben (trial_end vorbei).
+    Dies erfüllt den Grundsatz der Datensparsamkeit.
+    """
+    if x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # 1. Finde verwaiste Tenants (Beispiel-Logik)
+    # Definiere "verwaist": Erstellt vor 30 Tagen UND kein Stripe Customer ID (nie Checkout gestartet)
+    # ODER status='cancelled' und cancellation_date > 30 Tage her.
+    
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    
+    abandoned_tenants = db.query(models.Tenant).filter(
+        models.Tenant.created_at < thirty_days_ago,
+        models.Tenant.stripe_customer_id == None  # Nie bezahlt
+    ).all()
+    
+    deleted_count = 0
+    
+    for tenant in abandoned_tenants:
+        # A. Storage bereinigen
+        # Lösche alles im Bucket-Ordner des Tenants (falls du Ordner pro Tenant hast)
+        delete_folder_from_storage(supabase, "documents", f"{tenant.id}")
+        
+        # B. DB Eintrag löschen (Cascading löscht User, Dogs etc.)
+        db.delete(tenant)
+        deleted_count += 1
+        
+    db.commit()
+    # logger.info(f"Cron Cleanup: Deleted {deleted_count} abandoned tenants.") # logger not initialized in main.py, using print
+    print(f"Cron Cleanup: Deleted {deleted_count} abandoned tenants.")
+    
+    return {"status": "ok", "deleted": deleted_count}
+
 
 
 @app.post("/api/tenants/subscribe")
@@ -524,7 +572,18 @@ def delete_dog(
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(403, "Not authorized")
-    return crud.delete_dog(db, dog_id, tenant.id)
+    
+    # 1. DB Löschen (Gibt Pfad zurück)
+    result = crud.delete_dog(db, dog_id, tenant.id)
+    if not result:
+        raise HTTPException(404, "Dog not found")
+        
+    # 2. Storage Cleanup (Bild löschen)
+    if result.get("image_path"):
+        delete_file_from_storage(supabase, "public_uploads", result["image_path"])
+        
+    return {"ok": True}
+
 
 @app.post("/api/users/{user_id}/documents", response_model=schemas.Document)
 async def upload_document(
@@ -571,9 +630,16 @@ def delete_document(
     if not doc: raise HTTPException(404, "Document not found")
     if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != doc.user_id:
         raise HTTPException(403, "Not authorized")
-    if doc.file_path: supabase.storage.from_("documents").remove([doc.file_path])
-    crud.delete_document(db, document_id, tenant.id)
+    
+    # 1. DB Löschen (Gibt Pfad zurück)
+    result = crud.delete_document(db, document_id, tenant.id)
+    
+    # 2. Storage Cleanup
+    if result and result.get("file_path"):
+        delete_file_from_storage(supabase, "documents", result["file_path"])
+        
     return {"ok": True}
+
 
 @app.post("/api/upload/image")
 async def upload_public_image(

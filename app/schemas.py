@@ -14,6 +14,7 @@ class TenantConfig(BaseModel):
 class TenantBase(BaseModel):
     name: str
     subdomain: str
+    support_email: Optional[str] = None
     plan: str = "starter"
     is_active: bool = True
     config: TenantConfig = TenantConfig()
@@ -29,6 +30,9 @@ class Tenant(TenantBase):
     # NEU: Felder auch im Tenant Schema
     stripe_subscription_status: Optional[str] = None
     cancel_at_period_end: bool = False
+    # NEU:
+    avv_accepted_at: Optional[datetime] = None
+    avv_accepted_version: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -51,6 +55,10 @@ class TenantStatus(BaseModel):
     next_payment_date: Optional[datetime] = None
     upcoming_plan: Optional[str] = None
 
+    # NEU: AVV Status
+    avv_accepted_at: Optional[datetime] = None
+    avv_version: Optional[str] = None
+
 class SubscriptionDetails(BaseModel):
     plan: Optional[str] = None
     status: Optional[str] = None
@@ -58,6 +66,9 @@ class SubscriptionDetails(BaseModel):
     current_period_end: Optional[datetime] = None
     next_payment_amount: Optional[float] = None
     next_payment_date: Optional[datetime] = None
+
+class AVVAccept(BaseModel):
+    version: str = "1.0"
 
 class SubscriptionUpdate(BaseModel):
     subdomain: str
@@ -295,6 +306,7 @@ class LevelUpdateItem(BaseModel):
 
 class SettingsUpdate(BaseModel):
     school_name: str
+    support_email: Optional[str] = None
     logo_url: Optional[str] = None
     primary_color: str
     secondary_color: str
