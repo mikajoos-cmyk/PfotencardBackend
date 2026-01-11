@@ -145,26 +145,25 @@ async def get_current_active_user(
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
 
-    return user
-
-    # --- NEUE LOGIK: Abo-Check für Kunden ---
-    # Admins dürfen immer rein (um z.B. Rechnungen zu zahlen).
-    # Kunden und Mitarbeiter werden blockiert, wenn das Abo abgelaufen ist.
-    if user.role not in ['admin']:
-        now = datetime.now(timezone.utc)
-        if tenant.subscription_ends_at and tenant.subscription_ends_at < now:
-            # Wir geben ein JSON-Objekt im Detail zurück, damit das Frontend es parsen kann
-            error_detail = {
-                "code": "SUBSCRIPTION_EXPIRED",
-                "message": "Das Abonnement der Hundeschule ist abgelaufen.",
-                "support_email": tenant.support_email
-            }
-            # Nutze 402 Payment Required als Statuscode
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED, 
-                detail=error_detail # FastAPI serialisiert Dicts automatisch zu JSON
-            )
-    # ----------------------------------------
+    # --- HIER IST DIE WICHTIGE ÄNDERUNG ---
+    # Prüfen, ob das Abo der Schule abgelaufen ist (außer für Admins)
+    if user.role != 'admin': # Admins kommen immer rein, um ggf. Rechnungen zu zahlen
+        if tenant.subscription_ends_at:
+            now = datetime.now(timezone.utc)
+            # Pufferzeit beachten (optional, hier strikt)
+            if tenant.subscription_ends_at < now:
+                # Wir geben ein strukturiertes Detail-Objekt zurück
+                error_detail = {
+                    "code": "SUBSCRIPTION_EXPIRED",
+                    "message": "Das Abonnement der Hundeschule ist abgelaufen.",
+                    "support_email": tenant.support_email or "support@pfotencard.de"
+                }
+                # 402 Payment Required ist passend
+                raise HTTPException(
+                    status_code=402, 
+                    detail=error_detail 
+                )
+    # --------------------------------------
 
     return user
 
