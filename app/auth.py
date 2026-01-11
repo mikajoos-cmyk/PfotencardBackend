@@ -147,7 +147,7 @@ async def get_current_active_user(
 
     # --- HIER IST DIE WICHTIGE ÄNDERUNG ---
     # Prüfen, ob das Abo der Schule abgelaufen ist (außer für Admins)
-    if user.role != 'admin': # Admins kommen immer rein, um ggf. Rechnungen zu zahlen
+    if True:#user.role != 'admin': # Admins kommen immer rein, um ggf. Rechnungen zu zahlen
         if tenant.subscription_ends_at:
             now = datetime.now(timezone.utc)
             # Pufferzeit beachten (optional, hier strikt)
