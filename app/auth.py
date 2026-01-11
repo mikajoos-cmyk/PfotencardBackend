@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import json
 
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
@@ -143,6 +144,27 @@ async def get_current_active_user(
 
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
+
+    return user
+
+    # --- NEUE LOGIK: Abo-Check für Kunden ---
+    # Admins dürfen immer rein (um z.B. Rechnungen zu zahlen).
+    # Kunden und Mitarbeiter werden blockiert, wenn das Abo abgelaufen ist.
+    if user.role not in ['admin']:
+        now = datetime.now(timezone.utc)
+        if tenant.subscription_ends_at and tenant.subscription_ends_at < now:
+            # Wir geben ein JSON-Objekt im Detail zurück, damit das Frontend es parsen kann
+            error_detail = {
+                "code": "SUBSCRIPTION_EXPIRED",
+                "message": "Das Abonnement der Hundeschule ist abgelaufen.",
+                "support_email": tenant.support_email
+            }
+            # Nutze 402 Payment Required als Statuscode
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED, 
+                detail=error_detail # FastAPI serialisiert Dicts automatisch zu JSON
+            )
+    # ----------------------------------------
 
     return user
 

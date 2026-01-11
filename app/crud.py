@@ -679,25 +679,39 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     
     if existing:
         if existing.status == 'cancelled':
-            existing.status = 'confirmed'
+            # Re-Aktivierung: Prüfen ob Platz frei ist
+            current_count = db.query(models.Booking).filter(
+                models.Booking.appointment_id == appointment_id,
+                models.Booking.status == 'confirmed'
+            ).count()
+            
+            if current_count >= appt.max_participants:
+                existing.status = 'waitlist'
+            else:
+                existing.status = 'confirmed'
+                
             db.commit()
+            db.refresh(existing)
             return existing
         else:
             raise HTTPException(400, "Already booked or on waitlist")
 
+    # Zähle NUR bestätigte Buchungen
     current_count = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.status == 'confirmed'
     ).count()
     
+    # Entscheidung: Warteliste oder Bestätigt
+    new_status = 'confirmed'
     if current_count >= appt.max_participants:
-        raise HTTPException(400, "Appointment is full")
+        new_status = 'waitlist'
 
     booking = models.Booking(
         tenant_id=tenant_id,
         appointment_id=appointment_id,
         user_id=user_id,
-        status="confirmed"
+        status=new_status
     )
     db.add(booking)
     db.commit()
@@ -713,10 +727,37 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     
     if not booking:
         raise HTTPException(404, "Booking not found")
-        
+    
+    previous_status = booking.status
     booking.status = 'cancelled'
+    # Wichtig: Wenn jemand absagt, Reset der Anwesenheit
+    booking.attended = False 
+    
+    promoted_user_id = None
+    
+    # AUTOMATISCHES NACHRÜCKEN
+    # Nur wenn der stornierte Platz 'confirmed' war, rückt jemand nach
+    if previous_status == 'confirmed':
+        # Finde den ältesten Eintrag auf der Warteliste
+        next_in_line = db.query(models.Booking).filter(
+            models.Booking.appointment_id == appointment_id,
+            models.Booking.tenant_id == tenant_id,
+            models.Booking.status == 'waitlist'
+        ).order_by(models.Booking.created_at.asc()).first()
+        
+        if next_in_line:
+            next_in_line.status = 'confirmed'
+            promoted_user_id = next_in_line.user_id
+            # Hier könnte man eine Notification/E-Mail auslösen
+            # create_system_notification(db, next_in_line.user_id, "Du bist nachgerückt!")
+
     db.commit()
-    return {"ok": True}
+    
+    return {
+        "ok": True, 
+        "status": "cancelled", 
+        "promoted_user_id": promoted_user_id
+    }
 
 def get_participants(db: Session, tenant_id: int, appointment_id: int):
     return db.query(models.Booking).options(joinedload(models.Booking.user)).filter(
@@ -728,7 +769,7 @@ def get_user_bookings(db: Session, tenant_id: int, user_id: int):
     return db.query(models.Booking).filter(
         models.Booking.user_id == user_id,
         models.Booking.tenant_id == tenant_id,
-        models.Booking.status == 'confirmed'
+        models.Booking.status.in_(['confirmed', 'waitlist'])
     ).all()
 
 def toggle_attendance(db: Session, tenant_id: int, booking_id: int):

@@ -701,6 +701,7 @@ def cancel_appointment_booking(
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
+    # Rückgabetyp ist jetzt ein Dict, kein Schema mehr erzwingen oder Schema anpassen
     return crud.cancel_booking(db, tenant.id, appointment_id, current_user.id)
 
 @app.get("/api/appointments/{appointment_id}/participants", response_model=List[schemas.Booking])
