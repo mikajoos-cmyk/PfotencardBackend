@@ -229,6 +229,11 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                             "clientSecret": client_secret, # Kann im Trial null sein, ist okay
                             "status": "updated"
                         }
+                        
+            except stripe.error.InvalidRequestError:
+                # Abo ID in DB existiert nicht mehr bei Stripe -> Weiter zu "Neu anlegen"
+                print("⚠️ Old subscription ID not found in Stripe. Creating new one.")
+                pass
 
         # FALL B: Kein Abo oder Update fehlgeschlagen -> Neu anlegen
         print(f"✨ Creating NEW subscription for Tenant {tenant.id}")
