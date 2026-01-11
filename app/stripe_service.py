@@ -187,22 +187,30 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 # Abo Status von Stripe holen
                 subscription = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
                 
-                # Wenn Abo aktiv oder im Trial ist -> UPDATE (modify)
                 if subscription.status in ['active', 'trialing', 'past_due', 'incomplete']:
                     print(f"🔄 Updating existing subscription {subscription.id} for Tenant {tenant.id}")
                     
-                    # Wir brauchen die ID des "Items" (der Zeile im Abo mit dem Preis)
-                    # Normalerweise item[0], da wir nur 1 Produkt pro Abo haben
                     items_data = subscription['items']['data']
                     if items_data:
                         item_id = items_data[0].id
                         
+                        # --- ÄNDERUNG: Intelligentes Rechnungsverhalten ---
+                        # Standard: Sofort Rechnung erstellen (für Upgrades im laufenden Abo)
+                        proration_mode = 'always_invoice'
+                        
+                        # Ausnahme: Im Trial wollen wir KEINE 0€ Rechnung erzwingen.
+                        # 'create_prorations' merkt die Änderung vor, berechnet sie aber erst 
+                        # mit der ersten echten Rechnung am Ende des Trials.
+                        if subscription.status == 'trialing':
+                            proration_mode = 'create_prorations'
+                        # --------------------------------------------------
+
                         updated_sub = stripe.Subscription.modify(
                             tenant.stripe_subscription_id,
-                            items=[{'id': item_id, 'price': price_id}], # Preis austauschen
-                            cancel_at_period_end=False, # Reaktivieren falls gekündigt
-                            proration_behavior='always_invoice', # Differenz sofort berechnen
-                            payment_behavior='default_incomplete', # Erlaubt Payment Element Flow
+                            items=[{'id': item_id, 'price': price_id}], 
+                            cancel_at_period_end=False, 
+                            proration_behavior=proration_mode, # Hier nutzen wir die Variable
+                            payment_behavior='default_incomplete', 
                             expand=['latest_invoice.payment_intent'],
                             metadata={"tenant_id": tenant.id, "plan_name": plan}
                         )
@@ -210,15 +218,17 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         # DB sofort syncen
                         update_tenant_from_subscription(db, tenant, updated_sub)
                         
+                        # Wichtig: Im Trial (create_prorations) gibt es evtl. keine latest_invoice
+                        # oder sie ist alt. Wir müssen das abfangen.
+                        client_secret = None
+                        if proration_mode == 'always_invoice' and updated_sub.latest_invoice:
+                             client_secret = extract_client_secret(updated_sub.latest_invoice)
+                        
                         return {
                             "subscriptionId": updated_sub.id,
-                            "clientSecret": extract_client_secret(updated_sub.latest_invoice),
+                            "clientSecret": client_secret, # Kann im Trial null sein, ist okay
                             "status": "updated"
                         }
-            except stripe.error.InvalidRequestError:
-                # Abo ID in DB existiert nicht mehr bei Stripe -> Weiter zu "Neu anlegen"
-                print("⚠️ Old subscription ID not found in Stripe. Creating new one.")
-                pass
 
         # FALL B: Kein Abo oder Update fehlgeschlagen -> Neu anlegen
         print(f"✨ Creating NEW subscription for Tenant {tenant.id}")
