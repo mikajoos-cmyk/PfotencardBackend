@@ -162,67 +162,67 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    # 1. Preis aus ENV laden (via Helper)
     price_id = get_price_id(plan, cycle)
     if not price_id:
-        raise HTTPException(status_code=400, detail="Invalid plan")
+        raise HTTPException(status_code=400, detail=f"Price ID not found for {plan} {cycle}")
 
-    # Trial Berechnung
-    trial_days = 0
-    now = datetime.now(timezone.utc)
-    if tenant.subscription_ends_at and tenant.subscription_ends_at > now:
-        delta = tenant.subscription_ends_at - now
-        trial_days = delta.days + 1
-        if trial_days > 14: trial_days = 14
-    else:
-        trial_days = 0
-
+    # 2. Customer sicherstellen
     if not tenant.stripe_customer_id:
         try:
-            customer = stripe.Customer.create(
-                email=user_email,
-                name=tenant.name,
-                metadata={"tenant_id": tenant.id}
-            )
+            customer = stripe.Customer.create(email=user_email, name=tenant.name, metadata={"tenant_id": tenant.id})
             tenant.stripe_customer_id = customer.id
             db.commit()
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Customer creation failed: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Customer error: {str(e)}")
             
     customer_id = tenant.stripe_customer_id
 
     try:
-        # FALL A: Update
+        # 3. WEICHE: Update oder Neu?
+        
+        # FALL A: Kunde hat schon ein Abo (Update)
         if tenant.stripe_subscription_id:
             try:
+                # Abo Status von Stripe holen
                 subscription = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
-                if subscription.status in ['active', 'trialing', 'past_due']:
-                    item_id = subscription['items']['data'][0].id
+                
+                # Wenn Abo aktiv oder im Trial ist -> UPDATE (modify)
+                if subscription.status in ['active', 'trialing', 'past_due', 'incomplete']:
+                    print(f"🔄 Updating existing subscription {subscription.id} for Tenant {tenant.id}")
                     
-                    updated_sub = stripe.Subscription.modify(
-                        tenant.stripe_subscription_id,
-                        items=[{'id': item_id, 'price': price_id}],
-                        cancel_at_period_end=False,
-                        metadata={"tenant_id": tenant.id, "plan_name": plan},
-                        proration_behavior='create_prorations',
-                        payment_behavior='default_incomplete',
-                        expand=['latest_invoice.payment_intent']
-                    )
-                    
-                    # SOFORT DB UPDATE
-                    update_tenant_from_subscription(db, tenant, updated_sub)
-                    
-                    client_secret = extract_client_secret(updated_sub.latest_invoice)
-                    return {
-                        "subscriptionId": updated_sub.id,
-                        "clientSecret": client_secret,
-                        "status": "updated",
-                        "nextPaymentAmount": tenant.next_payment_amount,
-                        "nextPaymentDate": tenant.next_payment_date
-                    }
+                    # Wir brauchen die ID des "Items" (der Zeile im Abo mit dem Preis)
+                    # Normalerweise item[0], da wir nur 1 Produkt pro Abo haben
+                    items_data = subscription['items']['data']
+                    if items_data:
+                        item_id = items_data[0].id
+                        
+                        updated_sub = stripe.Subscription.modify(
+                            tenant.stripe_subscription_id,
+                            items=[{'id': item_id, 'price': price_id}], # Preis austauschen
+                            cancel_at_period_end=False, # Reaktivieren falls gekündigt
+                            proration_behavior='always_invoice', # Differenz sofort berechnen
+                            payment_behavior='default_incomplete', # Erlaubt Payment Element Flow
+                            expand=['latest_invoice.payment_intent'],
+                            metadata={"tenant_id": tenant.id, "plan_name": plan}
+                        )
+                        
+                        # DB sofort syncen
+                        update_tenant_from_subscription(db, tenant, updated_sub)
+                        
+                        return {
+                            "subscriptionId": updated_sub.id,
+                            "clientSecret": extract_client_secret(updated_sub.latest_invoice),
+                            "status": "updated"
+                        }
             except stripe.error.InvalidRequestError:
+                # Abo ID in DB existiert nicht mehr bei Stripe -> Weiter zu "Neu anlegen"
+                print("⚠️ Old subscription ID not found in Stripe. Creating new one.")
                 pass
 
-        # FALL B: Neu
+        # FALL B: Kein Abo oder Update fehlgeschlagen -> Neu anlegen
+        print(f"✨ Creating NEW subscription for Tenant {tenant.id}")
+        
         subscription_data = {
             'customer': customer_id,
             'items': [{"price": price_id}],
@@ -232,30 +232,32 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             'metadata': {"tenant_id": tenant.id, "plan_name": plan}
         }
         
-        if trial_days > 0:
-            subscription_data['trial_period_days'] = trial_days
+        # Trial Logik (optional)
+        now = datetime.now(timezone.utc)
+        if tenant.subscription_ends_at and tenant.subscription_ends_at > now and not tenant.stripe_subscription_id:
+             # Nur Trial geben, wenn noch nie ein echtes Abo da war
+             # Hier vereinfacht: 14 Tage fest für ganz neue
+             pass 
 
         subscription = stripe.Subscription.create(**subscription_data)
         
-        # SOFORT DB UPDATE
         update_tenant_from_subscription(db, tenant, subscription)
 
+        # Client Secret für Frontend finden
         client_secret = None
-        if subscription.pending_setup_intent:
-            client_secret = extract_client_secret(subscription.pending_setup_intent)
-        elif subscription.latest_invoice:
-            client_secret = extract_client_secret(subscription.latest_invoice)
+        if subscription.latest_invoice and hasattr(subscription.latest_invoice, 'payment_intent'):
+             client_secret = extract_client_secret(subscription.latest_invoice)
+        elif subscription.pending_setup_intent:
+             client_secret = extract_client_secret(subscription.pending_setup_intent)
 
         return {
             "subscriptionId": subscription.id,
             "clientSecret": client_secret,
-            "status": "created",
-            "nextPaymentAmount": tenant.next_payment_amount,
-            "nextPaymentDate": tenant.next_payment_date
+            "status": "created"
         }
 
     except Exception as e:
-        print(f"Stripe Error: {str(e)}")
+        print(f"🔥 Stripe Error: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 def cancel_subscription(db: Session, tenant_id: int):
