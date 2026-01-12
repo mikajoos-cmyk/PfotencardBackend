@@ -34,7 +34,7 @@ def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
     
     training_types = db.query(models.TrainingType).filter(
         models.TrainingType.tenant_id == tenant_id
-    ).all()
+    ).order_by(models.TrainingType.rank_order.asc()).all()
     
     appointments = db.query(models.Appointment).filter(
         models.Appointment.tenant_id == tenant_id
@@ -103,12 +103,14 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
             svc.name = s_data.name
             svc.category = s_data.category
             svc.default_price = s_data.price
+            svc.rank_order = s_data.rank_order
         else:
             new_svc = models.TrainingType(
                 tenant_id=tenant_id,
                 name=s_data.name,
                 category=s_data.category,
-                default_price=s_data.price
+                default_price=s_data.price,
+                rank_order=s_data.rank_order
             )
             db.add(new_svc)
             db.flush()
@@ -622,6 +624,7 @@ def delete_document(db: Session, document_id: int, tenant_id: int):
 # --- APPOINTMENTS & BOOKINGS ---
 
 def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tenant_id: int):
+    print(f"DEBUG: Creating appointment with trainer_id={appointment.trainer_id}, target_levels={appointment.target_level_ids}")
     db_appt = models.Appointment(
         tenant_id=tenant_id,
         title=appointment.title,
@@ -629,8 +632,14 @@ def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tena
         start_time=appointment.start_time,
         end_time=appointment.end_time,
         location=appointment.location,
-        max_participants=appointment.max_participants
+        max_participants=appointment.max_participants,
+        trainer_id=appointment.trainer_id
     )
+    
+    if appointment.target_level_ids:
+        levels = db.query(models.Level).filter(models.Level.id.in_(appointment.target_level_ids)).all()
+        db_appt.target_levels = levels
+
     db.add(db_appt)
     db.commit()
     db.refresh(db_appt)
@@ -648,6 +657,9 @@ def get_appointments(db: Session, tenant_id: int):
         )
     ).filter(
         models.Appointment.tenant_id == tenant_id
+    ).options(
+        joinedload(models.Appointment.trainer),
+        joinedload(models.Appointment.target_levels)
     ).group_by(
         models.Appointment.id
     ).order_by(
@@ -662,10 +674,34 @@ def get_appointments(db: Session, tenant_id: int):
     return appointments
 
 def get_appointment(db: Session, appointment_id: int, tenant_id: int):
-    return db.query(models.Appointment).filter(
+    return db.query(models.Appointment).options(
+        joinedload(models.Appointment.target_levels),
+        joinedload(models.Appointment.trainer)
+    ).filter(
         models.Appointment.id == appointment_id,
         models.Appointment.tenant_id == tenant_id
     ).first()
+
+def update_appointment(db: Session, appointment_id: int, tenant_id: int, update: schemas.AppointmentUpdate):
+    print(f"DEBUG: Updating appointment {appointment_id} with data={update.model_dump()}")
+    db_appt = get_appointment(db, appointment_id, tenant_id)
+    if not db_appt:
+        return None
+
+    update_data = update.model_dump(exclude_unset=True)
+    
+    if "target_level_ids" in update_data:
+        target_level_ids = update_data.pop("target_level_ids")
+        levels = db.query(models.Level).filter(models.Level.id.in_(target_level_ids)).all()
+        db_appt.target_levels = levels
+
+    for key, value in update_data.items():
+        setattr(db_appt, key, value)
+
+    db.add(db_appt)
+    db.commit()
+    db.refresh(db_appt)
+    return db_appt
 
 def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int):
     appt = get_appointment(db, appointment_id, tenant_id)

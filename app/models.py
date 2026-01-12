@@ -65,6 +65,7 @@ class TrainingType(Base):
     name = Column(String(255), nullable=False)  # z.B. "Gruppenstunde"
     category = Column(String(50), nullable=False) # 'training', 'workshop', etc.
     default_price = Column(Float, default=0.0)
+    rank_order = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="training_types")
@@ -225,6 +226,14 @@ class Document(Base):
     user = relationship("User", back_populates="documents")
 
 
+# Zuordnungstabellen für Appointment-Zielgruppen
+appointment_target_levels = Table(
+    'appointment_target_levels',
+    Base.metadata,
+    Column('appointment_id', Integer, ForeignKey('appointments.id', ondelete="CASCADE"), primary_key=True),
+    Column('level_id', Integer, ForeignKey('levels.id', ondelete="CASCADE"), primary_key=True)
+)
+
 # --- 4. TERMINVEREINBARUNG (APPOINTMENTS) ---
 
 class Appointment(Base):
@@ -242,10 +251,14 @@ class Appointment(Base):
     
     max_participants = Column(Integer, default=10)
     
+    trainer_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="appointments")
     bookings = relationship("Booking", back_populates="appointment", cascade="all, delete-orphan")
+    trainer = relationship("User", foreign_keys=[trainer_id])
+    target_levels = relationship("Level", secondary=appointment_target_levels)
 
 
 class Booking(Base):

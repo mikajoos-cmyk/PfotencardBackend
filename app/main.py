@@ -673,6 +673,17 @@ def create_appointment(
     if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     return crud.create_appointment(db, appointment, tenant.id)
 
+@app.put("/api/appointments/{appointment_id}", response_model=schemas.Appointment)
+def update_appointment(
+    appointment_id: int, appointment: schemas.AppointmentUpdate, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
+    updated = crud.update_appointment(db, appointment_id, tenant.id, appointment)
+    if not updated: raise HTTPException(status_code=404, detail="Appointment not found")
+    return updated
+
 @app.get("/api/appointments", response_model=List[schemas.Appointment])
 def read_appointments(
     db: Session = Depends(get_db), tenant: models.Tenant = Depends(auth.get_current_tenant),

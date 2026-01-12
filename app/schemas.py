@@ -78,6 +78,7 @@ class TrainingTypeBase(BaseModel):
     name: str
     category: str
     default_price: float = 0.0
+    rank_order: int = 0
 
 class TrainingTypeCreate(TrainingTypeBase):
     pass
@@ -262,9 +263,21 @@ class AppointmentBase(BaseModel):
     end_time: datetime
     location: Optional[str] = None
     max_participants: int = 10
+    trainer_id: Optional[int] = None
+    target_level_ids: List[int] = []
 
 class AppointmentCreate(AppointmentBase):
     pass
+
+class AppointmentUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    location: Optional[str] = None
+    max_participants: Optional[int] = None
+    trainer_id: Optional[int] = None
+    target_level_ids: Optional[List[int]] = None
 
 class Appointment(AppointmentBase):
     id: int
@@ -272,6 +285,8 @@ class Appointment(AppointmentBase):
     created_at: datetime
     bookings: List[Booking] = []
     participants_count: Optional[int] = None 
+    trainer: Optional[User] = None
+    target_levels: List[Level] = []
     class Config: from_attributes = True
 
 class AppConfig(BaseModel):
@@ -285,6 +300,7 @@ class ServiceUpdateItem(BaseModel):
     name: str
     category: str
     price: float
+    rank_order: int = 0
 
 class TopUpOption(BaseModel):
     amount: float
