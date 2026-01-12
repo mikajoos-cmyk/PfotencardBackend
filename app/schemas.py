@@ -359,6 +359,13 @@ class NewsPostBase(BaseModel):
 class NewsPostCreate(NewsPostBase):
     pass
 
+class NewsPostUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    image_url: Optional[str] = None
+    target_level_ids: Optional[List[int]] = None
+    target_appointment_ids: Optional[List[int]] = None
+
 class NewsPost(NewsPostBase):
     id: int
     tenant_id: int

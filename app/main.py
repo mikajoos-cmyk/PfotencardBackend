@@ -684,6 +684,17 @@ def update_appointment(
     if not updated: raise HTTPException(status_code=404, detail="Appointment not found")
     return updated
 
+@app.delete("/api/appointments/{appointment_id}")
+def delete_appointment(
+    appointment_id: int, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
+    success = crud.delete_appointment(db, appointment_id, tenant.id)
+    if not success: raise HTTPException(status_code=404, detail="Appointment not found")
+    return {"ok": True}
+
 @app.get("/api/appointments", response_model=List[schemas.Appointment])
 def read_appointments(
     db: Session = Depends(get_db), tenant: models.Tenant = Depends(auth.get_current_tenant),
@@ -757,6 +768,28 @@ def create_news(
 ):
     if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     return crud.create_news_post(db, post, current_user.id, tenant.id)
+
+@app.put("/api/news/{post_id}", response_model=schemas.NewsPost)
+def update_news(
+    post_id: int, post: schemas.NewsPostUpdate, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
+    updated = crud.update_news_post(db, post_id, tenant.id, post)
+    if not updated: raise HTTPException(status_code=404, detail="News post not found")
+    return updated
+
+@app.delete("/api/news/{post_id}")
+def delete_news(
+    post_id: int, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
+    success = crud.delete_news_post(db, post_id, tenant.id)
+    if not success: raise HTTPException(status_code=404, detail="News post not found")
+    return {"ok": True}
 
 @app.get("/api/news", response_model=List[schemas.NewsPost])
 def read_news(

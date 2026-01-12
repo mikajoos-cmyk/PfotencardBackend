@@ -703,6 +703,15 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
     db.refresh(db_appt)
     return db_appt
 
+def delete_appointment(db: Session, appointment_id: int, tenant_id: int):
+    db_appt = get_appointment(db, appointment_id, tenant_id)
+    if not db_appt:
+        return False
+    
+    db.delete(db_appt)
+    db.commit()
+    return True
+
 def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int):
     appt = get_appointment(db, appointment_id, tenant_id)
     if not appt:
@@ -947,6 +956,59 @@ def get_news_posts(db: Session, tenant_id: int, current_user: models.User, skip:
         post.target_appointment_ids = [a.id for a in post.target_appointments]
         
     return posts
+
+def update_news_post(db: Session, post_id: int, tenant_id: int, update: schemas.NewsPostUpdate):
+    db_post = db.query(models.NewsPost).filter(
+        models.NewsPost.id == post_id,
+        models.NewsPost.tenant_id == tenant_id
+    ).first()
+    
+    if not db_post:
+        return None
+
+    update_data = update.model_dump(exclude_unset=True)
+    
+    if "target_level_ids" in update_data:
+        level_ids = update_data.pop("target_level_ids")
+        levels = db.query(models.Level).filter(
+            models.Level.id.in_(level_ids),
+            models.Level.tenant_id == tenant_id
+        ).all()
+        db_post.target_levels = levels
+
+    if "target_appointment_ids" in update_data:
+        appt_ids = update_data.pop("target_appointment_ids")
+        appts = db.query(models.Appointment).filter(
+            models.Appointment.id.in_(appt_ids),
+            models.Appointment.tenant_id == tenant_id
+        ).all()
+        db_post.target_appointments = appts
+
+    for key, value in update_data.items():
+        setattr(db_post, key, value)
+
+    db.add(db_post)
+    db.commit()
+    db.refresh(db_post)
+    
+    # Map target IDs back to schema
+    db_post.target_level_ids = [l.id for l in db_post.target_levels]
+    db_post.target_appointment_ids = [a.id for a in db_post.target_appointments]
+    
+    return db_post
+
+def delete_news_post(db: Session, post_id: int, tenant_id: int):
+    db_post = db.query(models.NewsPost).filter(
+        models.NewsPost.id == post_id,
+        models.NewsPost.tenant_id == tenant_id
+    ).first()
+    
+    if not db_post:
+        return False
+
+    db.delete(db_post)
+    db.commit()
+    return True
 
 # --- CHAT ---
 
