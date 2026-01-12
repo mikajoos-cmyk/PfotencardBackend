@@ -1168,3 +1168,26 @@ def get_chat_conversations(db: Session, tenant_id: int):
     conversations.sort(key=lambda x: x["last_message"].created_at if x["last_message"] else datetime.min, reverse=True)
     
     return conversations
+
+# --- APP STATUS ---
+
+def get_app_status(db: Session, tenant_id: int):
+    status = db.query(models.AppStatus).filter(models.AppStatus.tenant_id == tenant_id).first()
+    if not status:
+        # Initialen Status erstellen wenn nicht vorhanden
+        status = models.AppStatus(tenant_id=tenant_id, status="active", message="")
+        db.add(status)
+        db.commit()
+        db.refresh(status)
+    return status
+
+def update_app_status(db: Session, tenant_id: int, status_update: schemas.AppStatusUpdate):
+    db_status = get_app_status(db, tenant_id)
+    db_status.status = status_update.status
+    db_status.message = status_update.message
+    db_status.updated_at = func.now()
+    
+    db.add(db_status)
+    db.commit()
+    db.refresh(db_status)
+    return db_status

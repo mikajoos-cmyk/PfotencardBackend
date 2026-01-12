@@ -407,3 +407,15 @@ class Invoice(BaseModel):
     status: str
     pdf_url: Optional[str]
     hosted_url: Optional[str]
+
+class AppStatusBase(BaseModel):
+    status: str
+    message: Optional[str] = None
+
+class AppStatusUpdate(AppStatusBase):
+    pass
+
+class AppStatus(AppStatusBase):
+    id: int
+    updated_at: datetime
+    class Config: from_attributes = True

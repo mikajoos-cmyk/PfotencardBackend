@@ -359,3 +359,15 @@ class ChatMessage(Base):
     tenant = relationship("Tenant", back_populates="chat_messages")
     sender = relationship("User", foreign_keys=[sender_id])
     receiver = relationship("User", foreign_keys=[receiver_id])
+
+class AppStatus(Base):
+    __tablename__ = 'app_status'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False, unique=True)
+    
+    status = Column(String(50), default="active", nullable=False) # active, cancelled, partial
+    message = Column(String(512), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    tenant = relationship("Tenant")

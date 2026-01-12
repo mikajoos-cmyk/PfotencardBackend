@@ -45,6 +45,24 @@ def read_app_config(
 ):
     return crud.get_app_config(db, tenant.id)
 
+@app.get("/api/status", response_model=schemas.AppStatus)
+def read_app_status(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant)
+):
+    return crud.get_app_status(db, tenant.id)
+
+@app.put("/api/status", response_model=schemas.AppStatus)
+def update_app_status(
+    status_update: schemas.AppStatusUpdate,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.update_app_status(db, tenant.id, status_update)
+
 @app.put("/api/settings")
 def update_settings(
     settings: schemas.SettingsUpdate,
