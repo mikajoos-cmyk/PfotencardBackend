@@ -59,67 +59,103 @@ def extract_client_secret(obj):
     return None
 
 def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscription):
-    """Synchronisiert DB mit Stripe Subscription Objekt"""
+    """
+    Synchronisiert DB mit Stripe Subscription Objekt.
+    Behandelt 'cancel_at' als Kündigung und nutzt Items-Fallback für Enddaten.
+    """
     try:
         is_dict = isinstance(subscription, dict)
         get = lambda k: subscription.get(k) if is_dict else getattr(subscription, k, None)
         
         sub_id = get('id')
         status = get('status')
-        current_period_end = get('current_period_end')
-        trial_end = get('trial_end')
         metadata = get('metadata') or {}
         
-        # Laufzeit setzen
-        if status == 'trialing' and trial_end:
-             tenant.subscription_ends_at = datetime.fromtimestamp(trial_end, tz=timezone.utc)
-        elif current_period_end:
-             tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
-        
+        # 1. ENDDATUM & KÜNDIGUNGSDATUM
+        # Wir holen alle möglichen Datums-Quellen
+        current_period_end = get('current_period_end')
+        trial_end = get('trial_end')
+        cancel_at = get('cancel_at') # Das hier ist entscheidend!
+
+        # Fallback: Datum aus Items, wenn im Root nicht vorhanden (siehe Flexible Billing)
+        if not current_period_end:
+            items = get('items')
+            items_data = items.get('data') if isinstance(items, dict) else (items.data if items else [])
+            max_end = 0
+            if items_data:
+                for item in items_data:
+                    i_get = lambda k: item.get(k) if isinstance(item, dict) else getattr(item, k, None)
+                    end = i_get('current_period_end')
+                    if end and end > max_end:
+                        max_end = end
+            if max_end > 0:
+                current_period_end = max_end
+
+        # 2. STATUS & KÜNDIGUNGS-LOGIK
         tenant.stripe_subscription_id = sub_id
         tenant.stripe_subscription_status = status
-        tenant.cancel_at_period_end = get('cancel_at_period_end')
         
+        # WICHTIG: Wir setzen 'cancel_at_period_end' in unserer DB auf True, wenn:
+        # A) Das Flag in Stripe True ist
+        # B) ODER wenn ein konkretes Kündigungsdatum (cancel_at) gesetzt ist
+        stripe_cancel_flag = get('cancel_at_period_end')
+        
+        if stripe_cancel_flag or (cancel_at is not None):
+            tenant.cancel_at_period_end = True
+            # Wenn gekündigt ist, ist 'cancel_at' das definitivste Enddatum
+            final_end_date = cancel_at if cancel_at else current_period_end
+            if final_end_date:
+                tenant.subscription_ends_at = datetime.fromtimestamp(final_end_date, tz=timezone.utc)
+        else:
+            tenant.cancel_at_period_end = False
+            # Reguläres Ende
+            if status == 'trialing' and trial_end:
+                 tenant.subscription_ends_at = datetime.fromtimestamp(trial_end, tz=timezone.utc)
+            elif current_period_end:
+                 tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
+
+        # 3. METADATEN (Plan Name)
         if metadata.get('plan_name'):
             tenant.plan = metadata.get('plan_name')
 
+        # 4. AKTIV-STATUS
         if status in ['active', 'trialing']:
             tenant.is_active = True
+        # Wenn Status 'canceled' ist (Zeitraum abgelaufen), setzen wir is_active auf False
+        elif status in ['canceled', 'unpaid', 'incomplete_expired']:
+            # Optional: Hier könnte man is_active auf False setzen
+            pass
 
-        # Next Payment Preview (Best Effort)
+        # 5. PREVIEW NÄCHSTE ZAHLUNG (Nur wenn NICHT gekündigt)
         tenant.next_payment_amount = 0.0
         tenant.next_payment_date = tenant.subscription_ends_at
         tenant.upcoming_plan = None
         
-        # Versuche Preis aus Items zu lesen (Fallback)
-        try:
-            items = get('items')
-            data = items.get('data') if isinstance(items, dict) else items.data
-            if data:
-                price = data[0].get('price') if isinstance(data[0], dict) else data[0].price
-                amount = price.get('unit_amount') if isinstance(price, dict) else price.unit_amount
-                if amount: tenant.next_payment_amount = amount / 100.0
-        except: pass
-        
-        # Versuche Upcoming Invoice zu laden (nur wenn aktiv)
-        if not tenant.cancel_at_period_end and status in ['active', 'trialing'] and tenant.stripe_customer_id:
-             try:
-                upcoming = stripe.Invoice.upcoming(customer=tenant.stripe_customer_id, subscription=sub_id)
-                if upcoming.amount_due > 0:
-                    tenant.next_payment_amount = upcoming.amount_due / 100.0
-                if upcoming.next_payment_attempt:
-                    tenant.next_payment_date = datetime.fromtimestamp(upcoming.next_payment_attempt, tz=timezone.utc)
-             except Exception: pass
+        if not tenant.cancel_at_period_end and status in ['active', 'trialing']:
+            try:
+                items = get('items')
+                data = items.get('data') if isinstance(items, dict) else (items.data if items else [])
+                if data:
+                    # Preis aus erstem Item extrahieren
+                    item0 = data[0]
+                    i_get = lambda k: item0.get(k) if isinstance(item0, dict) else getattr(item0, k, None)
+                    price = i_get('price')
+                    if price:
+                        p_get = lambda k: price.get(k) if isinstance(price, dict) else getattr(price, k, None)
+                        amount = p_get('unit_amount')
+                        if amount: tenant.next_payment_amount = amount / 100.0
+            except: pass
 
         db.add(tenant)
         db.commit()
         db.refresh(tenant)
-        print(f"✅ Tenant {tenant.id} synced with Stripe. Status: {status}")
+        print(f"✅ Tenant {tenant.id} synced. Status: {status}, Gekündigt: {tenant.cancel_at_period_end}")
 
     except Exception as e:
         print(f"❌ Error syncing tenant DB: {e}")
+        import traceback
+        traceback.print_exc()
         db.rollback()
-
 # --- HAUPTFUNKTION: CHECKOUT / UPGRADE / DOWNGRADE ---
 
 def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str):
