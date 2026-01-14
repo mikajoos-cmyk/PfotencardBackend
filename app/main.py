@@ -550,6 +550,7 @@ def create_user(
     
     # 3. Supabase Einladung senden
     try:
+        # Branding Daten für das E-Mail Template
         tenant_branding = tenant.config.get("branding", {})
         logo_url = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
         primary_color = tenant_branding.get("primary_color") or "#22C55E"
@@ -562,13 +563,12 @@ def create_user(
             "tenant_id": tenant.id
         }
         
-        # ÄNDERUNG HIER:
-        # Wir nutzen die Basis-Domain oder /auth/callback, falls du das in Supabase hinterlegt hast.
-        # Am sichersten ist es, es exakt so zu machen wie im AuthScreen (Basis-Domain).
+        # --- KORREKTUR START ---
+        # Wir entfernen "/update-password". 
+        # Supabase leitet dann sauber auf die Subdomain weiter. 
+        # App.tsx erkennt das Event und öffnet das Modal.
         redirect_url = f"https://{tenant.subdomain}.pfotencard.de"
-        
-        # ALTERNATIVE: Falls du in main.py bei register_tenant "/auth/callback" nutzt und das dort klappt:
-        # redirect_url = f"https://{tenant.subdomain}.pfotencard.de/auth/callback"
+        # --- KORREKTUR ENDE ---
 
         print(f"DEBUG: Sende Invite an {user.email}...{redirect_url}")
         
