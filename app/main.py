@@ -373,6 +373,7 @@ async def handle_invoice_payment_succeeded(invoice):
             # da das Invoice-Objekt selbst das neue 'current_period_end' 
             # der Subscription nicht direkt im Root-Level enthält.
             subscription = stripe.Subscription.retrieve(subscription_id)
+            print(f"DEBUG: Subscription Objekt: {subscription}")
             print(f"DEBUG: Subscription erfolgreich geladen. Status: {subscription.get('status')}")
             print(f"DEBUG: Current Period End: {subscription.get('current_period_end')}")
             
