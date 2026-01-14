@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from .config import settings
 from . import models
-import json
+import traceback
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
@@ -27,6 +27,27 @@ PLAN_CONFIGS = {
 
 # --- HELPERS ---
 
+def safe_get(obj, key, default=None):
+    """Universeller Getter für Objekte, Dicts und Stripe-Responses."""
+    try:
+        if obj is None: return default
+        if hasattr(obj, 'get'):
+            val = obj.get(key)
+            if callable(val) and key != 'get': return default
+            return val if val is not None else default
+        val = getattr(obj, key, default)
+        if callable(val): return default
+        return val
+    except Exception:
+        return default
+
+def get_nested(obj, *keys):
+    current = obj
+    for key in keys:
+        current = safe_get(current, key)
+        if current is None: return None
+    return current
+
 def get_plan_config(plan_name: str, cycle: str):
     if not plan_name or not cycle: return None
     plan = plan_name.lower()
@@ -43,83 +64,37 @@ def get_price_id(plan_name: str, cycle: str):
 def extract_client_secret(obj):
     if not obj: return None
     try:
-        # Sicherer Zugriff auf verschachtelte Objekte
-        if isinstance(obj, dict):
-            if obj.get('client_secret'): return obj['client_secret']
-            pi = obj.get('payment_intent')
-            if isinstance(pi, dict): return pi.get('client_secret')
-            if hasattr(pi, 'client_secret'): return pi.client_secret
-        else:
-            if hasattr(obj, 'client_secret') and obj.client_secret: return obj.client_secret
-            if hasattr(obj, 'payment_intent') and obj.payment_intent:
-                pi = obj.payment_intent
-                if hasattr(pi, 'client_secret'): return pi.client_secret
-    except Exception as e:
-        print(f"DEBUG: Error extracting client secret: {e}")
-    return None
-
-def safe_get(obj, key, default=None):
-    """Sicherer Zugriff auf Attribute, vermeidet Methoden-Konflikte (z.B. .items)"""
-    try:
-        # 1. Dictionary Access (bevorzugt für Stripe Objects)
-        if hasattr(obj, 'get'):
-            val = obj.get(key, default)
-            # Schutz: Falls .get() eine Methode zurückgibt (unwahrscheinlich aber möglich bei falschem Key)
-            if callable(val) and key != 'get': 
-                return default
-            return val
-        
-        # 2. Attribute Access
-        val = getattr(obj, key, default)
-        if callable(val): 
-            return default
-        return val
-    except Exception:
-        return default
+        secret = safe_get(obj, 'client_secret')
+        if secret: return secret
+        pi = safe_get(obj, 'payment_intent')
+        return safe_get(pi, 'client_secret')
+    except Exception: return None
 
 # --- CORE SYNC ---
 
 def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscription):
-    """
-    Synchronisiert DB mit Stripe.
-    Nutzt 'safe_get', um Abstürze bei fehlenden Feldern zu vermeiden.
-    """
+    """Synchronisiert DB mit Stripe."""
     try:
-        print(f"DEBUG: Syncing Tenant {tenant.id} with Sub {safe_get(subscription, 'id')}")
-        
         sub_id = safe_get(subscription, 'id')
         status = safe_get(subscription, 'status')
         metadata = safe_get(subscription, 'metadata') or {}
         
         # 1. ENDDATUM
         current_period_end = safe_get(subscription, 'current_period_end')
-        
-        # Fallback: Items prüfen (Sicherer Zugriff!)
         if not current_period_end:
-            items_container = safe_get(subscription, 'items')
-            # items könnte eine Liste oder ein ListObject sein
-            items_data = []
-            if items_container:
-                if isinstance(items_container, dict):
-                    items_data = items_container.get('data', [])
-                elif hasattr(items_container, 'data'):
-                    items_data = items_container.data
-            
-            if items_data:
-                # Nimm das Ende des ersten Items
-                first_item = items_data[0]
-                current_period_end = safe_get(first_item, 'current_period_end')
+            items_data = get_nested(subscription, 'items', 'data')
+            if items_data and len(items_data) > 0:
+                current_period_end = safe_get(items_data[0], 'current_period_end')
 
         trial_end = safe_get(subscription, 'trial_end')
         cancel_at = safe_get(subscription, 'cancel_at')
 
-        # DB Update
+        # Status Update
         tenant.stripe_subscription_id = sub_id
         tenant.stripe_subscription_status = status
         
         # Kündigungsstatus
         stripe_cancel_flag = safe_get(subscription, 'cancel_at_period_end')
-        
         if stripe_cancel_flag or (cancel_at is not None):
             tenant.cancel_at_period_end = True
             final_end_date = cancel_at if cancel_at else current_period_end
@@ -133,28 +108,24 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                  tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
 
         # 2. PLAN & UPCOMING
-        if metadata.get('plan_name'):
-            tenant.plan = metadata.get('plan_name')
+        if safe_get(metadata, 'plan_name'):
+            tenant.plan = safe_get(metadata, 'plan_name')
 
         if status in ['active', 'trialing', 'incomplete']:
             tenant.is_active = True
 
-        # 3. PREIS VORSCHAU (Hardcoded für Stabilität)
+        # 3. PREIS VORSCHAU (Ziel-Plan Preis)
         target_plan_name = tenant.upcoming_plan if tenant.upcoming_plan else tenant.plan
         
         # Zyklus raten
         current_cycle = "monthly"
         try:
-            items_container = safe_get(subscription, 'items')
-            items_data = items_container.get('data') if hasattr(items_container, 'get') else getattr(items_container, 'data', [])
+            items_data = get_nested(subscription, 'items', 'data')
             if items_data:
-                plan_obj = safe_get(items_data[0], 'plan')
-                interval = safe_get(plan_obj, 'interval')
+                interval = get_nested(items_data[0], 'plan', 'interval')
                 if interval == 'year': current_cycle = "yearly"
-        except Exception as e:
-            print(f"DEBUG: Could not detect cycle: {e}")
+        except: pass
 
-        # Preis setzen
         if not tenant.cancel_at_period_end and status not in ['canceled', 'incomplete_expired', 'unpaid']:
             price_conf = get_plan_config(target_plan_name, current_cycle)
             if price_conf:
@@ -174,12 +145,13 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
 
     except Exception as e:
         print(f"❌ Error syncing tenant DB: {e}")
-        import traceback
         traceback.print_exc()
 
-# --- CHECKOUT ---
+# --- CHECKOUT & UPDATE ---
 
 def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str):
+    print(f"DEBUG: Starting Checkout/Update for Tenant {tenant_id} -> {plan} ({cycle})")
+    
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant: raise HTTPException(404, "Tenant not found")
 
@@ -202,51 +174,56 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
     # Abo laden
     if tenant.stripe_subscription_id:
         try:
-            # WICHTIG: expand=['items.data'] um Items sicher zu haben
             active_subscription = stripe.Subscription.retrieve(
                 tenant.stripe_subscription_id,
-                expand=['items.data']
+                expand=['items.data', 'schedule'] # Schedule gleich mitladen wenn möglich
             )
-            if active_subscription.status not in ['active', 'trialing', 'past_due', 'incomplete', 'unpaid']:
+            sub_status = safe_get(active_subscription, 'status')
+            if sub_status not in ['active', 'trialing', 'past_due', 'incomplete', 'unpaid']:
                 active_subscription = None
-        except: pass
+        except Exception as e: 
+            print(f"DEBUG: Could not fetch subscription: {e}")
+            active_subscription = None
 
     # --- UPDATE ---
     if active_subscription:
-        print(f"🔄 Modifying Subscription {active_subscription.id}")
+        print(f"🔄 Modifying Subscription {safe_get(active_subscription, 'id')}")
         try:
-            # SICHERER ZUGRIFF auf Items
-            items_container = active_subscription.get('items') # .get() ist sicher bei StripeObjects
-            if not items_container or not hasattr(items_container, 'data') or not items_container.data:
-                raise HTTPException(400, "Subscription has no items. Cannot update.")
+            items_data = get_nested(active_subscription, 'items', 'data')
+            if not items_data:
+                raise HTTPException(400, "Subscription has no items.")
                 
-            current_item = items_container.data[0]
-            current_stripe_price = current_item.price.unit_amount / 100.0
+            current_item = items_data[0]
+            current_price_val = get_nested(current_item, 'price', 'unit_amount') or 0
+            current_stripe_price = current_price_val / 100.0
             
             is_upgrade = target_amount > current_stripe_price
-            is_trial = active_subscription.status == 'trialing'
+            is_trial = safe_get(active_subscription, 'status') == 'trialing'
             
             print(f"DEBUG: Upgrade? {is_upgrade} (Old: {current_stripe_price}, New: {target_amount})")
 
             # A) UPGRADE (Sofort)
             if is_upgrade or is_trial:
-                # Schedule auflösen
-                if active_subscription.schedule:
+                # Schedule auflösen falls vorhanden
+                sched_id = safe_get(active_subscription, 'schedule')
+                # 'schedule' kann ID-String oder Objekt sein, je nach Expand
+                if isinstance(sched_id, dict): sched_id = sched_id.get('id')
+                
+                if sched_id:
                     print("DEBUG: Releasing schedule...")
-                    try: stripe.SubscriptionSchedule.release(active_subscription.schedule)
+                    try: stripe.SubscriptionSchedule.release(sched_id)
                     except: pass
 
                 updated_sub_step1 = stripe.Subscription.modify(
-                    active_subscription.id,
-                    items=[{'id': current_item.id, 'price': target_price_id}],
+                    safe_get(active_subscription, 'id'),
+                    items=[{'id': safe_get(current_item, 'id'), 'price': target_price_id}],
                     proration_behavior='always_invoice',
                     payment_behavior='pending_if_incomplete',
                     expand=['latest_invoice.payment_intent']
                 )
                 
-                # Metadata Update
                 stripe.Subscription.modify(
-                    active_subscription.id,
+                    safe_get(active_subscription, 'id'),
                     metadata={"tenant_id": tenant.id, "plan_name": plan},
                     cancel_at_period_end=False
                 )
@@ -255,52 +232,80 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 tenant.plan = plan 
                 update_tenant_from_subscription(db, tenant, updated_sub_step1)
                 
+                # Preis manuell setzen
+                tenant.next_payment_amount = target_amount
+                db.commit()
+                
+                inv = safe_get(updated_sub_step1, 'latest_invoice')
                 return {
-                    "subscriptionId": updated_sub_step1.id,
-                    "clientSecret": extract_client_secret(updated_sub_step1.latest_invoice),
+                    "subscriptionId": safe_get(updated_sub_step1, 'id'),
+                    "clientSecret": extract_client_secret(inv),
                     "status": "updated",
                     "nextPaymentAmount": target_amount
                 }
             
             # B) DOWNGRADE (Schedule)
             else:
-                sched_id = active_subscription.schedule
+                sub_id = safe_get(active_subscription, 'id')
+                sched_id = safe_get(active_subscription, 'schedule')
+                if isinstance(sched_id, dict): sched_id = sched_id.get('id')
                 
-                # Schedule erstellen wenn nötig
-                if not sched_id:
+                schedule_obj = None
+
+                # 1. Schedule holen oder erstellen
+                if sched_id:
+                    try:
+                        schedule_obj = stripe.SubscriptionSchedule.retrieve(sched_id)
+                    except Exception as e:
+                        print(f"DEBUG: Could not retrieve schedule {sched_id}: {e}")
+                        raise e
+                else:
                     try:
                         print("DEBUG: Creating schedule...")
-                        sched = stripe.SubscriptionSchedule.create(from_subscription=active_subscription.id)
-                        sched_id = sched.id
+                        schedule_obj = stripe.SubscriptionSchedule.create(from_subscription=sub_id)
+                        sched_id = schedule_obj.id
                     except stripe.error.InvalidRequestError as e:
-                        print(f"DEBUG: Schedule error ({e}), retrying refresh...")
-                        refreshed = stripe.Subscription.retrieve(active_subscription.id)
-                        if refreshed.schedule: sched_id = refreshed.schedule
-                        else: raise e
+                        print(f"DEBUG: Schedule create failed ({e}), checking refresh...")
+                        refreshed = stripe.Subscription.retrieve(sub_id)
+                        sched_id = safe_get(refreshed, 'schedule')
+                        if sched_id:
+                            schedule_obj = stripe.SubscriptionSchedule.retrieve(sched_id)
+                        else:
+                            raise e
 
-                # Datum Robust
-                period_end_timestamp = active_subscription.current_period_end
-                if not period_end_timestamp:
-                    period_end_timestamp = current_item.get('current_period_end')
+                # 2. Aktuelles Perioden-Ende robust finden
+                period_end_ts = safe_get(active_subscription, 'current_period_end')
+                if not period_end_ts:
+                    period_end_ts = safe_get(current_item, 'current_period_end')
                 
-                if not period_end_timestamp:
-                    raise HTTPException(400, "Could not determine period end.")
-                
-                period_end_timestamp = int(period_end_timestamp)
-                print(f"DEBUG: Scheduling downgrade for {period_end_timestamp}")
+                if not period_end_ts:
+                    raise HTTPException(400, "Could not determine period end date.")
+                period_end_ts = int(period_end_ts)
+
+                # 3. Start-Zeit der AKTUELLEN Phase finden (für Phase 1)
+                # schedule_obj.phases enthält die Phasen. Wir nehmen die erste (aktuelle).
+                # Wenn wir 'start_date' nicht originalgetreu übergeben, meckert Stripe.
+                current_phase_start = schedule_obj.phases[0].start_date
+
+                print(f"DEBUG: Modifying schedule {sched_id}. Phase 1 start: {current_phase_start}, end: {period_end_ts}")
+
+                current_price_id = get_nested(current_item, 'price', 'id')
+                current_metadata = safe_get(active_subscription, 'metadata') or {}
 
                 stripe.SubscriptionSchedule.modify(
                     sched_id,
                     end_behavior='release', 
                     phases=[
                         {
-                            'start_date': 'now', 
-                            'end_date': period_end_timestamp, 
-                            'items': [{'price': current_item.price.id, 'quantity': 1}],
-                            'metadata': active_subscription.metadata 
+                            # Phase 1: Aktuell (Startdatum muss exakt stimmen!)
+                            'start_date': current_phase_start, 
+                            'end_date': period_end_ts, 
+                            'items': [{'price': current_price_id, 'quantity': 1}],
+                            'metadata': current_metadata 
                         },
                         {
-                            'start_date': period_end_timestamp,
+                            # Phase 2: Neuer Plan
+                            'start_date': period_end_ts,
                             'items': [{'price': target_price_id, 'quantity': 1}],
                             'metadata': {"tenant_id": tenant.id, "plan_name": plan} 
                         }
@@ -312,14 +317,13 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 db.commit()
                 
                 return {
-                    "subscriptionId": active_subscription.id,
+                    "subscriptionId": sub_id,
                     "status": "success", 
                     "message": "Downgrade vorgemerkt."
                 }
 
         except Exception as e:
             print(f"FATAL ERROR in create_checkout_session: {e}")
-            import traceback
             traceback.print_exc()
             raise HTTPException(400, f"Update failed: {str(e)}")
 
@@ -350,16 +354,19 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             tenant.next_payment_amount = target_amount
             update_tenant_from_subscription(db, tenant, sub)
             
-            client_secret = extract_client_secret(sub.latest_invoice) or extract_client_secret(sub.pending_setup_intent)
+            inv = safe_get(sub, 'latest_invoice')
+            setup = safe_get(sub, 'pending_setup_intent')
             
             return {
-                "subscriptionId": sub.id,
-                "clientSecret": client_secret,
+                "subscriptionId": safe_get(sub, 'id'),
+                "clientSecret": extract_client_secret(inv) or extract_client_secret(setup),
                 "status": "created",
                 "nextPaymentAmount": target_amount
             }
         except Exception as e:
             raise HTTPException(400, f"Create failed: {str(e)}")
+
+# ... (Restliche Funktionen) ...
 
 def cancel_subscription(db: Session, tenant_id: int):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
@@ -368,7 +375,8 @@ def cancel_subscription(db: Session, tenant_id: int):
     try:
         try:
             sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
-            if sub.schedule: stripe.SubscriptionSchedule.release(sub.schedule)
+            sched_id = safe_get(sub, 'schedule')
+            if sched_id: stripe.SubscriptionSchedule.release(sched_id)
         except: pass
 
         sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=True)
