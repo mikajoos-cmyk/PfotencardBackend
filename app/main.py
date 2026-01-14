@@ -550,7 +550,6 @@ def create_user(
     
     # 3. Supabase Einladung senden
     try:
-        # Branding Daten für das E-Mail Template
         tenant_branding = tenant.config.get("branding", {})
         logo_url = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
         primary_color = tenant_branding.get("primary_color") or "#22C55E"
@@ -563,13 +562,16 @@ def create_user(
             "tenant_id": tenant.id
         }
         
-        # WICHTIG: redirectTo sorgt dafür, dass der Link in der E-Mail hierhin führt
-        redirect_url = f"https://{tenant.subdomain}.pfotencard.de/update-password"
+        # ÄNDERUNG HIER:
+        # Wir nutzen die Basis-Domain oder /auth/callback, falls du das in Supabase hinterlegt hast.
+        # Am sichersten ist es, es exakt so zu machen wie im AuthScreen (Basis-Domain).
+        redirect_url = f"https://{tenant.subdomain}.pfotencard.de"
+        
+        # ALTERNATIVE: Falls du in main.py bei register_tenant "/auth/callback" nutzt und das dort klappt:
+        # redirect_url = f"https://{tenant.subdomain}.pfotencard.de/auth/callback"
 
         print(f"DEBUG: Sende Invite an {user.email}...{redirect_url}")
-        print(f"DEBUG: Metadaten: {metadata}")
-        # HIER DIE ÄNDERUNG: Wir nutzen NUR invite_user_by_email.
-        # Kein vorheiges create_user! Das macht diese Funktion automatisch.
+        
         auth_res = supabase.auth.admin.invite_user_by_email(
             user.email,
             options={
