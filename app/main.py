@@ -566,8 +566,8 @@ def create_user(
         # WICHTIG: redirectTo sorgt dafür, dass der Link in der E-Mail hierhin führt
         redirect_url = f"https://{tenant.subdomain}.pfotencard.de/update-password"
 
-        print(f"DEBUG: Sende Invite an {user.email}...")
-
+        print(f"DEBUG: Sende Invite an {user.email}...{redirect_url}")
+        print(f"DEBUG: Metadaten: {metadata}")
         # HIER DIE ÄNDERUNG: Wir nutzen NUR invite_user_by_email.
         # Kein vorheiges create_user! Das macht diese Funktion automatisch.
         auth_res = supabase.auth.admin.invite_user_by_email(
@@ -605,7 +605,7 @@ def create_user(
 
     # 4. User in lokaler Datenbank anlegen (und mit Auth-ID verknüpfen)
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=auth_id)
-    
+
 
 @app.get("/api/users/staff", response_model=List[schemas.User])
 def read_staff_users(
