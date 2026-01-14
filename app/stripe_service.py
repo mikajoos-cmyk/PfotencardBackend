@@ -140,19 +140,15 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                 # Wir schauen uns das erste Item der kommenden Rechnung an
                 if upcoming.lines and upcoming.lines.data:
                     next_price = upcoming.lines.data[0].price
-                    # Versuchen den Plan-Namen aus der Preis-ID zu raten (Mapping)
-                    # Dies ist optional, hilft aber im Frontend ("Wechsel auf Starter")
                     if next_price and next_price.id:
-                        # Hier nutzen wir eine Umkehr-Suche durch unsere Config (einfach gehalten)
-                        # Hinweis: get_plan_name_from_price_id muss importiert oder verfügbar sein
+                        # Hier nutzen wir eine Umkehr-Suche durch unsere Config
                         from .main import get_plan_name_from_price_id 
                         plan_name = get_plan_name_from_price_id(next_price.id)
                         if plan_name and plan_name != tenant.plan:
                             tenant.upcoming_plan = plan_name
 
             except Exception:
-                # Upcoming Invoice call kann fehlschlagen (z.B. bei gekündigten Abos oder ganz neuen)
-                # Das ist okay, wir lassen die Werte auf 0 oder dem Standard.
+                # Upcoming Invoice call kann fehlschlagen
                 pass
 
         db.add(tenant)
@@ -162,8 +158,6 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
 
     except Exception as e:
         print(f"❌ Error syncing tenant DB: {e}")
-        # Kein Rollback hier, damit Fehler nicht den Webhook 500en, 
-        # aber wir loggen es. (Im Webhook Kontext wichtig)
         # db.rollback()
 
 # --- HAUPTFUNKTIONEN ---
@@ -216,75 +210,74 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             
             if is_upgrade or is_trial:
                 # UPGRADE: Sofort wechseln & Differenz zahlen
-                # 'pending_if_incomplete': Update wird nur aktiv, wenn Zahlung erfolgreich
-                updated_sub = stripe.Subscription.modify(
+                
+                # SCHRITT 1: Preisänderung & Zahlung (ohne Metadata!)
+                updated_sub_step1 = stripe.Subscription.modify(
                     active_subscription.id,
                     items=[{'id': current_item.id, 'price': target_price_id}],
                     proration_behavior='always_invoice', # Differenz berechnen
                     payment_behavior='pending_if_incomplete', # Sicherstellen, dass gezahlt wird
-                    expand=['latest_invoice.payment_intent'],
+                    expand=['latest_invoice.payment_intent']
+                    # WICHTIG: Metadata und cancel_at_period_end hier NICHT setzen!
+                )
+                
+                # SCHRITT 2: Metadaten & Status nachziehen (separater Call)
+                # Das ist erlaubt, auch wenn die Zahlung ausstehend ist
+                updated_sub_step2 = stripe.Subscription.modify(
+                    active_subscription.id,
                     metadata={"tenant_id": tenant.id, "plan_name": plan},
                     cancel_at_period_end=False
                 )
                 
-                # Wenn wir hier sind, hat Stripe das Update akzeptiert.
-                # Falls Zahlung nötig (status='incomplete'), schicken wir das Secret.
-                update_tenant_from_subscription(db, tenant, updated_sub)
+                # DB Update mit den aktuellsten Daten (Schritt 2)
+                update_tenant_from_subscription(db, tenant, updated_sub_step2)
+                
+                # Client Secret aus der Rechnung von Schritt 1 holen
+                client_secret = extract_client_secret(updated_sub_step1.latest_invoice)
                 
                 return {
-                    "subscriptionId": updated_sub.id,
-                    "clientSecret": extract_client_secret(updated_sub.latest_invoice),
+                    "subscriptionId": updated_sub_step1.id,
+                    "clientSecret": client_secret,
                     "status": "updated",
                     "nextPaymentAmount": tenant.next_payment_amount
                 }
             
             else:
                 # DOWNGRADE: Erst zum Ende der Laufzeit (Schedule)
-                # Wir erstellen einen "Subscription Schedule", der das Abo am Ende der Periode ändert.
                 
                 # 1. Schedule holen oder erstellen
                 sched_id = active_subscription.schedule
                 if not sched_id:
-                    # Erstellt Schedule mit aktueller Phase (bis Period End)
                     sched = stripe.SubscriptionSchedule.create(from_subscription=active_subscription.id)
                     sched_id = sched.id
                 
-                # 2. Schedule updaten: Neue Phase anhängen für den neuen Preis
-                # Wir nutzen 'phases' um explizit zu sagen: "Ab jetzt (current phase) so lassen, danach neuer Preis"
-                
-                # Stripe Logik: Wir updaten den Schedule. Wir müssen die aktuelle Phase beibehalten 
-                # und eine neue Phase definieren, die NACH der aktuellen beginnt.
-                # Einfacher: Wir nutzen 'phases' und Stripe matcht das Startdatum.
-                
+                # 2. Schedule updaten
                 stripe.SubscriptionSchedule.modify(
                     sched_id,
-                    end_behavior='release', # Nach Ablauf der Phasen läuft es als normale Sub weiter
+                    end_behavior='release', 
                     phases=[
                         {
-                            # Phase 1: Aktueller Plan bis zum Ende der Periode
+                            # Phase 1: Aktueller Plan
                             'start_date': 'now', 
                             'end_date': active_subscription.current_period_end,
                             'items': [{'price': current_price_id, 'quantity': 1}],
-                            'metadata': active_subscription.metadata # Alte Metadaten behalten
+                            'metadata': active_subscription.metadata 
                         },
                         {
-                            # Phase 2: Neuer Plan (Downgrade) ab nächster Periode
+                            # Phase 2: Neuer Plan
                             'start_date': active_subscription.current_period_end,
                             'items': [{'price': target_price_id, 'quantity': 1}],
-                            'metadata': {"tenant_id": tenant.id, "plan_name": plan} # Neue Metadaten
+                            'metadata': {"tenant_id": tenant.id, "plan_name": plan} 
                         }
                     ]
                 )
                 
-                # Wir updaten die DB manuell, um "Wechsel vorgemerkt" anzuzeigen
-                # (Da sich das Abo-Objekt selbst noch nicht geändert hat)
                 tenant.upcoming_plan = plan
-                # Preisvorschau aktualisieren wir beim nächsten Sync oder Webhook
                 db.commit()
                 
                 return {
                     "subscriptionId": active_subscription.id,
-                    "status": "success", # Kein 'payment_needed'
+                    "status": "success", 
                     "message": "Downgrade zum Ende des Zeitraums vorgemerkt."
                 }
 
@@ -330,8 +323,6 @@ def cancel_subscription(db: Session, tenant_id: int):
     if not tenant or not tenant.stripe_subscription_id:
         raise HTTPException(status_code=400, detail="No active subscription")
     try:
-        # Wenn ein Schedule existiert, müssen wir diesen kündigen, nicht nur die Sub
-        # Aber modify(cancel_at_period_end=True) auf Sub funktioniert meist auch bei Schedules.
         sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=True)
         update_tenant_from_subscription(db, tenant, sub)
         return {"message": "Cancelled"}
