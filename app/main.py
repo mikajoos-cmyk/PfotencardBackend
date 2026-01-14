@@ -537,41 +537,39 @@ def create_user(
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
-    # 1. Berechtigungs-Check
+    # 1. Sicherheits-Check: Nur Admins/Mitarbeiter dürfen einladen
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    # 2. Prüfen ob User lokal schon existiert
+    # 2. Prüfen ob User bereits in der lokalen Datenbank dieser Schule existiert
     db_user = crud.get_user_by_email(db, email=user.email, tenant_id=tenant.id)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered in this school")
     
     auth_id = None
+    
+    # 3. Supabase Einladung senden
     try:
-        # 3. Branding-Daten vorbereiten (für das E-Mail Template)
+        # Branding Daten für das E-Mail Template
         tenant_branding = tenant.config.get("branding", {})
-        
-        # Fallbacks, falls keine individuellen Farben/Logos gesetzt sind
         logo_url = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
         primary_color = tenant_branding.get("primary_color") or "#22C55E"
-        school_name = tenant.name
-
+        
         metadata = {
-            "branding_name": school_name,
+            "branding_name": tenant.name,
             "branding_logo": logo_url,
             "branding_color": primary_color,
-            # Zusätzliche Infos, falls du sie später brauchst
-            "school_name": school_name,
+            "school_name": tenant.name,
             "tenant_id": tenant.id
         }
         
+        # WICHTIG: redirectTo sorgt dafür, dass der Link in der E-Mail hierhin führt
         redirect_url = f"https://{tenant.subdomain}.pfotencard.de/update-password"
 
-        # 4. Supabase Invite senden
-        # Dies erstellt den User in auth.users (falls nicht existent) UND sendet die E-Mail
-        # mit dem Template, das du im Dashboard hinterlegt hast.
-        print(f"Sending invite to {user.email} with metadata: {metadata}")
-        
+        print(f"DEBUG: Sende Invite an {user.email}...")
+
+        # HIER DIE ÄNDERUNG: Wir nutzen NUR invite_user_by_email.
+        # Kein vorheiges create_user! Das macht diese Funktion automatisch.
         auth_res = supabase.auth.admin.invite_user_by_email(
             user.email,
             options={
@@ -582,31 +580,33 @@ def create_user(
         
         if auth_res.user:
             auth_id = auth_res.user.id
+            print(f"DEBUG: Invite erfolgreich. Auth ID: {auth_id}")
 
     except Exception as e:
         print(f"Supabase Invite Error: {e}")
-        # Fallback: Wenn der User schon existiert (z.B. in einer anderen Schule),
-        # wirft invite_user_by_email manchmal einen Fehler oder sendet keine Mail.
-        # Wir versuchen, die ID des existierenden Users zu finden, um ihn lokal zu verknüpfen.
+        # Fallback: Wenn der User in Supabase global schon existiert (Fehler: "User already registered"),
+        # müssen wir seine ID finden, um ihn lokal zu verknüpfen.
         try:
+            # Wir suchen den User in Supabase
             users_res = supabase.auth.admin.list_users()
-            # Suche in der Liste aller User (Pagination beachten bei >50 Usern, hier vereinfacht)
-            existing = next((u for u in users_res.data.users if u.email == user.email), None)
+            existing_user = next((u for u in users_res.data.users if u.email == user.email), None)
             
-            if existing:
-                auth_id = existing.id
-                # Wir aktualisieren die Metadaten, damit beim nächsten Login das Branding stimmt
+            if existing_user:
+                auth_id = existing_user.id
+                print(f"DEBUG: User existierte bereits in Auth. ID übernommen: {auth_id}")
+                
+                # Optional: Metadaten aktualisieren, damit das Branding stimmt
                 supabase.auth.admin.update_user_by_id(auth_id, {"user_metadata": metadata})
                 
-                # Optional: Hier könnte man manuell einen MagicLink senden, 
-                # falls man existierende User auch "einladen" will.
+                # Optional: Da er schon existiert, bekommt er keine Invite-Mail von invite_user_by_email.
+                # Man könnte hier manuell einen MagicLink senden, wenn man das möchte.
         except Exception as inner_e:
-            print(f"User lookup failed: {inner_e}")
+            print(f"Kritischer Fehler beim User-Lookup: {inner_e}")
 
-    # 5. User in lokaler Datenbank anlegen (mit Verknüpfung zur Auth-ID)
+    # 4. User in lokaler Datenbank anlegen (und mit Auth-ID verknüpfen)
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=auth_id)
-
     
+
 @app.get("/api/users/staff", response_model=List[schemas.User])
 def read_staff_users(
     current_user: schemas.User = Depends(auth.get_current_active_user),
