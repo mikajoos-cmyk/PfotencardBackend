@@ -230,49 +230,67 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             
             # --- DOWNGRADE: ZUM ENDE DER LAUFZEIT (SCHEDULE) ---
             else:
-                # 1. Schedule ID robust ermitteln
-                sched_id = active_subscription.schedule
-                
-                # Wenn kein Schedule existiert -> Erstellen
-                if not sched_id:
-                    print("Creating new schedule from subscription...")
-                    sched = stripe.SubscriptionSchedule.create(from_subscription=active_subscription.id)
-                    sched_id = sched.id
-                else:
-                    print(f"Using existing schedule {sched_id}")
+                try:
+                    # 1. Schedule ID robust ermitteln
+                    sched_id = active_subscription.schedule
+                    
+                    # Wenn kein Schedule existiert -> Erstellen
+                    if not sched_id:
+                        print("Creating new schedule from subscription...")
+                        sched = stripe.SubscriptionSchedule.create(from_subscription=active_subscription.id)
+                        sched_id = sched.id
+                        
+                        # Subscription neu laden, um aktuelle current_period_end zu bekommen
+                        active_subscription = stripe.Subscription.retrieve(active_subscription.id)
+                        print(f"Created schedule {sched_id}, reloaded subscription")
+                    else:
+                        print(f"Using existing schedule {sched_id}")
 
-                # 2. Schedule updaten mit Phasen
-                stripe.SubscriptionSchedule.modify(
-                    sched_id,
-                    end_behavior='release', 
-                    phases=[
-                        {
-                            # Phase 1: Aktuell bis Periodenende
-                            'start_date': 'now', 
-                            'end_date': int(active_subscription.current_period_end),
-                            'items': [{'price': current_item.price.id, 'quantity': 1}],
-                            'metadata': active_subscription.metadata 
-                        },
-                        {
-                            # Phase 2: Neuer Plan ab Periodenende
-                            'start_date': int(active_subscription.current_period_end),
-                            'items': [{'price': target_price_id, 'quantity': 1}],
-                            'metadata': {"tenant_id": tenant.id, "plan_name": plan} 
-                        }
-                    ]
-                )
-                
-                # DB Update
-                tenant.upcoming_plan = plan
-                # next_payment_amount setzen wir auf den neuen (günstigeren) Betrag
-                tenant.next_payment_amount = target_amount
-                db.commit()
-                
-                return {
-                    "subscriptionId": active_subscription.id,
-                    "status": "success", 
-                    "message": "Downgrade vorgemerkt."
-                }
+                    # 2. current_period_end als Integer sicherstellen
+                    period_end_timestamp = int(active_subscription.current_period_end)
+                    
+                    # 3. Schedule updaten mit Phasen
+                    stripe.SubscriptionSchedule.modify(
+                        sched_id,
+                        end_behavior='release',
+                        proration_behavior='none',  # Keine Zwischenabrechnung bei Downgrade
+                        phases=[
+                            {
+                                # Phase 1: Aktuell bis Periodenende
+                                'end_date': period_end_timestamp,
+                                'items': [{'price': current_item.price.id, 'quantity': 1}],
+                                'proration_behavior': 'none',
+                                'metadata': active_subscription.metadata 
+                            },
+                            {
+                                # Phase 2: Neuer Plan ab Periodenende
+                                'items': [{'price': target_price_id, 'quantity': 1}],
+                                'proration_behavior': 'none',
+                                'metadata': {"tenant_id": tenant.id, "plan_name": plan} 
+                            }
+                        ]
+                    )
+                    
+                    # DB Update
+                    tenant.upcoming_plan = plan
+                    # next_payment_amount setzen wir auf den neuen (günstigeren) Betrag
+                    tenant.next_payment_amount = target_amount
+                    db.commit()
+                    
+                    return {
+                        "subscriptionId": active_subscription.id,
+                        "status": "success", 
+                        "message": "Downgrade vorgemerkt."
+                    }
+                    
+                except stripe.error.InvalidRequestError as e:
+                    error_msg = str(e)
+                    print(f"❌ Stripe InvalidRequestError during downgrade: {error_msg}")
+                    raise HTTPException(400, f"Downgrade schedule failed: {error_msg}")
+                except Exception as e:
+                    error_msg = str(e)
+                    print(f"❌ Unexpected error during downgrade: {error_msg}")
+                    raise HTTPException(400, f"Downgrade failed: {error_msg}")
 
         except Exception as e:
             raise HTTPException(400, f"Update failed: {str(e)}")
