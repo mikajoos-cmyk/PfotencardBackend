@@ -537,38 +537,76 @@ def create_user(
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
+    # 1. Berechtigungs-Check
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # 2. Prüfen ob User lokal schon existiert
     db_user = crud.get_user_by_email(db, email=user.email, tenant_id=tenant.id)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered in this school")
     
     auth_id = None
     try:
+        # 3. Branding-Daten vorbereiten (für das E-Mail Template)
         tenant_branding = tenant.config.get("branding", {})
+        
+        # Fallbacks, falls keine individuellen Farben/Logos gesetzt sind
+        logo_url = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
+        primary_color = tenant_branding.get("primary_color") or "#22C55E"
+        school_name = tenant.name
+
         metadata = {
-            "branding_name": tenant.name,
-            "branding_logo": tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png",
-            "branding_color": tenant_branding.get("primary_color") or "#22C55E",
-            "school_name": tenant.name
+            "branding_name": school_name,
+            "branding_logo": logo_url,
+            "branding_color": primary_color,
+            # Zusätzliche Infos, falls du sie später brauchst
+            "school_name": school_name,
+            "tenant_id": tenant.id
         }
+        
+        redirect_url = f"https://{tenant.subdomain}.pfotencard.de/update-password"
+
+        # 4. Supabase Invite senden
+        # Dies erstellt den User in auth.users (falls nicht existent) UND sendet die E-Mail
+        # mit dem Template, das du im Dashboard hinterlegt hast.
+        print(f"Sending invite to {user.email} with metadata: {metadata}")
+        
+        auth_res = supabase.auth.admin.invite_user_by_email(
+            user.email,
+            options={
+                "data": metadata,
+                "redirectTo": redirect_url
+            }
+        )
+        
+        if auth_res.user:
+            auth_id = auth_res.user.id
+
+    except Exception as e:
+        print(f"Supabase Invite Error: {e}")
+        # Fallback: Wenn der User schon existiert (z.B. in einer anderen Schule),
+        # wirft invite_user_by_email manchmal einen Fehler oder sendet keine Mail.
+        # Wir versuchen, die ID des existierenden Users zu finden, um ihn lokal zu verknüpfen.
         try:
-            auth_res = supabase.auth.admin.invite_user_by_email(
-                user.email,
-                {"data": metadata, "redirectTo": f"https://{tenant.subdomain}.pfotencard.de/update-password"}
-            )
-            if auth_res.user: auth_id = auth_res.user.id
-        except Exception:
             users_res = supabase.auth.admin.list_users()
+            # Suche in der Liste aller User (Pagination beachten bei >50 Usern, hier vereinfacht)
             existing = next((u for u in users_res.data.users if u.email == user.email), None)
+            
             if existing:
                 auth_id = existing.id
+                # Wir aktualisieren die Metadaten, damit beim nächsten Login das Branding stimmt
                 supabase.auth.admin.update_user_by_id(auth_id, {"user_metadata": metadata})
-    except Exception as e:
-        print(f"Supabase User Sync failed: {e}")
+                
+                # Optional: Hier könnte man manuell einen MagicLink senden, 
+                # falls man existierende User auch "einladen" will.
+        except Exception as inner_e:
+            print(f"User lookup failed: {inner_e}")
 
+    # 5. User in lokaler Datenbank anlegen (mit Verknüpfung zur Auth-ID)
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=auth_id)
 
+    
 @app.get("/api/users/staff", response_model=List[schemas.User])
 def read_staff_users(
     current_user: schemas.User = Depends(auth.get_current_active_user),
