@@ -11,3 +11,5 @@ psycopg2-binary
 supabase
 jose
 stripe
+pywebpush==1.14.0
+resend==0.8.0
