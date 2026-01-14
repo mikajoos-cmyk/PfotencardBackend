@@ -576,7 +576,7 @@ def create_user(
             user.email,
             options={
                 "data": metadata,
-                "email_redirect_to": redirect_url
+                "redirect_to": redirect_url
             }
         )
         
