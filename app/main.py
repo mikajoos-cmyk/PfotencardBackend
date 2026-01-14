@@ -567,7 +567,7 @@ def create_user(
         # Wir entfernen "/update-password". 
         # Supabase leitet dann sauber auf die Subdomain weiter. 
         # App.tsx erkennt das Event und öffnet das Modal.
-        redirect_url = f"https://{tenant.subdomain}.pfotencard.de"
+        redirect_url = f"https://{tenant.subdomain}.pfotencard.de/"
         # --- KORREKTUR ENDE ---
 
         print(f"DEBUG: Sende Invite an {user.email}...{redirect_url}")
