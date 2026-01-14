@@ -221,6 +221,54 @@ def get_plan_name_from_price_id(price_id: str):
         return "enterprise"
     return None
 
+# --- HILFSFUNKTION FÜR ROBUSTE ID-EXTRAKTION ---
+def get_subscription_id_safe(invoice: dict) -> Optional[str]:
+    """
+    Versucht, die Subscription-ID aus verschiedenen Ebenen des Invoice-Objekts zu extrahieren.
+    Funktioniert für alte und neue Stripe API-Versionen (z.B. 2025-11-17.clover).
+    """
+    print("DEBUG: Starte Subscription ID Extraktion...")
+    
+    # 1. Versuch: Standard-Feld auf oberster Ebene (ältere APIs)
+    if invoice.get('subscription'):
+        print(f"DEBUG: Subscription ID gefunden (Standard-Feld): {invoice.get('subscription')}")
+        return invoice.get('subscription')
+
+    # 2. Versuch: Verschachtelt in 'parent' (neue APIs)
+    # Pfad: parent -> subscription_details -> subscription
+    parent = invoice.get('parent')
+    if parent and isinstance(parent, dict):
+        print("DEBUG: Parent-Objekt gefunden, prüfe subscription_details...")
+        sub_details = parent.get('subscription_details')
+        if sub_details and isinstance(sub_details, dict):
+            if sub_details.get('subscription'):
+                print(f"DEBUG: Subscription ID gefunden (Parent->subscription_details): {sub_details.get('subscription')}")
+                return sub_details.get('subscription')
+
+    # 3. Versuch: Über die Rechnungspositionen (Line Items)
+    # Manchmal fehlt die Info im Header, steht aber bei den Posten dabei
+    lines = invoice.get('lines', {})
+    if lines and isinstance(lines, dict) and 'data' in lines:
+        print(f"DEBUG: Prüfe {len(lines['data'])} Line Items...")
+        for idx, item in enumerate(lines['data']):
+            # 3a. Direkt im Line Item
+            if item.get('subscription'):
+                print(f"DEBUG: Subscription ID gefunden (Line Item {idx}): {item.get('subscription')}")
+                return item.get('subscription')
+            
+            # 3b. Verschachtelt im Line Item Parent
+            # Pfad: item -> parent -> subscription_item_details -> subscription
+            item_parent = item.get('parent')
+            if item_parent and isinstance(item_parent, dict):
+                item_sub_details = item_parent.get('subscription_item_details')
+                if item_sub_details and isinstance(item_sub_details, dict):
+                    if item_sub_details.get('subscription'):
+                        print(f"DEBUG: Subscription ID gefunden (Line Item {idx} Parent): {item_sub_details.get('subscription')}")
+                        return item_sub_details.get('subscription')
+    
+    print("DEBUG: Keine Subscription ID gefunden in allen Versuchen")
+    return None
+
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request, stripe_signature: str = Header(None)):
     payload = await request.body()
@@ -308,14 +356,16 @@ async def handle_invoice_payment_succeeded(invoice):
     print("DEBUG: invoice.payment_succeeded Event empfangen")
     print(f"DEBUG: Invoice ID: {invoice.get('id')}")
     print(f"DEBUG: Customer ID: {invoice.get('customer')}")
-    print(f"DEBUG: Subscription ID: {invoice.get('subscription')}")
     print(f"DEBUG: Amount Paid: {invoice.get('amount_paid')} {invoice.get('currency', 'EUR').upper()}")
     print(f"DEBUG: Invoice Status: {invoice.get('status')}")
     print(f"DEBUG: Full Invoice Object: {invoice}")
     print("=" * 80)
     
-    subscription_id = invoice.get('subscription')
+    # Verwende die robuste Hilfsfunktion zur ID-Extraktion
+    subscription_id = get_subscription_id_safe(invoice)
+
     if subscription_id:
+        print(f"DEBUG: Subscription ID erfolgreich gefunden: {subscription_id}")
         db = SessionLocal()
         try:
             print(f"DEBUG: Lade Subscription {subscription_id} von Stripe...")
@@ -336,7 +386,9 @@ async def handle_invoice_payment_succeeded(invoice):
         finally:
             db.close()
     else:
-        print("DEBUG: Keine Subscription ID im Invoice gefunden - überspringe Verarbeitung")
+        # Das ist okay bei Einmalzahlungen, aber wir loggen es zur Sicherheit
+        print("DEBUG: Keine Subscription ID gefunden (evtl. Einmalzahlung). Skipping.")
+        print("=" * 80)
 
 
 # --- STRIPE INTEGRATION ---
