@@ -44,3 +44,15 @@ def delete_folder_from_storage(supabase: Client, bucket_name: str, folder_path: 
             logger.info(f"Storage Cleanup: Folder {folder_path} cleared.")
     except Exception as e:
         logger.error(f"Storage Cleanup Error for folder {folder_path}: {e}")
+
+def delete_tenant_storage(tenant_id: int):
+    """
+    Löscht alle Dateien eines Tenants aus dem Storage.
+    """
+    delete_folder_from_storage(supabase, "documents", str(tenant_id))
+
+def delete_user_storage(tenant_id: int, user_id: int):
+    """
+    Löscht alle Dokumente eines Users aus dem Storage.
+    """
+    delete_folder_from_storage(supabase, "documents", f"{tenant_id}/{user_id}")

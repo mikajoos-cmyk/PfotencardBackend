@@ -744,6 +744,45 @@ def update_user_status(
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
     return crud.update_user_status(db, user_id, tenant.id, status)
+    
+@app.delete("/api/users/{user_id}")
+def delete_user_endpoint(
+    user_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="You cannot delete yourself")
+    
+    # Optional: Verhindern, dass Mitarbeiter Admins löschen
+    db_user = crud.get_user(db, user_id, tenant.id)
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    if current_user.role == 'mitarbeiter' and db_user.role == 'admin':
+        raise HTTPException(status_code=403, detail="Employees cannot delete admins")
+
+    # Sichern der Auth ID vor dem Löschen in der DB
+    auth_id = db_user.auth_id
+
+    success = crud.delete_user(db, user_id, tenant.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    # Aus Supabase Auth löschen
+    if auth_id:
+        try:
+            supabase.auth.admin.delete_user(str(auth_id))
+            print(f"DEBUG: User {auth_id} also deleted from Supabase Auth.")
+        except Exception as e:
+            print(f"Supabase Auth Delete Error: {e}")
+            # Wir machen weiter, da der lokale User bereits weg ist
+            
+    return {"status": "success", "message": "User deleted successfully"}
 
 @app.put("/api/users/{user_id}/level", response_model=schemas.User)
 def manual_level_up(

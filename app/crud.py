@@ -306,10 +306,47 @@ def delete_user(db: Session, user_id: int, tenant_id: int):
     db_user = get_user(db, user_id, tenant_id)
     if not db_user: return None
     
+    # 0. Manual Cleanup for references (DB constraints might not have ON DELETE CASCADE correctly set up)
+    # A. Chat Messages (Sender OR Receiver)
+    db.query(models.ChatMessage).filter(
+        or_(models.ChatMessage.sender_id == user_id, models.ChatMessage.receiver_id == user_id)
+    ).delete(synchronize_session=False)
+    
+    # B. Bookings
+    db.query(models.Booking).filter(models.Booking.user_id == user_id).delete(synchronize_session=False)
+
+    # C. Dogs
+    db.query(models.Dog).filter(models.Dog.owner_id == user_id).delete(synchronize_session=False)
+
+    # D. Transactions (Own transactions)
+    db.query(models.Transaction).filter(models.Transaction.user_id == user_id).delete(synchronize_session=False)
+    
+    # E. Transactions booked_by (SET NULL) - Important for staff deletion
+    db.query(models.Transaction).filter(models.Transaction.booked_by_id == user_id).update(
+        {models.Transaction.booked_by_id: None}, synchronize_session=False
+    )
+    
+    # F. Appointment trainer (SET NULL)
+    db.query(models.Appointment).filter(models.Appointment.trainer_id == user_id).update(
+        {models.Appointment.trainer_id: None}, synchronize_session=False
+    )
+    
+    # G. News posts created_by (Delete)
+    db.query(models.NewsPost).filter(models.NewsPost.created_by_id == user_id).delete(synchronize_session=False)
+
+    # H. Achievements
+    db.query(models.Achievement).filter(models.Achievement.user_id == user_id).delete(synchronize_session=False)
+
+    # I. Documents
+    db.query(models.Document).filter(models.Document.user_id == user_id).delete(synchronize_session=False)
+
+    # J. Push Subscriptions
+    db.query(models.PushSubscription).filter(models.PushSubscription.user_id == user_id).delete(synchronize_session=False)
+
     # 1. Physical Storage Cleanup
     storage_service.delete_user_storage(tenant_id, user_id)
     
-    # 2. Database Delete (Cascades through ON DELETE CASCADE)
+    # 2. Database Delete the User itself
     db.delete(db_user)
     db.commit()
     return {"ok": True}
