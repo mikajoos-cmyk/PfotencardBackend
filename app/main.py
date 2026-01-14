@@ -245,6 +245,11 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
         subscription = event['data']['object']
         await handle_subscription_deleted(subscription)
 
+    # NEU: Handler für erfolgreiche Zahlungen (Verlängerungen) hinzufügen
+    elif event['type'] == 'invoice.payment_succeeded':
+        invoice = event['data']['object']
+        await handle_invoice_payment_succeeded(invoice)
+
     return {"status": "success"}
 
 async def handle_subscription_update(subscription):
@@ -292,6 +297,29 @@ async def handle_subscription_deleted(subscription):
             print(f"Webhook: Subscription deleted for tenant {tenant.name}")
     finally:
         db.close()
+
+
+async def handle_invoice_payment_succeeded(invoice):
+    """
+    Wird aufgerufen, wenn eine Rechnung (z.B. Abo-Verlängerung) erfolgreich bezahlt wurde.
+    Lädt die Subscription neu, um das neue Laufzeitende zu holen.
+    """
+    subscription_id = invoice.get('subscription')
+    if subscription_id:
+        db = SessionLocal()
+        try:
+            # Wir laden das Subscription-Objekt frisch von Stripe, 
+            # da das Invoice-Objekt selbst das neue 'current_period_end' 
+            # der Subscription nicht direkt im Root-Level enthält.
+            subscription = stripe.Subscription.retrieve(subscription_id)
+            
+            # Wiederverwenden der existierenden Logik zum Aktualisieren des Tenants
+            await handle_subscription_update(subscription)
+            print(f"Webhook: Invoice payment processed for subscription {subscription_id}")
+        except Exception as e:
+            print(f"Webhook Error handling invoice payment: {e}")
+        finally:
+            db.close()
 
 
 # --- STRIPE INTEGRATION ---
