@@ -349,47 +349,70 @@ async def handle_subscription_deleted(subscription):
 
 async def handle_invoice_payment_succeeded(invoice):
     """
-    Wird aufgerufen, wenn eine Rechnung (z.B. Abo-Verlängerung) erfolgreich bezahlt wurde.
-    Lädt die Subscription neu, um das neue Laufzeitende zu holen.
+    Wird aufgerufen, wenn eine Rechnung erfolgreich bezahlt wurde.
+    Lädt die Subscription, extrahiert das korrekte Enddatum (auch aus Items) 
+    und erzwingt das Update.
     """
-    print("=" * 80)
-    print("DEBUG: invoice.payment_succeeded Event empfangen")
-    print(f"DEBUG: Invoice ID: {invoice.get('id')}")
-    print(f"DEBUG: Customer ID: {invoice.get('customer')}")
-    print(f"DEBUG: Amount Paid: {invoice.get('amount_paid')} {invoice.get('currency', 'EUR').upper()}")
-    print(f"DEBUG: Invoice Status: {invoice.get('status')}")
-    print(f"DEBUG: Full Invoice Object: {invoice}")
-    print("=" * 80)
-    
-    # Verwende die robuste Hilfsfunktion zur ID-Extraktion
     subscription_id = get_subscription_id_safe(invoice)
 
     if subscription_id:
-        print(f"DEBUG: Subscription ID erfolgreich gefunden: {subscription_id}")
-        db = SessionLocal()
+        print(f"DEBUG: Subscription ID gefunden: {subscription_id}")
         try:
-            print(f"DEBUG: Lade Subscription {subscription_id} von Stripe...")
-            # Wir laden das Subscription-Objekt frisch von Stripe, 
-            # da das Invoice-Objekt selbst das neue 'current_period_end' 
-            # der Subscription nicht direkt im Root-Level enthält.
+            # 1. Subscription von Stripe laden
             subscription = stripe.Subscription.retrieve(subscription_id)
-            print(f"DEBUG: Subscription Objekt: {subscription}")
-            print(f"DEBUG: Subscription erfolgreich geladen. Status: {subscription.get('status')}")
-            print(f"DEBUG: Current Period End: {subscription.get('current_period_end')}")
             
-            # Wiederverwenden der existierenden Logik zum Aktualisieren des Tenants
+            # --- PATCH START: Datum aus Items holen ---
+            # Das übergebene Objekt hat 'current_period_end' nicht im Root, aber in items.data[0]
+            current_end = subscription.get('current_period_end')
+            
+            # Wenn Root-Datum fehlt oder null ist, suchen wir in den Items
+            if not current_end:
+                print("DEBUG: 'current_period_end' fehlt im Root. Suche in Items...")
+                items = subscription.get('items', {})
+                if items and hasattr(items, 'data'):
+                    # Wir nehmen das weiteste Enddatum aller Items
+                    max_end = 0
+                    for item in items.data:
+                        item_end = item.get('current_period_end')
+                        if item_end and item_end > max_end:
+                            max_end = item_end
+                    
+                    if max_end > 0:
+                        print(f"DEBUG: Datum aus Items extrahiert: {max_end}")
+                        # Wir patchen das Objekt, damit stripe_service es versteht
+                        subscription['current_period_end'] = max_end
+                        current_end = max_end
+
+            # --- PATCH ENDE ---
+
+            # 2. Datum aus der Invoice als zusätzlicher Fallback/Override prüfen
+            # (Falls die Invoice "neuer" ist als das Subscription-Objekt)
+            invoice_period_end = 0
+            lines = invoice.get('lines', {})
+            if lines and isinstance(lines, dict) and 'data' in lines:
+                for item in lines['data']:
+                    if item.get('period') and item['period'].get('end'):
+                        end_ts = item['period']['end']
+                        if end_ts > invoice_period_end:
+                            invoice_period_end = end_ts
+            
+            # 3. Wenn die Rechnung ein noch neueres Datum hat als das (ggf. gepatchte) Subscription-Objekt
+            if invoice_period_end > (current_end or 0):
+                print(f"DEBUG: Invoice hat neueres Enddatum ({invoice_period_end}) als Subscription ({current_end}). Nutze Invoice-Datum.")
+                subscription['current_period_end'] = invoice_period_end
+            
+            # 4. Bestehende Update-Logik aufrufen
+            # stripe_service erwartet subscription.current_period_end oder subscription['current_period_end']
             await handle_subscription_update(subscription)
-            print(f"Webhook: Invoice payment processed for subscription {subscription_id}")
+            
+            print(f"Webhook: Invoice payment processed. Period End set to: {subscription.get('current_period_end')}")
+            
         except Exception as e:
             print(f"Webhook Error handling invoice payment: {e}")
             import traceback
             traceback.print_exc()
-        finally:
-            db.close()
     else:
-        # Das ist okay bei Einmalzahlungen, aber wir loggen es zur Sicherheit
         print("DEBUG: Keine Subscription ID gefunden (evtl. Einmalzahlung). Skipping.")
-        print("=" * 80)
 
 
 # --- STRIPE INTEGRATION ---
