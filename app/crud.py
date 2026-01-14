@@ -593,6 +593,18 @@ def create_document(db: Session, user_id: int, tenant_id: int, file_name: str, f
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    
+    # --- NEU: User benachrichtigen ---
+    from .notification_service import notify_user
+    notify_user(
+        db=db,
+        user_id=user_id,
+        type="system",
+        title="Neues Dokument",
+        message="Ein neues Dokument wurde in deiner Akte hinterlegt.",
+        url="/profile"
+    )
+    
     return doc
 
 def get_document(db: Session, document_id: int, tenant_id: int):
@@ -708,6 +720,25 @@ def delete_appointment(db: Session, appointment_id: int, tenant_id: int):
     if not db_appt:
         return False
     
+    # --- NEU: Teilnehmer benachrichtigen ---
+    from .notification_service import notify_user
+    participants = db.query(models.Booking).filter(
+        models.Booking.appointment_id == appointment_id,
+        models.Booking.status == 'confirmed'
+    ).all()
+    
+    formatted_date = db_appt.start_time.strftime("%d.%m.%Y um %H:%M")
+    
+    for p in participants:
+        notify_user(
+            db=db,
+            user_id=p.user_id,
+            type="alert",
+            title="Termin abgesagt",
+            message=f"Der Termin '{db_appt.title}' am {formatted_date} wurde abgesagt.",
+            url="/bookings"
+        )
+
     db.delete(db_appt)
     db.commit()
     return True
@@ -806,8 +837,17 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
         if next_in_line:
             next_in_line.status = 'confirmed'
             promoted_user_id = next_in_line.user_id
-            # Hier könnte man eine Notification/E-Mail auslösen
-            # create_system_notification(db, next_in_line.user_id, "Du bist nachgerückt!")
+            
+            # --- NEU: Nachrücker benachrichtigen ---
+            from .notification_service import notify_user
+            notify_user(
+                db=db,
+                user_id=promoted_user_id,
+                type="booking",
+                title="Platz bestätigt",
+                message=f"Gute Nachrichten! Du bist für '{booking.appointment.title}' nachgerückt.",
+                url="/bookings"
+            )
 
     db.commit()
     
@@ -881,6 +921,8 @@ def unsubscribe_newsletter(db: Session, email: str):
 
 # --- NEWS ---
 
+# app/crud.py
+
 def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, tenant_id: int):
     # Fetch target objects
     target_levels = []
@@ -910,16 +952,62 @@ def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, 
     db.commit()
     db.refresh(db_post)
 
-    # Benachrichtigung an den Autor senden (oder an alle relevanten User, je nach Logik)
+    # --- NEU: Broadcast-Logik ---
     from .notification_service import notify_user
-    notify_user(
-        db=db,
-        user_id=author_id, # Notifying the author for now, broadcast logic would be more complex
-        type="news_post_created",
-        title="Neuer News-Beitrag erstellt",
-        message=f"Dein Beitrag '{db_post.title}' wurde erfolgreich veröffentlicht.",
-        url="/news"
-    )
+    
+    recipient_ids = set()
+    has_specific_targets = False
+    
+    # 1. Zielgruppe: Level
+    if db_post.target_levels:
+        has_specific_targets = True
+        level_ids = [l.id for l in db_post.target_levels]
+        users_in_levels = db.query(models.User.id).filter(
+            models.User.tenant_id == tenant_id,
+            models.User.is_active == True,
+            models.User.current_level_id.in_(level_ids)
+        ).all()
+        for u in users_in_levels:
+            recipient_ids.add(u.id)
+
+    # 2. Zielgruppe: Termin-Teilnehmer (nur bestätigte)
+    if db_post.target_appointments:
+        has_specific_targets = True
+        appt_ids = [a.id for a in db_post.target_appointments]
+        users_in_appts = db.query(models.Booking.user_id).filter(
+            models.Booking.tenant_id == tenant_id,
+            models.Booking.status == 'confirmed',
+            models.Booking.appointment_id.in_(appt_ids)
+        ).all()
+        for u in users_in_appts:
+            recipient_ids.add(u.user_id)
+
+    # 3. Fallback: Keine Zielgruppe = Alle Kunden
+    if not has_specific_targets:
+        all_customers = db.query(models.User.id).filter(
+            models.User.tenant_id == tenant_id,
+            models.User.is_active == True,
+            models.User.role.in_(['kunde', 'customer'])
+        ).all()
+        for u in all_customers:
+            recipient_ids.add(u.id)
+
+    # 4. Senden (Loop durch alle Empfänger)
+    print(f"DEBUG: Sende News an {len(recipient_ids)} Empfänger.")
+    
+    for uid in recipient_ids:
+        # Autor überspringen (optional)
+        if uid == author_id: 
+            continue
+            
+        notify_user(
+            db=db,
+            user_id=uid,
+            type="news", # Löst E-Mail + Push aus (da != "chat")
+            title=f"Neuigkeit: {db_post.title}",
+            message=f"{db_post.content[:100]}..." if len(db_post.content) > 100 else db_post.content,
+            url="/news"
+        )
 
     return db_post
 
@@ -1227,4 +1315,24 @@ def update_app_status(db: Session, tenant_id: int, status_update: schemas.AppSta
     db.add(db_status)
     db.commit()
     db.refresh(db_status)
+    
+    # --- NEU: Broadcast Benachrichtigung ---
+    from .notification_service import notify_user
+    
+    # Alle aktiven User dieses Tenants holen
+    active_users = db.query(models.User.id).filter(
+        models.User.tenant_id == tenant_id,
+        models.User.is_active == True
+    ).all()
+    
+    for u in active_users:
+        notify_user(
+            db=db,
+            user_id=u.id,
+            type="alert",
+            title="Status Update",
+            message=status_update.message or f"Der Status der App hat sich auf '{status_update.status}' geändert.",
+            url="/"
+        )
+        
     return db_status
