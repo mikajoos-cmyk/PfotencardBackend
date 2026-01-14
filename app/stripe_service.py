@@ -114,7 +114,6 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
             pass
 
         # 5. PREVIEW NÄCHSTE ZAHLUNG (Via Upcoming Invoice)
-        # Wir setzen es standardmäßig zurück, falls die Berechnung fehlschlägt
         tenant.next_payment_amount = 0.0
         tenant.next_payment_date = tenant.subscription_ends_at
         tenant.upcoming_plan = None
@@ -137,7 +136,6 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                     tenant.next_payment_date = datetime.fromtimestamp(upcoming.next_payment_attempt, tz=timezone.utc)
                 
                 # Prüfen auf Plan-Wechsel (z.B. durch Schedule)
-                # Wir schauen uns das erste Item der kommenden Rechnung an
                 if upcoming.lines and upcoming.lines.data:
                     next_price = upcoming.lines.data[0].price
                     if next_price and next_price.id:
@@ -148,7 +146,7 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                             tenant.upcoming_plan = plan_name
 
             except Exception:
-                # Upcoming Invoice call kann fehlschlagen
+                # Upcoming Invoice call kann fehlschlagen, z.B. wenn gerade gekündigt wurde
                 pass
 
         db.add(tenant)
@@ -186,10 +184,12 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
     # Aktives Abo suchen
     if tenant.stripe_subscription_id:
         try:
-            sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
-            if sub.status in ['active', 'trialing', 'past_due', 'incomplete', 'unpaid']:
-                active_subscription = sub
-        except: pass
+            # Wir laden das Abo neu, um sicherzustellen, dass 'schedule' aktuell ist
+            active_subscription = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
+            if active_subscription.status not in ['active', 'trialing', 'past_due', 'incomplete', 'unpaid']:
+                active_subscription = None
+        except: 
+            pass
 
     # --- UPDATE / UPGRADE / DOWNGRADE ---
     if active_subscription:
@@ -208,9 +208,15 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             is_upgrade = new_amount > current_amount
             is_trial = active_subscription.status == 'trialing'
             
+            # --- FALL 1: UPGRADE (Sofort) ---
             if is_upgrade or is_trial:
-                # UPGRADE: Sofort wechseln & Differenz zahlen
-                
+                # FIX: Wenn bereits ein Schedule existiert (z.B. geplanter Downgrade),
+                # muss dieser aufgelöst werden, da wir sonst das Abo nicht modifizieren können.
+                if active_subscription.schedule:
+                    print(f"Releasing existing schedule {active_subscription.schedule} before upgrade...")
+                    stripe.SubscriptionSchedule.release(active_subscription.schedule)
+                    # Kurz warten oder Objekt neu laden ist meist nicht nötig, da release synchron ist
+
                 # SCHRITT 1: Preisänderung & Zahlung (ohne Metadata!)
                 updated_sub_step1 = stripe.Subscription.modify(
                     active_subscription.id,
@@ -222,17 +228,15 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 )
                 
                 # SCHRITT 2: Metadaten & Status nachziehen (separater Call)
-                # Das ist erlaubt, auch wenn die Zahlung ausstehend ist
                 updated_sub_step2 = stripe.Subscription.modify(
                     active_subscription.id,
                     metadata={"tenant_id": tenant.id, "plan_name": plan},
                     cancel_at_period_end=False
                 )
                 
-                # DB Update mit den aktuellsten Daten (Schritt 2)
+                # DB Update
                 update_tenant_from_subscription(db, tenant, updated_sub_step2)
                 
-                # Client Secret aus der Rechnung von Schritt 1 holen
                 client_secret = extract_client_secret(updated_sub_step1.latest_invoice)
                 
                 return {
@@ -242,12 +246,14 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     "nextPaymentAmount": tenant.next_payment_amount
                 }
             
+            # --- FALL 2: DOWNGRADE (Zum Ende) ---
             else:
-                # DOWNGRADE: Erst zum Ende der Laufzeit (Schedule)
-                
                 # 1. Schedule holen oder erstellen
                 sched_id = active_subscription.schedule
+                
+                # Wir stellen sicher, dass wir auf einem sauberen Stand sind
                 if not sched_id:
+                    # Erstellt Schedule mit aktueller Phase (bis Period End)
                     sched = stripe.SubscriptionSchedule.create(from_subscription=active_subscription.id)
                     sched_id = sched.id
                 
@@ -257,14 +263,14 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     end_behavior='release', 
                     phases=[
                         {
-                            # Phase 1: Aktueller Plan
+                            # Phase 1: Aktueller Plan bis zum Ende der Periode
                             'start_date': 'now', 
                             'end_date': active_subscription.current_period_end,
                             'items': [{'price': current_price_id, 'quantity': 1}],
                             'metadata': active_subscription.metadata 
                         },
                         {
-                            # Phase 2: Neuer Plan
+                            # Phase 2: Neuer Plan (Downgrade) ab nächster Periode
                             'start_date': active_subscription.current_period_end,
                             'items': [{'price': target_price_id, 'quantity': 1}],
                             'metadata': {"tenant_id": tenant.id, "plan_name": plan} 
@@ -272,8 +278,14 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     ]
                 )
                 
+                # Manuelles Update für Frontend-Feedback ("Wechsel vorgemerkt")
                 tenant.upcoming_plan = plan
                 db.commit()
+                
+                # FIX: DB sofort aktualisieren, damit 'next_payment_amount' den neuen (niedrigeren) Preis anzeigt
+                # Da der Schedule jetzt bei Stripe aktiv ist, liefert 'upcoming invoice' die korrekten Daten für Phase 2.
+                active_subscription = stripe.Subscription.retrieve(active_subscription.id)
+                update_tenant_from_subscription(db, tenant, active_subscription)
                 
                 return {
                     "subscriptionId": active_subscription.id,
@@ -316,7 +328,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Create failed: {str(e)}")
 
-# ... (cancel_subscription, get_billing_portal_url, get_subscription_details wie gehabt) ...
+# ... (restliche Funktionen bleiben gleich) ...
 
 def cancel_subscription(db: Session, tenant_id: int):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
@@ -344,7 +356,7 @@ def get_subscription_details(db: Session, tenant_id: int):
         "current_period_end": tenant.subscription_ends_at,
         "next_payment_amount": tenant.next_payment_amount,
         "next_payment_date": tenant.next_payment_date,
-        "upcoming_plan": tenant.upcoming_plan # NEU: Fürs Frontend
+        "upcoming_plan": tenant.upcoming_plan
     }
 
 def get_invoices(db: Session, tenant_id: int, limit: int = 12):
