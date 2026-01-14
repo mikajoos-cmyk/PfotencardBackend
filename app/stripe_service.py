@@ -194,8 +194,32 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 raise HTTPException(400, "Subscription has no items.")
                 
             current_item = items_data[0]
+            current_price_id = get_nested(current_item, 'price', 'id')
             current_price_val = get_nested(current_item, 'price', 'unit_amount') or 0
             current_stripe_price = current_price_val / 100.0
+            
+            # --- SPEZIALFALL: Downgrade abbrechen / Beim aktuellen Plan bleiben ---
+            if current_price_id == target_price_id:
+                # Wenn ein Schedule existiert (z.B. geplanter Downgrade), diesen löschen!
+                sched_id = safe_get(active_subscription, 'schedule')
+                if isinstance(sched_id, dict): sched_id = sched_id.get('id')
+                
+                if sched_id:
+                    print(f"DEBUG: Releasing schedule {sched_id} to stay on current plan...")
+                    try:
+                        stripe.SubscriptionSchedule.release(sched_id)
+                    except Exception as e:
+                        print(f"DEBUG: Could not release schedule: {e}")
+                    
+                    # DB Bereinigen
+                    tenant.upcoming_plan = None
+                    # Next Payment wieder auf aktuellen Preis setzen
+                    tenant.next_payment_amount = target_amount
+                    db.commit()
+                    
+                    return {"status": "updated", "message": "Wechsel abgebrochen, Plan beibehalten."}
+                
+                return {"status": "updated", "message": "Plan already active"}
             
             is_upgrade = target_amount > current_stripe_price
             is_trial = safe_get(active_subscription, 'status') == 'trialing'
