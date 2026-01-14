@@ -8,52 +8,55 @@ from . import models
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
-# --- HELPER FUNKTIONEN ---
+# --- HELPER: PREISE & CONFIG ---
 
-def get_price_id(plan_name: str, cycle: str):
+def get_plan_config(plan_name: str, cycle: str):
+    """Liefert Price-ID und Betrag (in EUR) für einen Plan zurück"""
     plan = plan_name.lower()
     cycle = cycle.lower()
     
-    prices = {
+    # Preise hardcodiert oder aus Config (für schnellere/stabilere 'next_payment' Berechnung)
+    # Beträge in Cent!
+    configs = {
         "starter": {
-            "monthly": settings.STRIPE_PRICE_ID_STARTER_MONTHLY,
-            "yearly": settings.STRIPE_PRICE_ID_STARTER_YEARLY
+            "monthly": {"id": settings.STRIPE_PRICE_ID_STARTER_MONTHLY, "amount": 29.00},
+            "yearly":  {"id": settings.STRIPE_PRICE_ID_STARTER_YEARLY, "amount": 290.00}
         },
         "pro": {
-            "monthly": settings.STRIPE_PRICE_ID_PRO_MONTHLY,
-            "yearly": settings.STRIPE_PRICE_ID_PRO_YEARLY
+            "monthly": {"id": settings.STRIPE_PRICE_ID_PRO_MONTHLY, "amount": 79.00},
+            "yearly":  {"id": settings.STRIPE_PRICE_ID_PRO_YEARLY, "amount": 790.00}
         },
         "enterprise": { 
-            "monthly": settings.STRIPE_PRICE_ID_ENTERPRISE_MONTHLY,
-            "yearly": settings.STRIPE_PRICE_ID_ENTERPRISE_YEARLY
+            "monthly": {"id": settings.STRIPE_PRICE_ID_ENTERPRISE_MONTHLY, "amount": 199.00},
+            "yearly":  {"id": settings.STRIPE_PRICE_ID_ENTERPRISE_YEARLY, "amount": 1990.00}
         }
     }
     if plan == 'verband': plan = 'enterprise'
     
-    if plan in prices and cycle in prices[plan]:
-        return prices[plan][cycle]
+    if plan in configs and cycle in configs[plan]:
+        return configs[plan][cycle]
     return None
 
+def get_price_id(plan_name: str, cycle: str):
+    conf = get_plan_config(plan_name, cycle)
+    return conf["id"] if conf else None
+
 def extract_client_secret(obj):
-    """Extrahiert sicher das Client Secret aus Invoice oder Subscription Objekten"""
     if not obj: return None
     try:
-        # Direkter Zugriff
         if hasattr(obj, 'client_secret') and obj.client_secret: return obj.client_secret
         if isinstance(obj, dict) and obj.get('client_secret'): return obj['client_secret']
         
-        # Via Payment Intent
         pi = obj.get('payment_intent') if isinstance(obj, dict) else getattr(obj, 'payment_intent', None)
         if pi:
             return pi.get('client_secret') if isinstance(pi, dict) else getattr(pi, 'client_secret', None)
-    except Exception: 
-        pass
+    except Exception: pass
     return None
 
 def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscription):
     """
-    Synchronisiert DB mit Stripe Subscription Objekt.
-    Berechnet next_payment_amount live via Stripe API für maximale Genauigkeit.
+    Synchronisiert DB mit Stripe.
+    Setzt 'next_payment_amount' strikt auf den Preis des (zukünftigen) Plans.
     """
     try:
         is_dict = isinstance(subscription, dict)
@@ -63,12 +66,12 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
         status = get('status')
         metadata = get('metadata') or {}
         
-        # 1. ENDDATUM & KÜNDIGUNGSDATUM
+        # 1. ENDDATUM & KÜNDIGUNG
         current_period_end = get('current_period_end')
         trial_end = get('trial_end')
         cancel_at = get('cancel_at')
 
-        # Fallback: Datum aus Items (für flexible Billing)
+        # Fallback: Datum aus Items
         if not current_period_end:
             items = get('items')
             items_data = items.get('data') if isinstance(items, dict) else (items.data if items else [])
@@ -77,18 +80,16 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                 for item in items_data:
                     i_get = lambda k: item.get(k) if isinstance(item, dict) else getattr(item, k, None)
                     end = i_get('current_period_end')
-                    if end and end > max_end:
-                        max_end = end
-            if max_end > 0:
-                current_period_end = max_end
+                    if end and end > max_end: max_end = end
+            if max_end > 0: current_period_end = max_end
 
-        # 2. STATUS & KÜNDIGUNGS-LOGIK
+        # Status Update
         tenant.stripe_subscription_id = sub_id
         tenant.stripe_subscription_status = status
         
         stripe_cancel_flag = get('cancel_at_period_end')
         
-        # Wir setzen 'cancel_at_period_end' auf True, wenn gekündigt (Flag oder Datum)
+        # Kündigung?
         if stripe_cancel_flag or (cancel_at is not None):
             tenant.cancel_at_period_end = True
             final_end_date = cancel_at if cancel_at else current_period_end
@@ -96,63 +97,63 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                 tenant.subscription_ends_at = datetime.fromtimestamp(final_end_date, tz=timezone.utc)
         else:
             tenant.cancel_at_period_end = False
-            # Reguläres Ende
             if status == 'trialing' and trial_end:
                  tenant.subscription_ends_at = datetime.fromtimestamp(trial_end, tz=timezone.utc)
             elif current_period_end:
                  tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
 
-        # 3. METADATEN (Plan Name)
+        # 2. PLAN & METADATEN
+        # Wir aktualisieren den Plan nur, wenn er im Metadaten-Feld steht (was wir beim Checkout/Update setzen)
         if metadata.get('plan_name'):
+            # WICHTIG: Bei einem Downgrade-Schedule ist der "aktuelle" Plan im Stripe-Objekt noch der alte.
+            # Aber 'tenant.plan' soll in der DB meist den *aktiven* Plan widerspiegeln.
+            # Wenn ein Schedule ansteht, lassen wir 'tenant.plan' auf dem alten Wert (via Metadata) 
+            # und setzen 'upcoming_plan'.
+            # Das Stripe-Objekt 'metadata' hat meist den Plan der *aktuellen* Phase.
             tenant.plan = metadata.get('plan_name')
 
-        # 4. AKTIV-STATUS
         if status in ['active', 'trialing', 'incomplete']:
             tenant.is_active = True
-        elif status in ['canceled', 'unpaid', 'incomplete_expired']:
-            # Hier könnte man den Zugriff sperren
-            pass
 
-        # 5. PREVIEW NÄCHSTE ZAHLUNG (Via Upcoming Invoice)
-        tenant.next_payment_amount = 0.0
-        tenant.next_payment_date = tenant.subscription_ends_at
-        tenant.upcoming_plan = None
+        # 3. NEXT PAYMENT & UPCOMING PLAN (Manuelle Logik statt Invoice API)
         
-        # Nur berechnen, wenn Abo nicht komplett beendet ist
-        if status not in ['canceled', 'incomplete_expired', 'unpaid']:
-            try:
-                # WICHTIG: Wir fragen Stripe, was als nächstes passiert.
-                # Das berücksichtigt Guthaben, Schedules (Downgrades) und Prorations.
-                upcoming = stripe.Invoice.upcoming(
-                    customer=tenant.stripe_customer_id, 
-                    subscription=sub_id
-                )
-                
-                # amount_due: Was der Kunde tatsächlich zahlen muss (nach Guthaben)
-                tenant.next_payment_amount = upcoming.amount_due / 100.0
-                
-                # Datum der nächsten Rechnung
-                if upcoming.next_payment_attempt:
-                    tenant.next_payment_date = datetime.fromtimestamp(upcoming.next_payment_attempt, tz=timezone.utc)
-                
-                # Prüfen auf Plan-Wechsel (z.B. durch Schedule)
-                if upcoming.lines and upcoming.lines.data:
-                    next_price = upcoming.lines.data[0].price
-                    if next_price and next_price.id:
-                        # Hier nutzen wir eine Umkehr-Suche durch unsere Config
-                        from .main import get_plan_name_from_price_id 
-                        plan_name = get_plan_name_from_price_id(next_price.id)
-                        if plan_name and plan_name != tenant.plan:
-                            tenant.upcoming_plan = plan_name
+        # Bestimme den Ziel-Plan für die nächste Rechnung
+        target_plan_name = tenant.upcoming_plan if tenant.upcoming_plan else tenant.plan
+        
+        # Zyklus raten (anhand der aktuellen Items)
+        current_cycle = "monthly"
+        try:
+            items = get('items')
+            data = items.get('data') if isinstance(items, dict) else (items.data if items else [])
+            if data:
+                item0 = data[0]
+                i_get = lambda k: item0.get(k) if isinstance(item0, dict) else getattr(item0, k, None)
+                plan_obj = i_get('plan')
+                if plan_obj:
+                    interval = plan_obj.get('interval') if isinstance(plan_obj, dict) else plan_obj.interval
+                    if interval == 'year': current_cycle = "yearly"
+        except: pass
 
-            except Exception:
-                # Upcoming Invoice call kann fehlschlagen, z.B. wenn gerade gekündigt wurde
-                pass
+        # Preis aus Config holen (statt Stripe Invoice Preview)
+        # Das garantiert, dass wir keine "krummen" Erstattungsbeträge anzeigen
+        if not tenant.cancel_at_period_end and status not in ['canceled', 'incomplete_expired', 'unpaid']:
+            price_conf = get_plan_config(target_plan_name, current_cycle)
+            if price_conf:
+                tenant.next_payment_amount = price_conf["amount"]
+            else:
+                tenant.next_payment_amount = 0.0 # Fallback
+            
+            tenant.next_payment_date = tenant.subscription_ends_at
+        else:
+            # Wenn gekündigt
+            tenant.next_payment_amount = 0.0
+            tenant.next_payment_date = None
+            tenant.upcoming_plan = None
 
         db.add(tenant)
         db.commit()
         db.refresh(tenant)
-        print(f"✅ Tenant {tenant.id} synced. Status: {status}, Next Amount: {tenant.next_payment_amount}")
+        print(f"✅ Tenant {tenant.id} synced. Plan: {tenant.plan}, Upcoming: {tenant.upcoming_plan}, Next: {tenant.next_payment_amount}€")
 
     except Exception as e:
         print(f"❌ Error syncing tenant DB: {e}")
@@ -162,142 +163,127 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
 
 def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
+    if not tenant: raise HTTPException(404, "Tenant not found")
 
-    target_price_id = get_price_id(plan, cycle)
-    if not target_price_id:
-        raise HTTPException(status_code=400, detail="Invalid plan configuration")
+    conf = get_plan_config(plan, cycle)
+    if not conf: raise HTTPException(400, "Invalid plan")
+    target_price_id = conf["id"]
+    target_amount = conf["amount"]
 
-    # Customer erstellen/holen
+    # Customer Logic...
     if not tenant.stripe_customer_id:
         try:
-            customer = stripe.Customer.create(email=user_email, name=tenant.name, metadata={"tenant_id": tenant.id})
-            tenant.stripe_customer_id = customer.id
+            c = stripe.Customer.create(email=user_email, name=tenant.name, metadata={"tenant_id": tenant.id})
+            tenant.stripe_customer_id = c.id
             db.commit()
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Stripe Customer Error: {e}")
+        except Exception as e: raise HTTPException(400, f"Stripe Error: {e}")
             
     customer_id = tenant.stripe_customer_id
     active_subscription = None
     
-    # Aktives Abo suchen
     if tenant.stripe_subscription_id:
         try:
-            # Wir laden das Abo neu, um sicherzustellen, dass 'schedule' aktuell ist
-            active_subscription = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
-            if active_subscription.status not in ['active', 'trialing', 'past_due', 'incomplete', 'unpaid']:
-                active_subscription = None
-        except: 
-            pass
+            sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
+            if sub.status in ['active', 'trialing', 'past_due', 'incomplete', 'unpaid']:
+                active_subscription = sub
+        except: pass
 
-    # --- UPDATE / UPGRADE / DOWNGRADE ---
+    # --- WEICHE: UPDATE vs NEU ---
     if active_subscription:
         print(f"🔄 Modifying Subscription {active_subscription.id}")
         try:
-            current_item = active_subscription['items']['data'][0]
-            current_price_id = current_item.price.id
-            
-            if current_price_id == target_price_id:
-                return {"status": "updated", "message": "Plan already active"}
+            # Bestehende Schedule? Auflösen!
+            if active_subscription.schedule:
+                print("Releasing existing schedule...")
+                stripe.SubscriptionSchedule.release(active_subscription.schedule)
+                # Refresh sub object
+                active_subscription = stripe.Subscription.retrieve(active_subscription.id)
 
-            new_price_obj = stripe.Price.retrieve(target_price_id)
-            new_amount = new_price_obj.unit_amount or 0
-            current_amount = current_item.price.unit_amount or 0
+            current_item = active_subscription['items']['data'][0]
             
-            is_upgrade = new_amount > current_amount
+            # Preise vergleichen
+            # Wir holen den aktuellen Preis aus dem Stripe Objekt, um sicherzugehen
+            current_stripe_price = current_item.price.unit_amount / 100.0
+            
+            # Entscheidung: Upgrade oder Downgrade?
+            # Wir nutzen die Beträge aus unserer Config, das ist sicherer
+            is_upgrade = target_amount > current_stripe_price
             is_trial = active_subscription.status == 'trialing'
             
-            # --- FALL 1: UPGRADE (Sofort) ---
+            # --- UPGRADE (Sofort) ---
             if is_upgrade or is_trial:
-                # FIX: Wenn bereits ein Schedule existiert (z.B. geplanter Downgrade),
-                # muss dieser aufgelöst werden, da wir sonst das Abo nicht modifizieren können.
-                if active_subscription.schedule:
-                    print(f"Releasing existing schedule {active_subscription.schedule} before upgrade...")
-                    stripe.SubscriptionSchedule.release(active_subscription.schedule)
-                    # Kurz warten oder Objekt neu laden ist meist nicht nötig, da release synchron ist
-
-                # SCHRITT 1: Preisänderung & Zahlung (ohne Metadata!)
-                updated_sub_step1 = stripe.Subscription.modify(
+                # 1. Sofort wechseln
+                updated_sub = stripe.Subscription.modify(
                     active_subscription.id,
                     items=[{'id': current_item.id, 'price': target_price_id}],
-                    proration_behavior='always_invoice', # Differenz berechnen
-                    payment_behavior='pending_if_incomplete', # Sicherstellen, dass gezahlt wird
+                    proration_behavior='always_invoice',
+                    payment_behavior='pending_if_incomplete',
                     expand=['latest_invoice.payment_intent']
-                    # WICHTIG: Metadata und cancel_at_period_end hier NICHT setzen!
                 )
                 
-                # SCHRITT 2: Metadaten & Status nachziehen (separater Call)
-                updated_sub_step2 = stripe.Subscription.modify(
+                # 2. Metadaten nachziehen
+                stripe.Subscription.modify(
                     active_subscription.id,
                     metadata={"tenant_id": tenant.id, "plan_name": plan},
                     cancel_at_period_end=False
                 )
                 
-                # DB Update
-                update_tenant_from_subscription(db, tenant, updated_sub_step2)
-                
-                client_secret = extract_client_secret(updated_sub_step1.latest_invoice)
+                # DB Update: Upcoming löschen (da sofort vollzogen), Plan setzen
+                tenant.upcoming_plan = None
+                tenant.plan = plan 
+                tenant.next_payment_amount = target_amount # Neuer Preis
+                update_tenant_from_subscription(db, tenant, updated_sub)
                 
                 return {
-                    "subscriptionId": updated_sub_step1.id,
-                    "clientSecret": client_secret,
+                    "subscriptionId": updated_sub.id,
+                    "clientSecret": extract_client_secret(updated_sub.latest_invoice),
                     "status": "updated",
-                    "nextPaymentAmount": tenant.next_payment_amount
+                    "nextPaymentAmount": target_amount
                 }
             
-            # --- FALL 2: DOWNGRADE (Zum Ende) ---
+            # --- DOWNGRADE (Ende Laufzeit) ---
             else:
-                # 1. Schedule holen oder erstellen
-                sched_id = active_subscription.schedule
+                # 1. Schedule erstellen
+                sched = stripe.SubscriptionSchedule.create(from_subscription=active_subscription.id)
                 
-                # Wir stellen sicher, dass wir auf einem sauberen Stand sind
-                if not sched_id:
-                    # Erstellt Schedule mit aktueller Phase (bis Period End)
-                    sched = stripe.SubscriptionSchedule.create(from_subscription=active_subscription.id)
-                    sched_id = sched.id
-                
-                # 2. Schedule updaten
+                # 2. Schedule definieren
+                # Phase 1: Jetzt bis Ende (unverändert)
+                # Phase 2: Ab Ende neu
                 stripe.SubscriptionSchedule.modify(
-                    sched_id,
+                    sched.id,
                     end_behavior='release', 
                     phases=[
                         {
-                            # Phase 1: Aktueller Plan bis zum Ende der Periode
-                            'start_date': 'now', 
-                            'end_date': active_subscription.current_period_end,
-                            'items': [{'price': current_price_id, 'quantity': 1}],
+                            'start_date': 'now', # Startet "jetzt" im Schedule-Kontext (übernimmt aktuelle Phase)
+                            'end_date': int(active_subscription.current_period_end), # Explizit int casten!
+                            'items': [{'price': current_item.price.id, 'quantity': 1}],
                             'metadata': active_subscription.metadata 
                         },
                         {
-                            # Phase 2: Neuer Plan (Downgrade) ab nächster Periode
-                            'start_date': active_subscription.current_period_end,
+                            'start_date': int(active_subscription.current_period_end),
                             'items': [{'price': target_price_id, 'quantity': 1}],
-                            'metadata': {"tenant_id": tenant.id, "plan_name": plan} 
+                            'metadata': {"tenant_id": tenant.id, "plan_name": plan} # Hier steht der NEUE Plan
                         }
                     ]
                 )
                 
-                # Manuelles Update für Frontend-Feedback ("Wechsel vorgemerkt")
+                # DB Manuell updaten
                 tenant.upcoming_plan = plan
+                tenant.next_payment_amount = target_amount # Wir zeigen schon den neuen Preis an
                 db.commit()
-                
-                # FIX: DB sofort aktualisieren, damit 'next_payment_amount' den neuen (niedrigeren) Preis anzeigt
-                # Da der Schedule jetzt bei Stripe aktiv ist, liefert 'upcoming invoice' die korrekten Daten für Phase 2.
-                active_subscription = stripe.Subscription.retrieve(active_subscription.id)
-                update_tenant_from_subscription(db, tenant, active_subscription)
                 
                 return {
                     "subscriptionId": active_subscription.id,
                     "status": "success", 
-                    "message": "Downgrade zum Ende des Zeitraums vorgemerkt."
+                    "message": "Downgrade vorgemerkt."
                 }
 
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Update failed: {str(e)}")
+            raise HTTPException(400, f"Update failed: {str(e)}")
 
-    # --- NEUANLAGE (Checkout) ---
+    # --- NEUANLAGE ---
     else:
+        # (Code wie gehabt, nur nextPaymentAmount hardcodiert)
         print("✨ Creating NEW Subscription")
         trial_days = 0
         if tenant.subscription_ends_at and tenant.subscription_ends_at > datetime.now(timezone.utc):
@@ -316,33 +302,48 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
 
         try:
             sub = stripe.Subscription.create(**sub_data)
+            
+            # Initial DB Sync
+            tenant.plan = plan
+            tenant.next_payment_amount = target_amount
             update_tenant_from_subscription(db, tenant, sub)
+            
             client_secret = extract_client_secret(sub.latest_invoice) or extract_client_secret(sub.pending_setup_intent)
             
             return {
                 "subscriptionId": sub.id,
                 "clientSecret": client_secret,
                 "status": "created",
-                "nextPaymentAmount": tenant.next_payment_amount
+                "nextPaymentAmount": target_amount
             }
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Create failed: {str(e)}")
-
-# ... (restliche Funktionen bleiben gleich) ...
+            raise HTTPException(400, f"Create failed: {str(e)}")
 
 def cancel_subscription(db: Session, tenant_id: int):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant or not tenant.stripe_subscription_id:
-        raise HTTPException(status_code=400, detail="No active subscription")
+        raise HTTPException(400, "No active subscription")
     try:
+        # Schedule canceln wenn vorhanden, sonst Subscription
+        try:
+            sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
+            if sub.schedule:
+                stripe.SubscriptionSchedule.release(sub.schedule)
+        except: pass
+
         sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=True)
+        
+        # Reset upcoming stuff
+        tenant.upcoming_plan = None
+        tenant.next_payment_amount = 0.0
+        
         update_tenant_from_subscription(db, tenant, sub)
         return {"message": "Cancelled"}
-    except Exception as e: raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e: raise HTTPException(400, str(e))
 
 def get_billing_portal_url(db: Session, tenant_id: int, return_url: str):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
-    if not tenant or not tenant.stripe_customer_id: raise HTTPException(status_code=400, detail="No customer")
+    if not tenant or not tenant.stripe_customer_id: raise HTTPException(400, "No customer")
     session = stripe.billing_portal.Session.create(customer=tenant.stripe_customer_id, return_url=return_url)
     return {"url": session.url}
 
