@@ -753,15 +753,28 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
         new_status = 'waitlist'
 
     booking = models.Booking(
+    new_booking = models.Booking(
         tenant_id=tenant_id,
         appointment_id=appointment_id,
         user_id=user_id,
         status=new_status
     )
-    db.add(booking)
+    db.add(new_booking)
     db.commit()
-    db.refresh(booking)
-    return booking
+    db.refresh(new_booking)
+    
+    # Benachrichtigung senden
+    from .notification_service import notify_user
+    notify_user(
+        db=db,
+        user_id=user_id,
+        type="booking",
+        title="Termin bestätigt",
+        message=f"Dein Termin '{new_booking.appointment.title}' wurde erfolgreich gebucht.",
+        url="/bookings"
+    )
+    
+    return new_booking
 
 def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int):
     booking = db.query(models.Booking).filter(
@@ -896,6 +909,18 @@ def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, 
     db.add(db_post)
     db.commit()
     db.refresh(db_post)
+
+    # Benachrichtigung an den Autor senden (oder an alle relevanten User, je nach Logik)
+    from .notification_service import notify_user
+    notify_user(
+        db=db,
+        user_id=author_id, # Notifying the author for now, broadcast logic would be more complex
+        type="news_post_created",
+        title="Neuer News-Beitrag erstellt",
+        message=f"Dein Beitrag '{db_post.title}' wurde erfolgreich veröffentlicht.",
+        url="/news"
+    )
+
     return db_post
 
 def get_news_posts(db: Session, tenant_id: int, current_user: models.User, skip: int = 0, limit: int = 50):
@@ -1018,7 +1043,7 @@ def create_chat_message(db: Session, msg: schemas.ChatMessageCreate, sender_id: 
     if not receiver:
         raise HTTPException(404, "Receiver not found")
 
-    db_msg = models.ChatMessage(
+    new_message = models.ChatMessage(
         tenant_id=tenant_id,
         sender_id=sender_id,
         receiver_id=msg.receiver_id,
@@ -1027,10 +1052,22 @@ def create_chat_message(db: Session, msg: schemas.ChatMessageCreate, sender_id: 
         file_type=msg.file_type,
         file_name=msg.file_name
     )
-    db.add(db_msg)
+    db.add(new_message)
     db.commit()
-    db.refresh(db_msg)
-    return db_msg
+    db.refresh(new_message)
+
+    # Push-Benachrichtigung an den Empfänger senden
+    from .notification_service import notify_user
+    notify_user(
+        db=db,
+        user_id=new_message.receiver_id,
+        type="chat",
+        title=f"Neue Nachricht von {new_message.sender.name}",
+        message=new_message.content[:100],
+        url=f"/chat/{new_message.sender_id}"
+    )
+
+    return new_message
 
 def get_chat_history(db: Session, tenant_id: int, user1_id: int, user2_id: int, limit: int = 100):
     """

@@ -419,3 +419,7 @@ class AppStatus(AppStatusBase):
     id: int
     updated_at: datetime
     class Config: from_attributes = True
+
+class PushSubscriptionCreate(BaseModel):
+    endpoint: str
+    keys: Dict[str, str] # Erwartet keys.p256dh und keys.auth

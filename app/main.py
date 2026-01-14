@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import secrets
 import stripe
 
-from . import crud, models, schemas, auth, stripe_service, legal
+from . import crud, models, schemas, auth, stripe_service, legal, notification_service
 from .storage_service import delete_file_from_storage, delete_folder_from_storage
 from .database import engine, get_db, SessionLocal
 from .config import settings
@@ -473,9 +473,63 @@ def get_invoices_endpoint(
         raise HTTPException(status_code=403, detail="Not authorized")
     return stripe_service.get_invoices(db, tenant.id)
 
-@app.post("/api/newsletter/subscribe", response_model=schemas.NewsletterSubscriber)
-def subscribe_to_newsletter(data: schemas.NewsletterSubscriberCreate, db: Session = Depends(get_db)):
-    return crud.add_newsletter_subscriber(db, data.email, data.source)
+@app.post("/api/notifications/subscribe")
+def subscribe_to_push(
+    sub_data: schemas.PushSubscriptionCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    """
+    Speichert eine Push-Subscription für den aktuellen User.
+    Vermeidet Duplikate durch Prüfung des Endpoints.
+    """
+    # Bestehende Subscription für diesen Endpoint suchen
+    existing = db.query(models.PushSubscription).filter(
+        models.PushSubscription.endpoint == sub_data.endpoint,
+        models.PushSubscription.user_id == current_user.id
+    ).first()
+    
+    if existing:
+        # Falls vorhanden, p256dh und auth aktualisieren
+        existing.p256dh = sub_data.keys["p256dh"]
+        existing.auth = sub_data.keys["auth"]
+    else:
+        # Neu anlegen
+        new_sub = models.PushSubscription(
+            user_id=current_user.id,
+            tenant_id=current_user.tenant_id,
+            endpoint=sub_data.endpoint,
+            p256dh=sub_data.keys["p256dh"],
+            auth=sub_data.keys["auth"]
+        )
+        db.add(new_sub)
+    
+    db.commit()
+    return {"status": "success"}
+
+@app.post("/api/notifications/test")
+def test_notification(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    """
+    Test-Endpoint für Admins, um push + email auszulösen.
+    """
+    if current_user.role not in ["admin", "employee", "mitarbeiter"]:
+        raise HTTPException(status_code=403, detail="Only admins can test notifications")
+
+    from .notification_service import notify_user
+    
+    notify_user(
+        db=db,
+        user_id=current_user.id,
+        type="test",
+        title="Test Benachrichtigung",
+        message="Dies ist eine Test-Nachricht von PfotenCard.",
+        url="/dashboard"
+    )
+    
+    return {"status": "triggered"}
 
 @app.post("/api/tenants/register", response_model=schemas.Tenant)
 def register_tenant(tenant_data: schemas.TenantCreate, admin_data: schemas.UserCreate, db: Session = Depends(get_db)):

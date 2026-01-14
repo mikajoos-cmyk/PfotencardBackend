@@ -153,6 +153,7 @@ class User(Base):
     achievements = relationship("Achievement", back_populates="user", cascade="all, delete-orphan")
     documents = relationship("Document", back_populates="user", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="user", cascade="all, delete-orphan")
+    push_subscriptions = relationship("PushSubscription", back_populates="user", cascade="all, delete-orphan")
 
 
 class Dog(Base):
@@ -371,3 +372,21 @@ class AppStatus(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     tenant = relationship("Tenant")
+
+class PushSubscription(Base):
+    __tablename__ = 'push_subscriptions'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
+    # WICHTIG: Subscriptions gehören zum User, nicht zwingend zum Tenant, 
+    # aber da deine User tenant-scoped sind, passt das so.
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
+    
+    # VAPID Daten vom Browser
+    endpoint = Column(String, nullable=False)
+    p256dh = Column(String, nullable=False)
+    auth = Column(String, nullable=False)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="push_subscriptions")

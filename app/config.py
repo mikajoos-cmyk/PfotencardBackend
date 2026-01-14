@@ -21,6 +21,10 @@ class Settings(BaseSettings):
 
     CRON_SECRET: str
 
+    RESEND_API_KEY: str
+    VAPID_PRIVATE_KEY: str
+    VITE_VAPID_PUBLIC_KEY: str
+
     # Neue Schreibweise für Pydantic v2
     model_config = SettingsConfigDict(
         env_file=".env",
