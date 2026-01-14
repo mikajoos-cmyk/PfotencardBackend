@@ -304,22 +304,39 @@ async def handle_invoice_payment_succeeded(invoice):
     Wird aufgerufen, wenn eine Rechnung (z.B. Abo-Verlängerung) erfolgreich bezahlt wurde.
     Lädt die Subscription neu, um das neue Laufzeitende zu holen.
     """
+    print("=" * 80)
+    print("DEBUG: invoice.payment_succeeded Event empfangen")
+    print(f"DEBUG: Invoice ID: {invoice.get('id')}")
+    print(f"DEBUG: Customer ID: {invoice.get('customer')}")
+    print(f"DEBUG: Subscription ID: {invoice.get('subscription')}")
+    print(f"DEBUG: Amount Paid: {invoice.get('amount_paid')} {invoice.get('currency', 'EUR').upper()}")
+    print(f"DEBUG: Invoice Status: {invoice.get('status')}")
+    print(f"DEBUG: Full Invoice Object: {invoice}")
+    print("=" * 80)
+    
     subscription_id = invoice.get('subscription')
     if subscription_id:
         db = SessionLocal()
         try:
+            print(f"DEBUG: Lade Subscription {subscription_id} von Stripe...")
             # Wir laden das Subscription-Objekt frisch von Stripe, 
             # da das Invoice-Objekt selbst das neue 'current_period_end' 
             # der Subscription nicht direkt im Root-Level enthält.
             subscription = stripe.Subscription.retrieve(subscription_id)
+            print(f"DEBUG: Subscription erfolgreich geladen. Status: {subscription.get('status')}")
+            print(f"DEBUG: Current Period End: {subscription.get('current_period_end')}")
             
             # Wiederverwenden der existierenden Logik zum Aktualisieren des Tenants
             await handle_subscription_update(subscription)
             print(f"Webhook: Invoice payment processed for subscription {subscription_id}")
         except Exception as e:
             print(f"Webhook Error handling invoice payment: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             db.close()
+    else:
+        print("DEBUG: Keine Subscription ID im Invoice gefunden - überspringe Verarbeitung")
 
 
 # --- STRIPE INTEGRATION ---
