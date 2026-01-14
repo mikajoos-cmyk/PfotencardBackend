@@ -752,7 +752,7 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     if current_count >= appt.max_participants:
         new_status = 'waitlist'
 
-    booking = models.Booking(
+    booking = models.Booking()
     new_booking = models.Booking(
         tenant_id=tenant_id,
         appointment_id=appointment_id,
