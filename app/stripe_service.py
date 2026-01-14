@@ -246,10 +246,17 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     else:
                         print(f"Using existing schedule {sched_id}")
 
-                    # 2. current_period_end als Integer sicherstellen
+                    # 2. Schedule laden, um aktuelle Phase-Informationen zu bekommen
+                    schedule = stripe.SubscriptionSchedule.retrieve(sched_id)
+                    
+                    # 3. current_period_end als Integer sicherstellen
                     period_end_timestamp = int(active_subscription.current_period_end)
                     
-                    # 3. Schedule updaten mit Phasen
+                    # 4. Start-Datum der aktuellen Phase ermitteln
+                    # Wenn das Schedule Phasen hat, nehmen wir den start_date der aktuellen Phase
+                    current_phase_start = schedule.current_phase.start_date if schedule.current_phase else int(active_subscription.current_period_start)
+                    
+                    # 5. Schedule updaten mit Phasen
                     stripe.SubscriptionSchedule.modify(
                         sched_id,
                         end_behavior='release',
@@ -257,6 +264,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         phases=[
                             {
                                 # Phase 1: Aktuell bis Periodenende
+                                'start_date': current_phase_start,  # WICHTIG: start_date ist erforderlich!
                                 'end_date': period_end_timestamp,
                                 'items': [{'price': current_item.price.id, 'quantity': 1}],
                                 'proration_behavior': 'none',
