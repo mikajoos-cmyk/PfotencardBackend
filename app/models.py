@@ -127,6 +127,10 @@ class User(Base):
     is_expert = Column(Boolean, default=False, nullable=False)
     current_level_id = Column(Integer, ForeignKey('levels.id', ondelete="SET NULL"), nullable=True)
 
+    # Benachrichtigungseinstellungen
+    notifications_email = Column(Boolean, default=True)
+    notifications_push = Column(Boolean, default=True)
+
     @property
     def level_id(self):
         return self.current_level_id

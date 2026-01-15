@@ -144,6 +144,8 @@ class UserBase(BaseModel):
     is_vip: bool = False
     is_expert: bool = False
     current_level_id: Optional[int] = None
+    notifications_email: bool = True
+    notifications_push: bool = True
 
 class UserCreate(UserBase):
     password: Optional[str] = None 
@@ -161,6 +163,8 @@ class UserUpdate(BaseModel):
     is_expert: Optional[bool] = None
     current_level_id: Optional[int] = None
     level_id: Optional[int] = None
+    notifications_email: Optional[bool] = None
+    notifications_push: Optional[bool] = None
     password: Optional[str] = None
 
 class UserStatusUpdate(BaseModel):
