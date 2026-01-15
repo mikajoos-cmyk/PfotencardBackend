@@ -1,0 +1,187 @@
+﻿--- TABLES IN DATABASE ---
+push_subscriptions, appointment_target_levels, app_status, news_target_trainings, news_target_appointments, news_target_levels, chat_messages, appointments, news_posts, bookings, transactions, levels, newsletter_subscribers, documents, achievements, dogs, users, level_requirements, training_types, tenants
+
+[Table: achievements]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - user_id (INTEGER)
+  - training_type_id (INTEGER)
+  - transaction_id (INTEGER)
+  - date_achieved (TIMESTAMP)
+  - is_consumed (BOOLEAN)
+
+[Table: app_status]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - status (VARCHAR(50))
+  - message (VARCHAR(512))
+  - updated_at (TIMESTAMP)
+
+[Table: appointment_target_levels]
+  - appointment_id (INTEGER)
+  - level_id (INTEGER)
+
+[Table: appointments]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - title (VARCHAR(255))
+  - description (VARCHAR(1024))
+  - start_time (TIMESTAMP)
+  - end_time (TIMESTAMP)
+  - location (VARCHAR(255))
+  - max_participants (INTEGER)
+  - created_at (TIMESTAMP)
+  - trainer_id (INTEGER)
+
+[Table: bookings]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - appointment_id (INTEGER)
+  - user_id (INTEGER)
+  - status (VARCHAR(50))
+  - created_at (TIMESTAMP)
+  - attended (BOOLEAN)
+
+[Table: chat_messages]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - sender_id (INTEGER)
+  - receiver_id (INTEGER)
+  - content (VARCHAR)
+  - is_read (BOOLEAN)
+  - file_url (VARCHAR(512))
+  - file_type (VARCHAR(50))
+  - file_name (VARCHAR(255))
+  - created_at (TIMESTAMP)
+
+[Table: documents]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - user_id (INTEGER)
+  - file_name (VARCHAR(255))
+  - file_type (VARCHAR(100))
+  - file_path (VARCHAR(512))
+  - upload_date (TIMESTAMP)
+
+[Table: dogs]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - owner_id (INTEGER)
+  - name (VARCHAR(255))
+  - breed (VARCHAR(255))
+  - birth_date (DATE)
+  - chip (VARCHAR(50))
+  - created_at (TIMESTAMP)
+
+[Table: level_requirements]
+  - id (INTEGER)
+  - level_id (INTEGER)
+  - training_type_id (INTEGER)
+  - required_count (INTEGER)
+  - created_at (TIMESTAMP)
+  - is_additional (BOOLEAN)
+
+[Table: levels]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - name (VARCHAR(255))
+  - rank_order (INTEGER)
+  - icon_url (VARCHAR(512))
+  - created_at (TIMESTAMP)
+  - has_additional_requirements (BOOLEAN)
+
+[Table: news_posts]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - created_by_id (INTEGER)
+  - title (VARCHAR(255))
+  - content (VARCHAR)
+  - image_url (VARCHAR(512))
+  - created_at (TIMESTAMP)
+
+[Table: news_target_appointments]
+  - news_post_id (INTEGER)
+  - appointment_id (INTEGER)
+
+[Table: news_target_levels]
+  - news_post_id (INTEGER)
+  - level_id (INTEGER)
+
+[Table: news_target_trainings]
+  - news_post_id (INTEGER)
+  - training_type_id (INTEGER)
+
+[Table: newsletter_subscribers]
+  - id (INTEGER)
+  - email (VARCHAR(255))
+  - is_subscribed (BOOLEAN)
+  - source (VARCHAR(50))
+  - created_at (TIMESTAMP)
+  - unsubscribed_at (TIMESTAMP)
+
+[Table: push_subscriptions]
+  - id (INTEGER)
+  - user_id (INTEGER)
+  - tenant_id (INTEGER)
+  - endpoint (VARCHAR)
+  - p256dh (VARCHAR)
+  - auth (VARCHAR)
+  - created_at (TIMESTAMP)
+
+[Table: tenants]
+  - id (INTEGER)
+  - name (VARCHAR(255))
+  - subdomain (VARCHAR(255))
+  - config (JSONB)
+  - plan (VARCHAR(50))
+  - is_active (BOOLEAN)
+  - created_at (TIMESTAMP)
+  - subscription_ends_at (TIMESTAMP)
+  - stripe_customer_id (VARCHAR(255))
+  - stripe_subscription_id (VARCHAR(255))
+  - stripe_subscription_status (VARCHAR(50))
+  - cancel_at_period_end (BOOLEAN)
+  - next_payment_amount (DOUBLE PRECISION)
+  - next_payment_date (TIMESTAMP)
+  - upcoming_plan (VARCHAR(50))
+  - avv_accepted_at (TIMESTAMP)
+  - avv_accepted_version (VARCHAR(50))
+  - avv_accepted_by_user_id (INTEGER)
+  - support_email (VARCHAR(255))
+
+[Table: training_types]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - name (VARCHAR(255))
+  - category (VARCHAR(50))
+  - default_price (DOUBLE PRECISION)
+  - created_at (TIMESTAMP)
+  - rank_order (INTEGER)
+
+[Table: transactions]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - user_id (INTEGER)
+  - booked_by_id (INTEGER)
+  - type (VARCHAR(255))
+  - description (VARCHAR(255))
+  - amount (DOUBLE PRECISION)
+  - balance_after (DOUBLE PRECISION)
+  - date (TIMESTAMP)
+  - bonus (DOUBLE PRECISION)
+
+[Table: users]
+  - id (INTEGER)
+  - tenant_id (INTEGER)
+  - auth_id (UUID)
+  - name (VARCHAR(255))
+  - email (VARCHAR(255))
+  - hashed_password (VARCHAR(255))
+  - role (VARCHAR(50))
+  - is_active (BOOLEAN)
+  - balance (DOUBLE PRECISION)
+  - customer_since (TIMESTAMP)
+  - phone (VARCHAR(50))
+  - is_vip (BOOLEAN)
+  - is_expert (BOOLEAN)
+  - current_level_id (INTEGER)
