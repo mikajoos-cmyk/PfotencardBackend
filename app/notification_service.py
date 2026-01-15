@@ -87,19 +87,29 @@ def send_push(subscription_info: dict, title: str, message: str, url: str):
 
 def notify_user(db: Session, user_id: int, type: str, title: str, message: str, url: str = "/"):
     """
-    Zentrale Funktion: Entscheidet über Kanäle basierend auf 'type'.
+    Zentrale Funktion: Entscheidet über Kanäle basierend auf 'type' und User-Präferenzen.
     type: 'chat', 'system', 'booking', 'alert'
     """
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user or not user.is_active:
         return
 
-    # LOGIK: Kanäle bestimmen
-    channels = ["push"] # Push immer
+    # LOGIK: Kanäle bestimmen basierend auf User-Einstellungen
+    channels = []
     
-    # E-Mail für alles AUSSER Chat
-    if type != "chat":
-        channels.append("email")
+    # Check Push Settings
+    if getattr(user, "notif_push_overall", True):
+        # Mappe den Typ auf das entsprechende Datenbank-Feld
+        pref_field = f"notif_push_{type}"
+        if getattr(user, pref_field, True):
+            channels.append("push")
+            
+    # Check Email Settings
+    if getattr(user, "notif_email_overall", True) and type != "chat":
+        # Mappe den Typ auf das entsprechende Datenbank-Feld
+        pref_field = f"notif_email_{type}"
+        if getattr(user, pref_field, True):
+            channels.append("email")
 
     # 1. PUSH SENDEN
     if "push" in channels:

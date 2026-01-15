@@ -144,8 +144,23 @@ class UserBase(BaseModel):
     is_vip: bool = False
     is_expert: bool = False
     current_level_id: Optional[int] = None
-    notifications_email: bool = True
     notifications_push: bool = True
+    
+    notif_email_overall: bool = True
+    notif_email_chat: bool = True
+    notif_email_news: bool = True
+    notif_email_booking: bool = True
+    notif_email_reminder: bool = True
+    notif_email_alert: bool = True
+    
+    notif_push_overall: bool = True
+    notif_push_chat: bool = True
+    notif_push_news: bool = True
+    notif_push_booking: bool = True
+    notif_push_reminder: bool = True
+    notif_push_alert: bool = True
+    
+    reminder_offset_minutes: int = 60
 
 class UserCreate(UserBase):
     password: Optional[str] = None 
@@ -163,8 +178,24 @@ class UserUpdate(BaseModel):
     is_expert: Optional[bool] = None
     current_level_id: Optional[int] = None
     level_id: Optional[int] = None
-    notifications_email: Optional[bool] = None
     notifications_push: Optional[bool] = None
+    
+    notif_email_overall: Optional[bool] = None
+    notif_email_chat: Optional[bool] = None
+    notif_email_news: Optional[bool] = None
+    notif_email_booking: Optional[bool] = None
+    notif_email_reminder: Optional[bool] = None
+    notif_email_alert: Optional[bool] = None
+    
+    notif_push_overall: Optional[bool] = None
+    notif_push_chat: Optional[bool] = None
+    notif_push_news: Optional[bool] = None
+    notif_push_booking: Optional[bool] = None
+    notif_push_reminder: Optional[bool] = None
+    notif_push_alert: Optional[bool] = None
+    
+    reminder_offset_minutes: Optional[int] = None
+    
     password: Optional[str] = None
 
 class UserStatusUpdate(BaseModel):
