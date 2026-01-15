@@ -14,23 +14,18 @@ VAPID_CLAIMS = {"sub": "mailto:support@pfotencard.de"}
 def get_html_template(tenant, title: str, body_content: str, action_url: str = None, action_text: str = "Anzeigen", details: dict = None):
     """
     Erstellt ein HTML-Template im Design der Supabase-Auth-Emails.
-    Unterstützt jetzt auch strukturierte Details.
     """
-    # Branding aus Tenant-Config holen
     branding = tenant.config.get("branding", {}) if tenant and tenant.config else {}
     primary_color = branding.get("primary_color", "#22C55E")
     logo_url = branding.get("logo_url", "https://pfotencard.de/logo.png")
     school_name = tenant.name if tenant else "Pfotencard"
 
-    # Basis URL für Links
     base_url = f"https://{tenant.subdomain}.pfotencard.de" if tenant else "https://pfotencard.de"
     
-    # Full Action URL berechnen
     full_action_url = action_url
     if action_url and action_url.startswith("/"):
         full_action_url = f"{base_url}{action_url}"
 
-    # --- Details Block generieren (für "Mehr Infos") ---
     details_html = ""
     if details and isinstance(details, dict):
         rows = ""
@@ -41,14 +36,12 @@ def get_html_template(tenant, title: str, body_content: str, action_url: str = N
                 <span style="color: #0F172A;">{value}</span>
             </div>
             """
-        
         details_html = f"""
         <div style="background-color: #F8FAFC; border-radius: 8px; padding: 20px; margin: 25px 0; text-align: left;">
             {rows}
         </div>
         """
 
-    # --- Button Block generieren ---
     button_html = ""
     if full_action_url:
         button_html = f"""
@@ -64,7 +57,6 @@ def get_html_template(tenant, title: str, body_content: str, action_url: str = N
         </p>
         """
 
-    # --- Das finale Template ---
     return f"""
     <!DOCTYPE html>
     <html>
@@ -75,35 +67,30 @@ def get_html_template(tenant, title: str, body_content: str, action_url: str = N
     <body style="margin: 0; padding: 0; background-color: #F8FAFC; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
         <div style="background-color: #F8FAFC; padding: 40px 20px;">
           <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 40px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #E2E8F0;">
-            
             <div style="text-align: center; margin-bottom: 30px;">
               <img src="{logo_url}" alt="{school_name}" style="height: 80px; object-fit: contain;">
             </div>
-
             <h2 style="color: #0F172A; text-align: center; margin-bottom: 20px; font-size: 24px; font-weight: 700;">{title}</h2>
-            
             <div style="color: #64748B; font-size: 16px; line-height: 1.6; text-align: center;">
               {body_content}
             </div>
-
             {details_html}
-
             {button_html}
-
             <div style="border-top: 1px solid #E2E8F0; margin-top: 40px; padding-top: 20px; text-align: center;">
                 <p style="color: #94A3B8; font-size: 12px; margin: 0;">
                   Diese Nachricht wurde von <strong>{school_name}</strong> gesendet.
                 </p>
             </div>
-
           </div>
         </div>
     </body>
     </html>
     """
 
-def send_push(subscription_info: dict, title: str, message: str, url: str):
-    """Sendet VAPID Push"""
+def send_push(db: Session, subscription: models.PushSubscription, title: str, message: str, url: str):
+    """Sendet VAPID Push und loggt detailliert."""
+    print(f"DEBUG [Push]: Versuch an Endpoint ...{subscription.endpoint[-20:] if subscription.endpoint else 'Unknown'}")
+    
     try:
         payload = json.dumps({
             "title": title,
@@ -111,76 +98,103 @@ def send_push(subscription_info: dict, title: str, message: str, url: str):
             "url": url,
             "icon": "/paw.png"
         })
+        
+        # Test: Keys prüfen
+        if not subscription.p256dh or not subscription.auth:
+            print(f"DEBUG [Push]: FEHLER - Fehlende Keys für Subscription ID {subscription.id}")
+            return
+
         webpush(
-            subscription_info=subscription_info,
+            subscription_info={
+                "endpoint": subscription.endpoint,
+                "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth}
+            },
             data=payload,
             vapid_private_key=VAPID_PRIVATE_KEY,
             vapid_claims=VAPID_CLAIMS
         )
+        print("DEBUG [Push]: ✅ Erfolgreich an Push-Service übergeben.")
+        
     except WebPushException as ex:
-        print(f"Push failed: {ex}")
+        print(f"DEBUG [Push]: ❌ WebPushException: {ex}")
+        
+        # Check auf Status 410 (Gone) -> Abo löschen
+        if ex.response is not None and ex.response.status_code == 410:
+            print(f"DEBUG [Push]: Abo ist abgelaufen (410). Lösche Subscription ID {subscription.id} aus DB.")
+            try:
+                db.delete(subscription)
+                db.commit()
+            except Exception as db_err:
+                print(f"DEBUG [Push]: DB Fehler beim Löschen: {db_err}")
+                db.rollback()
+                
+    except Exception as e:
+        print(f"DEBUG [Push]: ❌ Generischer Fehler: {str(e)}")
 
 def notify_user(db: Session, user_id: int, type: str, title: str, message: str, url: str = "/", details: dict = None):
     """
-    Zentrale Funktion für Benachrichtigungen.
-    
-    :param details: Optionales Dictionary für strukturierte Daten (z.B. {"Datum": "12.10.2025", "Kurs": "Welpen"})
-                    Wird in der E-Mail als schöne Liste angezeigt.
+    Zentrale Funktion mit Debugging.
     """
+    print(f"DEBUG [Notify]: Starte für User ID {user_id}, Typ '{type}'")
+    
     user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user or not user.is_active:
+    if not user:
+        print(f"DEBUG [Notify]: User ID {user_id} nicht gefunden.")
+        return
+    if not user.is_active:
+        print(f"DEBUG [Notify]: User {user.email} ist inaktiv.")
         return
 
-    # LOGIK: Kanäle bestimmen
     channels = []
     
-    # Check Push Settings
-    if getattr(user, "notif_push_overall", True):
-        pref_field = f"notif_push_{type}"
-        # Fallback falls der genaue Typ nicht existiert -> True
-        if hasattr(user, pref_field) and getattr(user, pref_field, True):
-            channels.append("push")
-        elif not hasattr(user, pref_field):
-            channels.append("push") # Default erlauben wenn Typ unbekannt
+    # 1. Check Push Settings
+    push_overall = getattr(user, "notif_push_overall", True)
+    pref_field_push = f"notif_push_{type}"
+    push_specific = getattr(user, pref_field_push, True) if hasattr(user, pref_field_push) else True
+    
+    print(f"DEBUG [Notify]: Push Check -> Overall: {push_overall}, Specific ({pref_field_push}): {push_specific}")
+    
+    if push_overall and push_specific:
+        channels.append("push")
             
-    # Check Email Settings
-    if getattr(user, "notif_email_overall", True) and type != "chat":
-        pref_field = f"notif_email_{type}"
-        if hasattr(user, pref_field) and getattr(user, pref_field, True):
-            channels.append("email")
-        elif not hasattr(user, pref_field):
-            channels.append("email")
+    # 2. Check Email Settings
+    email_overall = getattr(user, "notif_email_overall", True)
+    pref_field_email = f"notif_email_{type}"
+    email_specific = getattr(user, pref_field_email, True) if hasattr(user, pref_field_email) else True
+    
+    print(f"DEBUG [Notify]: Email Check -> Overall: {email_overall}, Specific ({pref_field_email}): {email_specific}")
 
-    # 1. PUSH SENDEN
+    if email_overall and email_specific and type != "chat":
+        channels.append("email")
+
+    print(f"DEBUG [Notify]: Gewählte Kanäle: {channels}")
+
+    # --- PUSH SENDEN ---
     if "push" in channels:
         subscriptions = db.query(models.PushSubscription).filter(
             models.PushSubscription.user_id == user.id
         ).all()
         
+        print(f"DEBUG [Notify]: Gefundene Push-Abos in DB: {len(subscriptions)}")
+        
+        if len(subscriptions) == 0:
+            print("DEBUG [Notify]: User hat Push aktiviert, aber keine Geräte registriert (Tabelle push_subscriptions leer für diesen User).")
+        
         for sub in subscriptions:
-            sub_info = {
-                "endpoint": sub.endpoint,
-                "keys": {"p256dh": sub.p256dh, "auth": sub.auth}
-            }
-            send_push(sub_info, title, message, url)
+            send_push(db, sub, title, message, url)
 
-    # 2. EMAIL SENDEN
+    # --- EMAIL SENDEN ---
     if "email" in channels:
         tenant = user.tenant
-        if tenant and tenant.support_email:
-            sender_email = "notifications@pfotencard.de" 
-            # Hinweis: Wir müssen über verifizierte Domain senden, daher sender_email meist fix
-            sender_name = tenant.name
-        else:
-            sender_email = "notifications@pfotencard.de"
-            sender_name = "Pfotencard"
+        sender_email = "notifications@pfotencard.de"
+        sender_name = tenant.name if tenant else "Pfotencard"
             
         html_content = get_html_template(
             tenant=tenant, 
             title=title, 
             body_content=message, 
             action_url=url, 
-            details=details  # Hier übergeben wir die neuen Infos
+            details=details
         )
         
         try:
@@ -190,5 +204,6 @@ def notify_user(db: Session, user_id: int, type: str, title: str, message: str, 
                 "subject": title,
                 "html": html_content
             })
+            print(f"DEBUG [Notify]: Email an {user.email} gesendet.")
         except Exception as e:
-            print(f"Email failed: {e}")
+            print(f"DEBUG [Notify]: Email failed: {e}")
