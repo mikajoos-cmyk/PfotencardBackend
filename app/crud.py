@@ -1,10 +1,20 @@
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_, func, or_, case
+from datetime import datetime, timedelta, timezone # <--- UPDATE
 from . import models, schemas, storage_service
 from fastapi import HTTPException
 import secrets
 from typing import List, Optional
+
+# Notification Service importieren
+from .notification_service import notify_user
+
+# --- HELPER ---
+def format_datetime_de(dt: datetime) -> str:
+    """Hilfsfunktion für deutsche Datumsformatierung"""
+    if not dt: return ""
+    return dt.strftime("%d.%m.%Y um %H:%M Uhr")
 
 # --- TENANT & CONFIGURATION ---
 
@@ -632,14 +642,17 @@ def create_document(db: Session, user_id: int, tenant_id: int, file_name: str, f
     db.refresh(doc)
     
     # --- NEU: User benachrichtigen ---
-    from .notification_service import notify_user
     notify_user(
         db=db,
         user_id=user_id,
-        type="system",
+        type="system", 
         title="Neues Dokument",
         message="Ein neues Dokument wurde in deiner Akte hinterlegt.",
-        url="/profile"
+        url="/profile",
+        details={
+            "Dokument": file_name,
+            "Datum": format_datetime_de(doc.upload_date)
+        }
     )
     
     return doc
@@ -758,13 +771,12 @@ def delete_appointment(db: Session, appointment_id: int, tenant_id: int):
         return False
     
     # --- NEU: Teilnehmer benachrichtigen ---
-    from .notification_service import notify_user
     participants = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.status == 'confirmed'
     ).all()
     
-    formatted_date = db_appt.start_time.strftime("%d.%m.%Y um %H:%M")
+    formatted_date = format_datetime_de(db_appt.start_time)
     
     for p in participants:
         notify_user(
@@ -772,8 +784,13 @@ def delete_appointment(db: Session, appointment_id: int, tenant_id: int):
             user_id=p.user_id,
             type="alert",
             title="Termin abgesagt",
-            message=f"Der Termin '{db_appt.title}' am {formatted_date} wurde abgesagt.",
-            url="/bookings"
+            message=f"Der Termin '{db_appt.title}' am {formatted_date} wurde leider abgesagt.",
+            url="/bookings",
+            details={
+                "Kurs": db_appt.title,
+                "Ursprünglicher Termin": formatted_date,
+                "Grund": "Terminabsage durch Hundeschule"
+            }
         )
 
     db.delete(db_appt)
@@ -805,6 +822,19 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
                 
             db.commit()
             db.refresh(existing)
+            notify_user(
+                db=db,
+                user_id=user_id,
+                type="booking",
+                title="Buchung reaktiviert",
+                message=f"Deine Buchung für '{appt.title}' ist wieder aktiv ({existing.status}).",
+                url="/bookings",
+                details={
+                    "Kurs": appt.title,
+                    "Datum": format_datetime_de(appt.start_time),
+                    "Status": "Warteliste" if existing.status == 'waitlist' else "Bestätigt"
+                }
+            )
             return existing
         else:
             raise HTTPException(400, "Already booked or on waitlist")
@@ -832,14 +862,19 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     db.refresh(new_booking)
     
     # Benachrichtigung senden
-    from .notification_service import notify_user
     notify_user(
         db=db,
         user_id=user_id,
         type="booking",
-        title="Termin bestätigt",
-        message=f"Dein Termin '{new_booking.appointment.title}' wurde erfolgreich gebucht.",
-        url="/bookings"
+        title=f"Termin {'bestätigt' if new_status == 'confirmed' else 'auf Warteliste'}",
+        message=f"Du hast dich erfolgreich für '{appt.title}' angemeldet.",
+        url="/bookings",
+        details={
+            "Kurs": appt.title,
+            "Datum": format_datetime_de(appt.start_time),
+            "Ort": appt.location or "Wie angegeben",
+            "Status": "Warteliste" if new_status == 'waitlist' else "Teilnahme bestätigt"
+        }
     )
     
     return new_booking
@@ -876,15 +911,33 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
             promoted_user_id = next_in_line.user_id
             
             # --- NEU: Nachrücker benachrichtigen ---
-            from .notification_service import notify_user
             notify_user(
                 db=db,
                 user_id=promoted_user_id,
                 type="booking",
-                title="Platz bestätigt",
+                title="Platz bestätigt (Nachgerückt)",
                 message=f"Gute Nachrichten! Du bist für '{booking.appointment.title}' nachgerückt.",
-                url="/bookings"
+                url="/bookings",
+                details={
+                    "Kurs": booking.appointment.title,
+                    "Datum": format_datetime_de(booking.appointment.start_time),
+                    "Hinweis": "Du warst auf der Warteliste und hast nun einen Platz."
+                }
             )
+
+    # User über Storno informieren
+    notify_user(
+        db=db,
+        user_id=user_id,
+        type="booking",
+        title="Buchung storniert",
+        message=f"Du hast deine Teilnahme an '{booking.appointment.title}' storniert.",
+        url="/bookings",
+        details={
+            "Kurs": booking.appointment.title,
+            "Datum": format_datetime_de(booking.appointment.start_time)
+        }
+    )
 
     db.commit()
     
@@ -920,6 +973,58 @@ def toggle_attendance(db: Session, tenant_id: int, booking_id: int):
     db.commit()
     db.refresh(booking)
     return booking
+
+# --- CHECK AND SEND REMINDERS ---
+
+def check_and_send_reminders(db: Session):
+    """
+    Sucht nach anstehenden Terminen und sendet Erinnerungen basierend auf den User-Einstellungen.
+    """
+    now = datetime.now(timezone.utc)
+    
+    # Performance: Wir laden nur Buchungen der nächsten 24h
+    upcoming_limit = now + timedelta(hours=24)
+    
+    # Lade alle bestätigten Buchungen für zukünftige Termine
+    bookings = db.query(models.Booking).join(models.Appointment).join(models.User).filter(
+        models.Booking.status == 'confirmed',
+        models.Appointment.start_time > now,
+        models.Appointment.start_time <= upcoming_limit
+    ).all()
+    
+    sent_count = 0
+    
+    for booking in bookings:
+        user = booking.user
+        appt = booking.appointment
+        
+        # User-spezifischer Offset (default 60 Min)
+        offset = user.reminder_offset_minutes if user.reminder_offset_minutes is not None else 60
+        
+        # Wann soll die Erinnerung gesendet werden?
+        reminder_time = appt.start_time - timedelta(minutes=offset)
+        
+        # Toleranzfenster für den Cronjob (z.B. +/- 5 Min)
+        window_start = reminder_time - timedelta(minutes=5)
+        window_end = reminder_time + timedelta(minutes=5)
+        
+        if window_start <= now <= window_end:
+            notify_user(
+                db=db,
+                user_id=user.id,
+                type="reminder",
+                title="Erinnerung: Termin beginnt bald",
+                message=f"Dein Termin '{appt.title}' beginnt in ca. {offset} Minuten.",
+                url="/bookings",
+                details={
+                    "Kurs": appt.title,
+                    "Beginn": format_datetime_de(appt.start_time),
+                    "Ort": appt.location or "-"
+                }
+            )
+            sent_count += 1
+            
+    return sent_count
 
 # --- NEWSLETTER LOGIC ---
 
@@ -1040,10 +1145,13 @@ def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, 
         notify_user(
             db=db,
             user_id=uid,
-            type="news", # Löst E-Mail + Push aus (da != "chat")
+            type="news",
             title=f"Neuigkeit: {db_post.title}",
             message=f"{db_post.content[:100]}..." if len(db_post.content) > 100 else db_post.content,
-            url="/news"
+            url="/news",
+            details={
+                "Titel": db_post.title
+            }
         )
 
     return db_post
@@ -1188,7 +1296,7 @@ def create_chat_message(db: Session, msg: schemas.ChatMessageCreate, sender_id: 
         user_id=new_message.receiver_id,
         type="chat",
         title=f"Neue Nachricht von {new_message.sender.name}",
-        message=new_message.content[:100],
+        message=new_message.content[:100] if not new_message.file_url else "Datei gesendet",
         url=f"/chat/{new_message.sender_id}"
     )
 
@@ -1369,7 +1477,11 @@ def update_app_status(db: Session, tenant_id: int, status_update: schemas.AppSta
             type="alert",
             title="Status Update",
             message=status_update.message or f"Der Status der App hat sich auf '{status_update.status}' geändert.",
-            url="/"
+            url="/",
+            details={
+                "Neuer Status": status_update.status,
+                "Nachricht": status_update.message or "-"
+            }
         )
         
     return db_status

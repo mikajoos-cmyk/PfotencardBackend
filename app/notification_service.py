@@ -1,66 +1,102 @@
 # app/notification_service.py
-import os
 import json
 import resend
 from pywebpush import webpush, WebPushException
 from sqlalchemy.orm import Session
 from . import models
-
 from .config import settings
 
 # Config laden
 resend.api_key = settings.RESEND_API_KEY
-# VAPID Keys müssen generiert werden (z.B. https://vapidkeys.com/)
 VAPID_PRIVATE_KEY = settings.VAPID_PRIVATE_KEY
 VAPID_CLAIMS = {"sub": "mailto:support@pfotencard.de"}
 
-def get_html_template(tenant, title: str, body_content: str, action_url: str = None, action_text: str = "Anzeigen"):
+def get_html_template(tenant, title: str, body_content: str, action_url: str = None, action_text: str = "Anzeigen", details: dict = None):
     """
-    Erstellt ein schönes HTML-Template im Supabase-Stil mit Tenant-Branding.
+    Erstellt ein HTML-Template im Design der Supabase-Auth-Emails.
+    Unterstützt jetzt auch strukturierte Details.
     """
     # Branding aus Tenant-Config holen
-    branding = tenant.config.get("branding", {})
+    branding = tenant.config.get("branding", {}) if tenant and tenant.config else {}
     primary_color = branding.get("primary_color", "#22C55E")
     logo_url = branding.get("logo_url", "https://pfotencard.de/logo.png")
-    school_name = tenant.name
+    school_name = tenant.name if tenant else "Pfotencard"
 
-    # Basis URL für Links (z.B. https://bello.pfotencard.de)
-    base_url = f"https://{tenant.subdomain}.pfotencard.de"
+    # Basis URL für Links
+    base_url = f"https://{tenant.subdomain}.pfotencard.de" if tenant else "https://pfotencard.de"
     
-    # Falls action_url relativ ist (startet mit /), Subdomain davor hängen
+    # Full Action URL berechnen
     full_action_url = action_url
     if action_url and action_url.startswith("/"):
         full_action_url = f"{base_url}{action_url}"
 
-    # Einfaches, responsives HTML Template
+    # --- Details Block generieren (für "Mehr Infos") ---
+    details_html = ""
+    if details and isinstance(details, dict):
+        rows = ""
+        for label, value in details.items():
+            rows += f"""
+            <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #F1F5F9;">
+                <span style="font-weight: 600; color: #475569;">{label}:</span>
+                <span style="color: #0F172A;">{value}</span>
+            </div>
+            """
+        
+        details_html = f"""
+        <div style="background-color: #F8FAFC; border-radius: 8px; padding: 20px; margin: 25px 0; text-align: left;">
+            {rows}
+        </div>
+        """
+
+    # --- Button Block generieren ---
+    button_html = ""
+    if full_action_url:
+        button_html = f"""
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="{full_action_url}" 
+             style="background-color: {primary_color}; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block; font-family: 'Segoe UI', sans-serif;">
+            {action_text}
+          </a>
+        </div>
+        <p style="color: #94A3B8; font-size: 12px; text-align: center; margin-top: 30px;">
+          Falls der Button nicht funktioniert, nutze diesen Link:<br>
+          <a href="{full_action_url}" style="color: {primary_color}; word-break: break-all;">{full_action_url}</a>
+        </p>
+        """
+
+    # --- Das finale Template ---
     return f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f9fafb; margin: 0; padding: 0; }}
-            .container {{ max-width: 600px; margin: 40px auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border: 1px solid #e5e7eb; }}
-            .header {{ padding: 32px; text-align: center; border-bottom: 1px solid #f3f4f6; }}
-            .logo {{ width: 64px; height: 64px; object-fit: contain; }}
-            .content {{ padding: 32px; color: #374151; line-height: 1.6; }}
-            .h1 {{ font-size: 20px; font-weight: 600; color: #111827; margin-bottom: 16px; }}
-            .button {{ display: inline-block; background-color: {primary_color}; color: #ffffff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: 500; margin-top: 24px; }}
-            .footer {{ padding: 24px; text-align: center; font-size: 12px; color: #9ca3af; background-color: #f9fafb; }}
-        </style>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
     </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <img src="{logo_url}" alt="{school_name}" class="logo" />
+    <body style="margin: 0; padding: 0; background-color: #F8FAFC; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+        <div style="background-color: #F8FAFC; padding: 40px 20px;">
+          <div style="max-width: 500px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; padding: 40px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #E2E8F0;">
+            
+            <div style="text-align: center; margin-bottom: 30px;">
+              <img src="{logo_url}" alt="{school_name}" style="height: 80px; object-fit: contain;">
             </div>
-            <div class="content">
-                <div class="h1">{title}</div>
-                <div>{body_content}</div>
-                {f'<a href="{full_action_url}" class="button">{action_text}</a>' if full_action_url else ''}
+
+            <h2 style="color: #0F172A; text-align: center; margin-bottom: 20px; font-size: 24px; font-weight: 700;">{title}</h2>
+            
+            <div style="color: #64748B; font-size: 16px; line-height: 1.6; text-align: center;">
+              {body_content}
             </div>
-            <div class="footer">
-                &copy; {school_name} via PfotenCard
+
+            {details_html}
+
+            {button_html}
+
+            <div style="border-top: 1px solid #E2E8F0; margin-top: 40px; padding-top: 20px; text-align: center;">
+                <p style="color: #94A3B8; font-size: 12px; margin: 0;">
+                  Diese Nachricht wurde von <strong>{school_name}</strong> gesendet.
+                </p>
             </div>
+
+          </div>
         </div>
     </body>
     </html>
@@ -73,7 +109,7 @@ def send_push(subscription_info: dict, title: str, message: str, url: str):
             "title": title,
             "body": message,
             "url": url,
-            "icon": "/paw.png" # Optional: Tenant Logo URL hier rein
+            "icon": "/paw.png"
         })
         webpush(
             subscription_info=subscription_info,
@@ -82,38 +118,41 @@ def send_push(subscription_info: dict, title: str, message: str, url: str):
             vapid_claims=VAPID_CLAIMS
         )
     except WebPushException as ex:
-        # User hat Subscription widerrufen -> Sollte in DB gelöscht werden (TODO)
         print(f"Push failed: {ex}")
 
-def notify_user(db: Session, user_id: int, type: str, title: str, message: str, url: str = "/"):
+def notify_user(db: Session, user_id: int, type: str, title: str, message: str, url: str = "/", details: dict = None):
     """
-    Zentrale Funktion: Entscheidet über Kanäle basierend auf 'type' und User-Präferenzen.
-    type: 'chat', 'system', 'booking', 'alert'
+    Zentrale Funktion für Benachrichtigungen.
+    
+    :param details: Optionales Dictionary für strukturierte Daten (z.B. {"Datum": "12.10.2025", "Kurs": "Welpen"})
+                    Wird in der E-Mail als schöne Liste angezeigt.
     """
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user or not user.is_active:
         return
 
-    # LOGIK: Kanäle bestimmen basierend auf User-Einstellungen
+    # LOGIK: Kanäle bestimmen
     channels = []
     
     # Check Push Settings
     if getattr(user, "notif_push_overall", True):
-        # Mappe den Typ auf das entsprechende Datenbank-Feld
         pref_field = f"notif_push_{type}"
-        if getattr(user, pref_field, True):
+        # Fallback falls der genaue Typ nicht existiert -> True
+        if hasattr(user, pref_field) and getattr(user, pref_field, True):
             channels.append("push")
+        elif not hasattr(user, pref_field):
+            channels.append("push") # Default erlauben wenn Typ unbekannt
             
     # Check Email Settings
     if getattr(user, "notif_email_overall", True) and type != "chat":
-        # Mappe den Typ auf das entsprechende Datenbank-Feld
         pref_field = f"notif_email_{type}"
-        if getattr(user, pref_field, True):
+        if hasattr(user, pref_field) and getattr(user, pref_field, True):
+            channels.append("email")
+        elif not hasattr(user, pref_field):
             channels.append("email")
 
     # 1. PUSH SENDEN
     if "push" in channels:
-        # Alle Geräte des Users laden
         subscriptions = db.query(models.PushSubscription).filter(
             models.PushSubscription.user_id == user.id
         ).all()
@@ -123,23 +162,30 @@ def notify_user(db: Session, user_id: int, type: str, title: str, message: str, 
                 "endpoint": sub.endpoint,
                 "keys": {"p256dh": sub.p256dh, "auth": sub.auth}
             }
-            # URL muss für Push relativ oder absolut sein, Web Push öffnet sie im Browser
-            # Wir nutzen hier den relativen Pfad, Service Worker macht den Rest
             send_push(sub_info, title, message, url)
 
     # 2. EMAIL SENDEN
     if "email" in channels:
         tenant = user.tenant
         if tenant and tenant.support_email:
+            sender_email = "notifications@pfotencard.de" 
+            # Hinweis: Wir müssen über verifizierte Domain senden, daher sender_email meist fix
             sender_name = tenant.name
         else:
+            sender_email = "notifications@pfotencard.de"
             sender_name = "Pfotencard"
             
-        html_content = get_html_template(tenant, title, message, url)
+        html_content = get_html_template(
+            tenant=tenant, 
+            title=title, 
+            body_content=message, 
+            action_url=url, 
+            details=details  # Hier übergeben wir die neuen Infos
+        )
         
         try:
             resend.Emails.send({
-                "from": f"{sender_name} <notifications@pfotencard.de>",
+                "from": f"{sender_name} <{sender_email}>",
                 "to": user.email,
                 "subject": title,
                 "html": html_content

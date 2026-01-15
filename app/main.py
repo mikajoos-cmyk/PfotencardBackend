@@ -1099,3 +1099,18 @@ def mark_chat_read(
 ):
     crud.mark_messages_as_read(db, tenant.id, current_user.id, other_user_id)
     return {"ok": True}
+
+
+
+    # In main.py hinzufügen
+@app.get("/api/cron/reminders")
+def trigger_reminders(
+    x_cron_secret: str = Header(None), 
+    db: Session = Depends(get_db)
+):
+    # Sicherheit: Prüfen ob der Aufruf berechtigt ist (z.B. Secret in .env)
+    if x_cron_secret != settings.CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+        
+    count = crud.check_and_send_reminders(db)
+    return {"status": "ok", "sent_reminders": count}
