@@ -10,6 +10,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 import secrets
 import stripe
+import traceback
 
 from . import crud, models, schemas, auth, stripe_service, legal, notification_service
 from .storage_service import delete_file_from_storage, delete_folder_from_storage
@@ -372,7 +373,7 @@ async def handle_payment_intent_succeeded(intent):
             amount=amount
         )
         
-        crud.create_transaction(db, tx_data, booked_by_id=0, tenant_id=tenant_id)
+        crud.create_transaction(db, tx_data, booked_by_id=None, tenant_id=tenant_id)
         print(f"✅ Success: Top-up of {amount+bonus}€ for User {user_id} processed via Webhook.")
         
     except Exception as e:
