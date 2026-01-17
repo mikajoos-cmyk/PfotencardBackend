@@ -543,9 +543,13 @@ def perform_level_up(db: Session, user_id: int, tenant_id: int):
 
 # --- TRANSACTIONS & ACHIEVEMENTS ---
 
-def create_transaction(db: Session, transaction: schemas.TransactionCreate, booked_by_id: int, tenant_id: int):
+def create_transaction(db: Session, transaction: schemas.TransactionCreate, booked_by_id: Optional[int], tenant_id: int):
     user = get_user(db, transaction.user_id, tenant_id)
     if not user: raise HTTPException(404, "User not found")
+
+    # SAFETY FIX: Ensure 0 is treated as None for the DB foreign key
+    if not booked_by_id or booked_by_id == 0:
+        booked_by_id = user.id
 
     amount_to_add = transaction.amount
     bonus = 0
