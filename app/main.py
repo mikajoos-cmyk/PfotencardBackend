@@ -298,6 +298,12 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
         invoice = event['data']['object']
         await handle_invoice_payment_succeeded(invoice)
 
+    # NEU: Handler für erfolgreiche Top-up Zahlungen
+    elif event['type'] == 'payment_intent.succeeded':
+        intent = event['data']['object']
+        if intent.get('metadata', {}).get('type') == 'balance_topup':
+            await handle_payment_intent_succeeded(intent)
+
     return {"status": "success"}
 
 async def handle_subscription_update(subscription):
@@ -346,6 +352,34 @@ async def handle_subscription_deleted(subscription):
     finally:
         db.close()
 
+
+async def handle_payment_intent_succeeded(intent):
+    db = SessionLocal()
+    try:
+        metadata = intent.get('metadata', {})
+        user_id = int(metadata.get('user_id'))
+        tenant_id = int(metadata.get('tenant_id'))
+        amount = float(metadata.get('base_amount'))
+        bonus = float(metadata.get('bonus_amount'))
+
+        # Transaktion erstellen (nutzt crud.create_transaction)
+        # Wir müssen booked_by_id setzen. Für Stripe nutzen wir ggf. eine System-ID oder None.
+        # Hier nutzen wir None (System)
+        tx_data = schemas.TransactionCreate(
+            user_id=user_id,
+            type="Aufladung",
+            description=f"Online-Aufladung via Stripe: {amount}€ + {bonus}€ Bonus",
+            amount=amount
+        )
+        
+        crud.create_transaction(db, tx_data, booked_by_id=0, tenant_id=tenant_id)
+        print(f"✅ Success: Top-up of {amount+bonus}€ for User {user_id} processed via Webhook.")
+        
+    except Exception as e:
+        print(f"❌ Error in handle_payment_intent_succeeded: {e}")
+        traceback.print_exc()
+    finally:
+        db.close()
 
 async def handle_invoice_payment_succeeded(invoice):
     """
@@ -441,6 +475,26 @@ def cancel_subscription_endpoint(
     if current_user.role != 'admin':
         raise HTTPException(status_code=403, detail="Not authorized")
     return stripe_service.cancel_subscription(db, tenant.id)
+
+@app.post("/api/stripe/create-topup-intent")
+def create_topup_intent_endpoint(
+    data: schemas.TopUpIntentCreate,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    
+    # Nutzer darf nur für sich selbst aufladen (oder Admin/Mitarbeiter für andere, aber hier Fokus auf Self-Service)
+    # Da wir in 'auth.get_current_active_user' sind, haben wir den aktuellen User.
+    return stripe_service.create_topup_intent(
+        db, 
+        user_id=current_user.id, 
+        tenant_id=tenant.id, 
+        amount=data.amount, 
+        bonus=data.bonus
+    )
 
 @app.get("/api/stripe/details", response_model=Optional[schemas.SubscriptionDetails])
 def get_subscription_details_endpoint(
@@ -1016,6 +1070,26 @@ def toggle_booking_attendance(
     if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     return crud.toggle_attendance(db, tenant.id, booking_id)
 
+@app.post("/api/bookings/{booking_id}/bill")
+def bill_booking_endpoint(
+    booking_id: int, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.bill_booking(db, tenant.id, booking_id)
+
+@app.post("/api/appointments/{appointment_id}/bill-all")
+def bill_all_appointment_participants(
+    appointment_id: int, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.bill_all_participants(db, tenant.id, appointment_id)
+
 @app.post("/api/news/upload-image")
 async def upload_news_image(
     upload_file: UploadFile = File(...), db: Session = Depends(get_db),
@@ -1099,8 +1173,15 @@ def mark_chat_read(
 ):
     crud.mark_messages_as_read(db, tenant.id, current_user.id, other_user_id)
     return {"ok": True}
-
-
+@app.post("/api/appointments/{appointment_id}/grant-progress")
+def grant_all_appointment_progress(
+    appointment_id: int, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.grant_all_progress(db, tenant.id, appointment_id)
 
     # In main.py hinzufügen
 @app.get("/api/cron/reminders")

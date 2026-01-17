@@ -10,6 +10,8 @@ class TenantConfig(BaseModel):
     balance: Dict[str, Any] = {} 
     features: Dict[str, bool] = {} 
     active_modules: List[str] = ["news", "documents"]
+    auto_billing_enabled: bool = False
+    auto_progress_enabled: bool = False
 
 class TenantBase(BaseModel):
     name: str
@@ -301,6 +303,7 @@ class AppointmentBase(BaseModel):
     max_participants: int = 10
     trainer_id: Optional[int] = None
     target_level_ids: List[int] = []
+    training_type_id: Optional[int] = None
     is_open_for_all: bool = False
 
 class AppointmentCreate(AppointmentBase):
@@ -315,6 +318,7 @@ class AppointmentUpdate(BaseModel):
     max_participants: Optional[int] = None
     trainer_id: Optional[int] = None
     target_level_ids: Optional[List[int]] = None
+    training_type_id: Optional[List[int]] = None
     is_open_for_all: Optional[bool] = None
 
 class Appointment(AppointmentBase):
@@ -324,6 +328,7 @@ class Appointment(AppointmentBase):
     bookings: List[Booking] = []
     participants_count: Optional[int] = None 
     trainer: Optional[User] = None
+    training_type: Optional[TrainingType] = None
     target_levels: List[Level] = []
     class Config: from_attributes = True
 
@@ -375,6 +380,8 @@ class SettingsUpdate(BaseModel):
     services: List[ServiceUpdateItem]
     levels: List[LevelUpdateItem]
     active_modules: List[str] = []
+    auto_billing_enabled: bool = False
+    auto_progress_enabled: bool = False
 
 class NewsletterSubscriberBase(BaseModel):
     email: EmailStr
@@ -463,3 +470,7 @@ class AppStatus(AppStatusBase):
 class PushSubscriptionCreate(BaseModel):
     endpoint: str
     keys: Dict[str, str] # Erwartet keys.p256dh und keys.auth
+
+class TopUpIntentCreate(BaseModel):
+    amount: float
+    bonus: float

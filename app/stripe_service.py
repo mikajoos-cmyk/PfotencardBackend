@@ -447,3 +447,33 @@ def get_invoices(db: Session, tenant_id: int, limit: int = 12):
             })
         return results
     except: return []
+
+def create_topup_intent(db: Session, user_id: int, tenant_id: int, amount: float, bonus: float):
+    """
+    Erstellt einen Stripe PaymentIntent für eine Guthaben-Aufladung.
+    Die Metadaten enthalten alle Infos, um das Guthaben im Webhook-Handler gutzuschreiben.
+    """
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant: raise HTTPException(404, "Tenant not found")
+    
+    user = db.query(models.User).filter(models.User.id == user_id, models.User.tenant_id == tenant_id).first()
+    if not user: raise HTTPException(404, "User not found")
+
+    try:
+        intent = stripe.PaymentIntent.create(
+            amount=int(amount * 100), # Stripe erwartet Cents
+            currency="eur",
+            metadata={
+                "type": "balance_topup",
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "base_amount": amount,
+                "bonus_amount": bonus,
+                "description": f"Guthaben-Aufladung ({amount}€ + {bonus}€ Bonus)"
+            },
+            description=f"Guthaben aufladen für {user.name}"
+        )
+        return {"clientSecret": intent.client_secret}
+    except Exception as e:
+        print(f"Stripe Error creating PaymentIntent: {e}")
+        raise HTTPException(400, f"Stripe Error: {str(e)}")

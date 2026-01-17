@@ -91,6 +91,10 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     
     # Modules Update
     current_config["active_modules"] = settings.active_modules
+    
+    # NEU: Automatisierungseinstellungen
+    current_config["auto_billing_enabled"] = settings.auto_billing_enabled
+    current_config["auto_progress_enabled"] = settings.auto_progress_enabled
 
     tenant.config = current_config
     flag_modified(tenant, "config")
@@ -593,12 +597,13 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
     return db_tx
 
 
-def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None):
+def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None, date_achieved: Optional[datetime] = None):
     ach = models.Achievement(
         tenant_id=tenant_id,
         user_id=user_id,
         training_type_id=training_type_id,
-        transaction_id=transaction_id
+        transaction_id=transaction_id,
+        date_achieved=date_achieved or datetime.now(timezone.utc)
     )
 
     # CHECK: Premature Exam?
@@ -690,7 +695,7 @@ def delete_document(db: Session, document_id: int, tenant_id: int):
 # --- APPOINTMENTS & BOOKINGS ---
 
 def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tenant_id: int):
-    print(f"DEBUG: Creating appointment with trainer_id={appointment.trainer_id}, target_levels={appointment.target_level_ids}")
+    print(f"DEBUG: Creating appointment with trainer_id={appointment.trainer_id}, target_levels={appointment.target_level_ids}, training_type_id={appointment.training_type_id}")
     db_appt = models.Appointment(
         tenant_id=tenant_id,
         title=appointment.title,
@@ -700,6 +705,7 @@ def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tena
         location=appointment.location,
         max_participants=appointment.max_participants,
         trainer_id=appointment.trainer_id,
+        training_type_id=appointment.training_type_id,
         is_open_for_all=appointment.is_open_for_all
     )
     
@@ -972,12 +978,160 @@ def toggle_attendance(db: Session, tenant_id: int, booking_id: int):
     ).first()
     
     if not booking:
-        raise HTTPException(404, "Booking not found")
+        raise HTTPException(status_code=404, detail="Booking not found")
         
     booking.attended = not booking.attended
+    
+    # NEU: Automatischer Fortschritt / Abrechnung
+    if booking.attended:
+        tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+        config = tenant.config or {}
+        appt = booking.appointment
+        
+        # 1. Automatischer Fortschritt (Achievement)
+        if config.get('auto_progress_enabled') and appt and appt.training_type_id:
+            # Prüfen ob bereits ein Achievement für diese Buchung existiert
+            existing_achievement = db.query(models.Achievement).filter(
+                models.Achievement.user_id == booking.user_id,
+                models.Achievement.training_type_id == appt.training_type_id,
+                models.Achievement.date_achieved == appt.start_time
+            ).first()
+            if not existing_achievement:
+                # WICHTIG: Achievement über die zentrale Helper-Funktion erstellen
+                create_achievement(db, booking.user_id, tenant_id, appt.training_type_id, date_achieved=appt.start_time)
+        
+        # 2. Automatische Abrechnung (nur wenn noch nicht abgerechnet)
+        # Wir bräuchten ein Flag 'is_billed' am Booking oder suchen nach Transaction.
+        # Einfachheitshalber implementieren wir 'bill_booking' separat und rufen es hier optional auf.
+        if config.get('auto_billing_enabled'):
+            try:
+                bill_booking(db, tenant_id, booking_id)
+            except HTTPException as e:
+                # Wir ignorieren Fehler bei auto-billing hier (z.B. Guthaben leer)
+                # damit der Abstempel-Vorgang nicht abbricht.
+                print(f"Auto-billing failed for booking {booking_id}: {e.detail}")
+
     db.commit()
     db.refresh(booking)
     return booking
+
+def bill_booking(db: Session, tenant_id: int, booking_id: int):
+    booking = db.query(models.Booking).filter(
+        models.Booking.id == booking_id,
+        models.Booking.tenant_id == tenant_id
+    ).first()
+    
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+        
+    appt = booking.appointment
+    if not appt or not appt.training_type_id:
+        raise HTTPException(status_code=400, detail="Diesem Termin ist keine Leistung zugeordnet.")
+        
+    user = booking.user
+    training_type = appt.training_type
+    if not training_type:
+         raise HTTPException(status_code=400, detail="Zugeordnete Leistung nicht gefunden.")
+         
+    price = training_type.default_price
+    
+    if user.balance < price:
+        raise HTTPException(status_code=400, detail=f"Ungenügendes Guthaben ({user.balance}€). Erforderlich: {price}€")
+        
+    # NEU: Double-Billing Check
+    existing_tx = db.query(models.Transaction).filter(
+        models.Transaction.user_id == user.id,
+        models.Transaction.tenant_id == tenant_id,
+        models.Transaction.description == f"Abrechnung: {appt.title}"
+    ).first()
+    if existing_tx:
+        raise HTTPException(status_code=400, detail="Bereits abgerechnet.")
+
+    # Transaktion erstellen
+    transaction = models.Transaction(
+        tenant_id=tenant_id,
+        user_id=user.id,
+        type=training_type.name,
+        description=f"Abrechnung: {appt.title}",
+        amount=-price,
+        balance_after=user.balance - price,
+        booked_by_id=None # Wird im Endpoint gesetzt, falls manuell
+    )
+    user.balance -= price
+    
+    db.add(transaction)
+    
+    # WICHTIG: Achievement über die zentrale Helper-Funktion erstellen,
+    # damit alle Regeln (z.B. Prüfungs-Check) befolgt werden.
+    existing_achievement = db.query(models.Achievement).filter(
+        models.Achievement.user_id == user.id,
+        models.Achievement.training_type_id == training_type.id,
+        models.Achievement.date_achieved == appt.start_time
+    ).first()
+    
+    if not existing_achievement:
+        create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=transaction.id, date_achieved=appt.start_time)
+        db.flush() 
+    
+    db.commit()
+    db.refresh(user)
+    return booking
+
+def bill_all_participants(db: Session, tenant_id: int, appointment_id: int):
+    bookings = db.query(models.Booking).filter(
+        models.Booking.appointment_id == appointment_id,
+        models.Booking.status == 'confirmed',
+        models.Booking.tenant_id == tenant_id
+    ).all()
+    
+    results = []
+    for booking in bookings:
+        try:
+            bill_booking(db, tenant_id, booking.id)
+            results.append({"booking_id": booking.id, "status": "success"})
+        except HTTPException as e:
+            results.append({"booking_id": booking.id, "status": "error", "detail": e.detail})
+            
+    return results
+
+def grant_progress_booking(db: Session, tenant_id: int, booking_id: int):
+    booking = db.query(models.Booking).filter(
+        models.Booking.id == booking_id,
+        models.Booking.tenant_id == tenant_id
+    ).first()
+    if not booking: raise HTTPException(404, "Booking not found")
+    
+    appt = booking.appointment
+    if not appt or not appt.training_type_id:
+        raise HTTPException(400, "Diesem Termin ist keine Leistung zugeordnet.")
+    
+    # Check if exists
+    existing = db.query(models.Achievement).filter(
+        models.Achievement.user_id == booking.user_id,
+        models.Achievement.training_type_id == appt.training_type_id,
+        models.Achievement.date_achieved == appt.start_time
+    ).first()
+    
+    if not existing:
+        create_achievement(db, booking.user_id, tenant_id, appt.training_type_id, date_achieved=appt.start_time)
+        db.commit()
+    return booking
+
+def grant_all_progress(db: Session, tenant_id: int, appointment_id: int):
+    bookings = db.query(models.Booking).filter(
+        models.Booking.appointment_id == appointment_id,
+        models.Booking.status == 'confirmed',
+        models.Booking.tenant_id == tenant_id
+    ).all()
+    
+    results = []
+    for booking in bookings:
+        try:
+            grant_progress_booking(db, tenant_id, booking.id)
+            results.append({"booking_id": booking.id, "status": "success"})
+        except HTTPException as e:
+            results.append({"booking_id": booking.id, "status": "error", "detail": e.detail})
+    return results
 
 # --- CHECK AND SEND REMINDERS ---
 

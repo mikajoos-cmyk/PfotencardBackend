@@ -278,6 +278,9 @@ class Appointment(Base):
     
     trainer_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
     
+    # NEU: Verknüpfung zu einer Leistung (TrainingType) für Abrechnung & Fortschritt
+    training_type_id = Column(Integer, ForeignKey('training_types.id', ondelete="SET NULL"), nullable=True)
+    
     is_open_for_all = Column(Boolean, default=False) # NEU: Wenn True, dürfen alle kommen
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -285,6 +288,7 @@ class Appointment(Base):
     tenant = relationship("Tenant", back_populates="appointments")
     bookings = relationship("Booking", back_populates="appointment", cascade="all, delete-orphan")
     trainer = relationship("User", foreign_keys=[trainer_id])
+    training_type = relationship("TrainingType")
     target_levels = relationship("Level", secondary=appointment_target_levels)
 
 
