@@ -82,6 +82,7 @@ class Level(Base):
     name = Column(String(255), nullable=False)  # z.B. "Welpe"
     rank_order = Column(Integer, nullable=False) # 1, 2, 3...
     icon_url = Column(String(512))
+    color = Column(String(50), nullable=True) # NEU: Farbe für das Level
     has_additional_requirements = Column(Boolean, default=False) # NEU: Fragt Zusatzleistungen ab
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -276,6 +277,8 @@ class Appointment(Base):
     max_participants = Column(Integer, default=10)
     
     trainer_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
+    
+    is_open_for_all = Column(Boolean, default=False) # NEU: Wenn True, dürfen alle kommen
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

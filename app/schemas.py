@@ -107,6 +107,7 @@ class LevelBase(BaseModel):
     name: str
     rank_order: int
     icon_url: Optional[str] = None
+    color: Optional[str] = None
     has_additional_requirements: bool = False
 
 class LevelCreate(LevelBase):
@@ -300,6 +301,7 @@ class AppointmentBase(BaseModel):
     max_participants: int = 10
     trainer_id: Optional[int] = None
     target_level_ids: List[int] = []
+    is_open_for_all: bool = False
 
 class AppointmentCreate(AppointmentBase):
     pass
@@ -313,6 +315,7 @@ class AppointmentUpdate(BaseModel):
     max_participants: Optional[int] = None
     trainer_id: Optional[int] = None
     target_level_ids: Optional[List[int]] = None
+    is_open_for_all: Optional[bool] = None
 
 class Appointment(AppointmentBase):
     id: int
@@ -352,6 +355,7 @@ class LevelUpdateItem(BaseModel):
     name: str
     rank_order: int
     badge_image: Optional[str] = None
+    color: Optional[str] = None
     has_additional_requirements: bool = False
     requirements: List[RequirementUpdateItem] = []
 
@@ -363,6 +367,7 @@ class SettingsUpdate(BaseModel):
     secondary_color: str
     background_color: str
     sidebar_color: str
+    open_for_all_color: Optional[str] = None
     level_term: str
     vip_term: str
     allow_custom_top_up: bool = True

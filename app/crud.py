@@ -76,6 +76,8 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     current_config["branding"]["sidebar_color"] = settings.sidebar_color
     if settings.logo_url:
         current_config["branding"]["logo_url"] = settings.logo_url
+    if settings.open_for_all_color:
+        current_config["branding"]["open_for_all_color"] = settings.open_for_all_color
     
     # Wording Updates
     current_config["wording"] = current_config.get("wording", {})
@@ -146,6 +148,7 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
                 current_level.name = l_data.name
                 current_level.rank_order = l_data.rank_order
                 current_level.icon_url = l_data.badge_image
+                current_level.color = l_data.color
                 current_level.has_additional_requirements = l_data.has_additional_requirements
         else:
             current_level = models.Level(
@@ -153,6 +156,7 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
                 name=l_data.name,
                 rank_order=l_data.rank_order,
                 icon_url=l_data.badge_image,
+                color=l_data.color,
                 has_additional_requirements=l_data.has_additional_requirements
             )
             db.add(current_level)
@@ -695,7 +699,8 @@ def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tena
         end_time=appointment.end_time,
         location=appointment.location,
         max_participants=appointment.max_participants,
-        trainer_id=appointment.trainer_id
+        trainer_id=appointment.trainer_id,
+        is_open_for_all=appointment.is_open_for_all
     )
     
     if appointment.target_level_ids:
