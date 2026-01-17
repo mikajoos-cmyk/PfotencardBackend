@@ -22,7 +22,7 @@ app = FastAPI()
 
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
-origins_regex = r"https://(.*\.)?pfotencard\.de|http://localhost:\d+"
+origins_regex = r"https://(.*\.)?pfotencard\.de|http://(localhost|127\.0\.0\.1):\d+"
 
 app.add_middleware(
     CORSMiddleware,
@@ -1068,7 +1068,7 @@ def toggle_booking_attendance(
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
-    return crud.toggle_attendance(db, tenant.id, booking_id)
+    return crud.toggle_attendance(db, tenant.id, booking_id, booked_by_id=current_user.id)
 
 @app.post("/api/bookings/{booking_id}/bill")
 def bill_booking_endpoint(
@@ -1078,7 +1078,7 @@ def bill_booking_endpoint(
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    return crud.bill_booking(db, tenant.id, booking_id)
+    return crud.bill_booking(db, tenant.id, booking_id, booked_by_id=current_user.id)
 
 @app.post("/api/appointments/{appointment_id}/bill-all")
 def bill_all_appointment_participants(
@@ -1088,7 +1088,7 @@ def bill_all_appointment_participants(
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    return crud.bill_all_participants(db, tenant.id, appointment_id)
+    return crud.bill_all_participants(db, tenant.id, appointment_id, booked_by_id=current_user.id)
 
 @app.post("/api/news/upload-image")
 async def upload_news_image(

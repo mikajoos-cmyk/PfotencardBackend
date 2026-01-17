@@ -318,7 +318,7 @@ class AppointmentUpdate(BaseModel):
     max_participants: Optional[int] = None
     trainer_id: Optional[int] = None
     target_level_ids: Optional[List[int]] = None
-    training_type_id: Optional[List[int]] = None
+    training_type_id: Optional[int] = None
     is_open_for_all: Optional[bool] = None
 
 class Appointment(AppointmentBase):

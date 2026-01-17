@@ -971,7 +971,7 @@ def get_user_bookings(db: Session, tenant_id: int, user_id: int):
         models.Booking.status.in_(['confirmed', 'waitlist'])
     ).all()
 
-def toggle_attendance(db: Session, tenant_id: int, booking_id: int):
+def toggle_attendance(db: Session, tenant_id: int, booking_id: int, booked_by_id: Optional[int] = None):
     booking = db.query(models.Booking).filter(
         models.Booking.id == booking_id,
         models.Booking.tenant_id == tenant_id
@@ -1005,7 +1005,7 @@ def toggle_attendance(db: Session, tenant_id: int, booking_id: int):
         # Einfachheitshalber implementieren wir 'bill_booking' separat und rufen es hier optional auf.
         if config.get('auto_billing_enabled'):
             try:
-                bill_booking(db, tenant_id, booking_id)
+                bill_booking(db, tenant_id, booking_id, booked_by_id=booked_by_id)
             except HTTPException as e:
                 # Wir ignorieren Fehler bei auto-billing hier (z.B. Guthaben leer)
                 # damit der Abstempel-Vorgang nicht abbricht.
@@ -1015,7 +1015,7 @@ def toggle_attendance(db: Session, tenant_id: int, booking_id: int):
     db.refresh(booking)
     return booking
 
-def bill_booking(db: Session, tenant_id: int, booking_id: int):
+def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Optional[int] = None):
     booking = db.query(models.Booking).filter(
         models.Booking.id == booking_id,
         models.Booking.tenant_id == tenant_id
@@ -1055,29 +1055,32 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int):
         description=f"Abrechnung: {appt.title}",
         amount=-price,
         balance_after=user.balance - price,
-        booked_by_id=None # Wird im Endpoint gesetzt, falls manuell
+        booked_by_id=booked_by_id or user.id # Fallback auf User selbst, falls System-Aktion ohne ID
     )
     user.balance -= price
     
     db.add(transaction)
     
-    # WICHTIG: Achievement über die zentrale Helper-Funktion erstellen,
-    # damit alle Regeln (z.B. Prüfungs-Check) befolgt werden.
-    existing_achievement = db.query(models.Achievement).filter(
-        models.Achievement.user_id == user.id,
-        models.Achievement.training_type_id == training_type.id,
-        models.Achievement.date_achieved == appt.start_time
-    ).first()
+    # WICHTIG: Prüfen ob Auto-Progress aktiv ist bevor Achievement erstellt wird
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    config = tenant.config or {}
     
-    if not existing_achievement:
-        create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=transaction.id, date_achieved=appt.start_time)
-        db.flush() 
+    if config.get('auto_progress_enabled'):
+        existing_achievement = db.query(models.Achievement).filter(
+            models.Achievement.user_id == user.id,
+            models.Achievement.training_type_id == training_type.id,
+            models.Achievement.date_achieved == appt.start_time
+        ).first()
+        
+        if not existing_achievement:
+            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=transaction.id, date_achieved=appt.start_time)
+            db.flush() 
     
     db.commit()
     db.refresh(user)
     return booking
 
-def bill_all_participants(db: Session, tenant_id: int, appointment_id: int):
+def bill_all_participants(db: Session, tenant_id: int, appointment_id: int, booked_by_id: Optional[int] = None):
     bookings = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.status == 'confirmed',
@@ -1087,7 +1090,7 @@ def bill_all_participants(db: Session, tenant_id: int, appointment_id: int):
     results = []
     for booking in bookings:
         try:
-            bill_booking(db, tenant_id, booking.id)
+            bill_booking(db, tenant_id, booking.id, booked_by_id=booked_by_id)
             results.append({"booking_id": booking.id, "status": "success"})
         except HTTPException as e:
             results.append({"booking_id": booking.id, "status": "error", "detail": e.detail})
