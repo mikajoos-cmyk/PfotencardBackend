@@ -83,12 +83,45 @@ async def login_for_access_token(
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
     user = crud.get_user_by_email(db, email=form_data.username, tenant_id=tenant.id)
-    if not user or not auth.verify_password(form_data.password, user.hashed_password):
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # 1. Lokale Verifizierung versuchen
+    if not auth.verify_password(form_data.password, user.hashed_password):
+        # 2. Falls lokal falsch, gegen Supabase prüfen (Sync-Fallback)
+        try:
+            print(f"DEBUG: Local auth failed for {user.email}, trying Supabase fallback...")
+            # Wir versuchen einen Supabase Login
+            auth_res = supabase.auth.sign_in_with_password({
+                "email": user.email,
+                "password": form_data.password
+            })
+            
+            if auth_res.user:
+                # Login bei Supabase war erfolgreich! 
+                # Wir aktualisieren das lokale Passwort, damit es beim nächsten Mal lokal klappt.
+                print(f"DEBUG: Supabase auth success. Syncing password to local DB.")
+                user.hashed_password = auth.get_password_hash(form_data.password)
+                db.commit()
+            else:
+                # Auch Supabase sagt nein
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Incorrect email or password",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        except Exception as e:
+            print(f"DEBUG: Supabase fallback failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
         data={"sub": user.email, "tenant_id": tenant.id}, 
@@ -191,6 +224,127 @@ def cleanup_abandoned_tenants(x_cron_secret: str = Header(None), db: Session = D
     print(f"Cron Cleanup: Deleted {deleted_count} abandoned tenants.")
     
     return {"status": "ok", "deleted": deleted_count}
+
+
+
+@app.post("/api/auth/forgot-password")
+async def forgot_password(
+    data: schemas.ForgotPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Triggert den Passwort-Reset Prozess bei Supabase.
+    Sendet eine E-Mail mit einem Link zur App des Tenants.
+    """
+    tenant = crud.get_tenant_by_subdomain(db, data.subdomain)
+    if not tenant:
+        # Falls subdomain falsch, können wir nichts tun. 
+        # Wir geben trotzdem Erfolg vor, um das Enumeration-Risiko zu minimieren? 
+        # Aber hier ist die Subdomain ja öffentlich bekannt.
+        raise HTTPException(status_code=404, detail="Mandant nicht gefunden.")
+
+    # Prüfen ob User in diesem Tenant existiert
+    user = crud.get_user_by_email(db, email=data.email, tenant_id=tenant.id)
+    if not user:
+        # Sicherheit: Wir geben Erfolg zurück, auch wenn der User nicht existiert.
+        return {"message": "Falls die E-Mail Adresse registriert ist, wurde ein Link versendet."}
+
+    # Redirect URL zur Marketing-Webseite
+    # (Dort wird der Recovery-Hash abgefangen und das Password-Change-Formular gezeigt)
+    redirect_url = "https://pfotencard.de/anmelden"
+    if "localhost" in settings.SUPABASE_URL or "127.0.0.1" in settings.SUPABASE_URL:
+         redirect_url = "http://localhost:3000/anmelden" # Marketing Dev Port
+
+    # Redirect URL zur Marketing-Webseite
+    # (Dort wird der Recovery-Hash abgefangen und das Password-Change-Formular gezeigt)
+    # WICHTIG: Diese URL muss im Supabase Dashboard unter Authentication -> URL Configuration -> Redirect URLs eingetragen sein!
+    redirect_url = "https://pfotencard.de/anmelden"
+    if "localhost" in settings.SUPABASE_URL or "127.0.0.1" in settings.SUPABASE_URL:
+         redirect_url = "http://localhost:3000/anmelden" # Marketing Dev Port
+
+    try:
+        # Branding für die E-Mail aktualisieren (Marketing Logo & Farben)
+        # Die Supabase E-Mail Templates müssen so konfiguriert sein, dass sie {{ .Data.branding_logo }} etc. nutzen
+        if user.auth_id:
+            try:
+                metadata = {
+                    "branding_name": "Pfotencard",
+                    "branding_logo": "https://pfotencard.de/logo.png",
+                    "branding_color": "#22C55E",
+                    "school_name": "Pfotencard"
+                }
+                print(f"DEBUG: Updating user metadata for {user.auth_id}")
+                supabase.auth.admin.update_user_by_id(
+                    str(user.auth_id), 
+                    {"user_metadata": metadata}
+                )
+            except Exception as meta_err:
+                print(f"WARN: Metadata update failed: {meta_err}")
+                # Wir machen weiter, auch wenn das Branding-Update fehlschlägt
+
+        # Supabase reset_password_for_email aufrufen - Supabase schickt die Mail selbst
+        print(f"DEBUG: Calling supabase.auth.reset_password_for_email for {data.email}")
+        supabase.auth.reset_password_for_email(
+            data.email,
+            options={"redirect_to": redirect_url}
+        )
+    except Exception as e:
+        print(f"CRITICAL: Supabase Reset Error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Supa-Fehler: {str(e)}")
+
+    return {"message": "Falls die E-Mail Adresse registriert ist, wurde ein Link versendet."}
+    
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(
+    data: schemas.PasswordReset,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Proxy für den Passwort-Reset. 
+    Erwartet den Supabase access_token im Authorization Header.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing access token")
+    
+    access_token = auth_header.split(" ")[1]
+
+    try:
+        # 1. Update bei Supabase
+        # Wir müssen den Client mit dem Token des Users initialisieren oder admin nutzen?
+        # reset_password_for_email erfordert, dass der User mit dem Token eingeloggt ist.
+        # supabase.auth.set_session(access_token) # Nicht sicher ob das global gut ist
+        
+        # Sicherer: Admin update_user nutzen, aber wir brauchen die ID des Users
+        # Wir holen den User-Context von Supabase
+        user_res = supabase.auth.get_user(access_token)
+        if not user_res.user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        auth_id = user_res.user.id
+        email = user_res.user.email
+
+        # Supabase Password Update
+        supabase.auth.admin.update_user_by_id(auth_id, {"password": data.password})
+
+        # 2. Lokales Passwort synchronisieren
+        # Wir suchen alle User mit dieser E-Mail über alle Tenants hinweg? 
+        # Nein, am besten nur den, der zu dieser auth_id gehört (falls verknüpft).
+        db_users = db.query(models.User).filter(models.User.auth_id == auth_id).all()
+        for db_user in db_users:
+            db_user.hashed_password = auth.get_password_hash(data.password)
+        
+        db.commit()
+
+        return {"message": "Passwort erfolgreich aktualisiert."}
+
+    except Exception as e:
+        print(f"Reset Error: {e}")
+        raise HTTPException(status_code=500, detail="Passwort konnte nicht aktualisiert werden.")
 
 
 
@@ -373,7 +527,7 @@ async def handle_payment_intent_succeeded(intent):
             amount=amount
         )
         
-        crud.create_transaction(db, tx_data, booked_by_id=None, tenant_id=tenant_id)
+        crud.create_transaction(db, tx_data, booked_by_id=user_id, tenant_id=tenant_id)
         print(f"✅ Success: Top-up of {amount+bonus}€ for User {user_id} processed via Webhook.")
         
     except Exception as e:

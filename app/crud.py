@@ -986,35 +986,6 @@ def toggle_attendance(db: Session, tenant_id: int, booking_id: int, booked_by_id
         
     booking.attended = not booking.attended
     
-    # NEU: Automatischer Fortschritt / Abrechnung
-    if booking.attended:
-        tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
-        config = tenant.config or {}
-        appt = booking.appointment
-        
-        # 1. Automatischer Fortschritt (Achievement)
-        if config.get('auto_progress_enabled') and appt and appt.training_type_id:
-            # Prüfen ob bereits ein Achievement für diese Buchung existiert
-            existing_achievement = db.query(models.Achievement).filter(
-                models.Achievement.user_id == booking.user_id,
-                models.Achievement.training_type_id == appt.training_type_id,
-                models.Achievement.date_achieved == appt.start_time
-            ).first()
-            if not existing_achievement:
-                # WICHTIG: Achievement über die zentrale Helper-Funktion erstellen
-                create_achievement(db, booking.user_id, tenant_id, appt.training_type_id, date_achieved=appt.start_time)
-        
-        # 2. Automatische Abrechnung (nur wenn noch nicht abgerechnet)
-        # Wir bräuchten ein Flag 'is_billed' am Booking oder suchen nach Transaction.
-        # Einfachheitshalber implementieren wir 'bill_booking' separat und rufen es hier optional auf.
-        if config.get('auto_billing_enabled'):
-            try:
-                bill_booking(db, tenant_id, booking_id, booked_by_id=booked_by_id)
-            except HTTPException as e:
-                # Wir ignorieren Fehler bei auto-billing hier (z.B. Guthaben leer)
-                # damit der Abstempel-Vorgang nicht abbricht.
-                print(f"Auto-billing failed for booking {booking_id}: {e.detail}")
-
     db.commit()
     db.refresh(booking)
     return booking
@@ -1088,6 +1059,7 @@ def bill_all_participants(db: Session, tenant_id: int, appointment_id: int, book
     bookings = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.status == 'confirmed',
+        models.Booking.attended == True,
         models.Booking.tenant_id == tenant_id
     ).all()
     
@@ -1128,6 +1100,7 @@ def grant_all_progress(db: Session, tenant_id: int, appointment_id: int):
     bookings = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.status == 'confirmed',
+        models.Booking.attended == True,
         models.Booking.tenant_id == tenant_id
     ).all()
     

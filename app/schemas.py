@@ -474,3 +474,10 @@ class PushSubscriptionCreate(BaseModel):
 class TopUpIntentCreate(BaseModel):
     amount: float
     bonus: float
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+    subdomain: str
+
+class PasswordReset(BaseModel):
+    password: str
