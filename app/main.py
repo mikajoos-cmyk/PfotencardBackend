@@ -122,6 +122,14 @@ async def login_for_access_token(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    # WICHTIG: Nur Admins dürfen sich über diesen Endpoint (Marketing Webseite / API Login) anmelden.
+    # Kunden und Mitarbeiter nutzen das App Frontend (Supabase Auth direkt).
+    if user.role != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Zugriff verweigert: Nur Administratoren können sich hier anmelden."
+        )
+
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
         data={"sub": user.email, "tenant_id": tenant.id}, 
