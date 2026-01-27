@@ -126,14 +126,17 @@ class DogBase(BaseModel):
     breed: Optional[str] = None
     birth_date: Optional[date] = None
     chip: Optional[str] = None
+    current_level_id: Optional[int] = None
 
 class DogCreate(DogBase):
-    pass
+    current_level_id: Optional[int] = None
 
 class Dog(DogBase):
     id: int
     owner_id: int
     tenant_id: int
+    current_level_id: Optional[int] = None
+    current_level: Optional["Level"] = None
     created_at: datetime
     class Config: from_attributes = True
 
@@ -164,6 +167,12 @@ class UserBase(BaseModel):
     notif_push_alert: bool = True
     
     reminder_offset_minutes: int = 60
+    permissions: Dict[str, bool] = {
+        "can_create_courses": False,
+        "can_edit_status": False,
+        "can_delete_customers": False,
+        "can_create_messages": False
+    }
 
 class UserCreate(UserBase):
     password: Optional[str] = None 
@@ -198,6 +207,7 @@ class UserUpdate(BaseModel):
     notif_push_alert: Optional[bool] = None
     
     reminder_offset_minutes: Optional[int] = None
+    permissions: Optional[Dict[str, bool]] = None
     
     password: Optional[str] = None
 
@@ -217,6 +227,7 @@ class Document(BaseModel):
 
 class AchievementBase(BaseModel):
     training_type_id: int
+    dog_id: Optional[int] = None # NEU
     date_achieved: datetime
     is_consumed: bool = False
 
@@ -247,6 +258,7 @@ class TransactionBase(BaseModel):
 
 class TransactionCreate(TransactionBase):
     user_id: int
+    dog_id: Optional[int] = None # NEU
     training_type_id: Optional[int] = None 
 
 class Transaction(TransactionBase):
@@ -282,6 +294,8 @@ class BookingBase(BaseModel):
 
 class BookingCreate(BookingBase):
     appointment_id: int
+    dog_id: Optional[int] = None # NEU
+    is_billed: bool = False # NEU
 
 class Booking(BookingBase):
     id: int
@@ -290,8 +304,11 @@ class Booking(BookingBase):
     user_id: int
     status: str
     attended: bool
+    is_billed: bool = False # NEU
+    dog_id: Optional[int] = None # NEU
     created_at: datetime
     user: Optional[User] = None
+    dog: Optional[Dog] = None
     class Config: from_attributes = True
 
 class AppointmentBase(BaseModel):
@@ -308,6 +325,11 @@ class AppointmentBase(BaseModel):
 
 class AppointmentCreate(AppointmentBase):
     pass
+
+class AppointmentRecurringCreate(AppointmentCreate):
+    recurrence_pattern: str # daily, weekly, biweekly, weekdays
+    end_after_count: Optional[int] = None
+    end_at_date: Optional[datetime] = None
 
 class AppointmentUpdate(BaseModel):
     title: Optional[str] = None

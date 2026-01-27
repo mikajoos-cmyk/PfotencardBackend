@@ -9,7 +9,7 @@ python-multipart==0.0.9
 pydantic-settings==2.3.4
 psycopg2-binary
 supabase
-jose
+# jose removed as it is redundant with python-jose
 stripe
 pywebpush==1.14.0
 resend==0.8.0

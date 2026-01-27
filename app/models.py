@@ -89,6 +89,7 @@ class Level(Base):
     tenant = relationship("Tenant", back_populates="levels")
     requirements = relationship("LevelRequirement", back_populates="level", cascade="all, delete-orphan")
     users = relationship("User", back_populates="current_level")
+    dogs = relationship("Dog", back_populates="current_level")
 
 
 class LevelRequirement(Base):
@@ -151,6 +152,14 @@ class User(Base):
     # Erinnerungseinstellungen
     reminder_offset_minutes = Column(Integer, default=60)
 
+    # Berechtigungen (für Mitarbeiter)
+    permissions = Column(JSONB, default={
+        "can_create_courses": False,
+        "can_edit_status": False,
+        "can_delete_customers": False,
+        "can_create_messages": False
+    })
+
     @property
     def level_id(self):
         return self.current_level_id
@@ -191,10 +200,17 @@ class Dog(Base):
     breed = Column(String(255))
     birth_date = Column(Date)
     chip = Column(String(50), nullable=True)
+    
+    # NEU: Jeder Hund hat sein eigenes Level
+    current_level_id = Column(Integer, ForeignKey('levels.id', ondelete="SET NULL"), nullable=True)
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="dogs")
     owner = relationship("User", back_populates="dogs")
+    current_level = relationship("Level", back_populates="dogs")
+    achievements = relationship("Achievement", back_populates="dog", cascade="all, delete-orphan")
+    bookings = relationship("Booking", back_populates="dog", cascade="all, delete-orphan")
 
 
 class Transaction(Base):
@@ -228,11 +244,15 @@ class Achievement(Base):
     
     training_type_id = Column(Integer, ForeignKey('training_types.id', ondelete="SET NULL"), nullable=True)
     
+    # NEU: Verknüpfung zum Hund
+    dog_id = Column(Integer, ForeignKey('dogs.id', ondelete="CASCADE"), nullable=True)
+    
     transaction_id = Column(Integer, ForeignKey('transactions.id', ondelete="CASCADE"), nullable=True)
     date_achieved = Column(DateTime(timezone=True), server_default=func.now())
     is_consumed = Column(Boolean, default=False, nullable=False)
 
     user = relationship("User", back_populates="achievements")
+    dog = relationship("Dog", back_populates="achievements")
     training_type = relationship("TrainingType", back_populates="achievements")
 
 
@@ -302,14 +322,21 @@ class Booking(Base):
     
     status = Column(String(50), default="confirmed") # confirmed, cancelled, waitlist
     attended = Column(Boolean, default=False)
+    is_billed = Column(Boolean, default=False) # NEU: Abrechnungsstatus
+    
+    # NEU: Welcher Hund nimmt teil?
+    dog_id = Column(Integer, ForeignKey('dogs.id', ondelete="CASCADE"), nullable=True)
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Ein User kann pro Termin nur einmal buchen
-    __table_args__ = (UniqueConstraint('appointment_id', 'user_id', name='uix_appointment_user'),)
+    # Ein User kann pro Termin nur einmal buchen (Ggf. anpassen wenn mehrere Hunde gleichzeitig?)
+    # Fürs erste lassen wir es so, aber dog_id könnte in Constraint aufgenommen werden.
+    __table_args__ = (UniqueConstraint('appointment_id', 'user_id', 'dog_id', name='uix_appointment_user_dog'),)
 
     tenant = relationship("Tenant", back_populates="bookings")
     appointment = relationship("Appointment", back_populates="bookings")
     user = relationship("User", back_populates="bookings")
+    dog = relationship("Dog", back_populates="bookings")
 
 
 # --- 5. MARKETING & NEWSLETTER ---

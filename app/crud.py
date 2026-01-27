@@ -378,7 +378,17 @@ def get_dog(db: Session, dog_id: int, tenant_id: int):
     ).first()
 
 def create_dog_for_user(db: Session, dog: schemas.DogCreate, user_id: int, tenant_id: int):
-    db_dog = models.Dog(**dog.model_dump(), owner_id=user_id, tenant_id=tenant_id)
+    # Initiales Level für den Hund setzen
+    start_level = db.query(models.Level).filter(
+        models.Level.tenant_id == tenant_id,
+        models.Level.rank_order == 1
+    ).first()
+    
+    dog_data = dog.model_dump()
+    # Entferne current_level_id aus den Daten, falls vorhanden, um TypeError zu vermeiden
+    dog_data.pop('current_level_id', None)
+    
+    db_dog = models.Dog(**dog_data, owner_id=user_id, tenant_id=tenant_id, current_level_id=start_level.id if start_level else None)
     db.add(db_dog)
     db.commit()
     db.refresh(db_dog)
@@ -411,11 +421,20 @@ def delete_dog(db: Session, dog_id: int, tenant_id: int):
 
 # --- LEVEL & ACHIEVEMENTS LOGIC (DYNAMISCH) ---
 
-def check_level_up_eligibility(db: Session, user: models.User) -> bool:
-    if not user.current_level_id:
+def check_level_up_eligibility(db: Session, user: models.User, dog_id: Optional[int] = None) -> bool:
+    # Wenn ein dog_id übergeben wurde, prüfen wir das Level des Hundes
+    current_level_id = None
+    if dog_id:
+        dog = db.query(models.Dog).filter(models.Dog.id == dog_id, models.Dog.owner_id == user.id).first()
+        if dog:
+            current_level_id = dog.current_level_id
+    else:
+        current_level_id = user.current_level_id
+
+    if not current_level_id:
         return False
 
-    current_level = db.query(models.Level).filter(models.Level.id == user.current_level_id).first()
+    current_level = db.query(models.Level).filter(models.Level.id == current_level_id).first()
     next_level = db.query(models.Level).filter(
         models.Level.tenant_id == user.tenant_id,
         models.Level.rank_order > current_level.rank_order
@@ -464,11 +483,19 @@ def check_level_up_eligibility(db: Session, user: models.User) -> bool:
     return True
 
 
-def are_non_exam_requirements_met(db: Session, user: models.User, current_level: models.Level = None) -> bool:
+def are_non_exam_requirements_met(db: Session, user: models.User, current_level: models.Level = None, dog_id: Optional[int] = None) -> bool:
     if not current_level:
-        if not user.current_level_id:
+        target_level_id = None
+        if dog_id:
+            dog = db.query(models.Dog).filter(models.Dog.id == dog_id, models.Dog.owner_id == user.id).first()
+            if dog: target_level_id = dog.current_level_id
+        else:
+            target_level_id = user.current_level_id
+            
+        if not target_level_id:
             return False
-        current_level = db.query(models.Level).filter(models.Level.id == user.current_level_id).first()
+            
+        current_level = db.query(models.Level).filter(models.Level.id == target_level_id).first()
         if not current_level: return False
 
     requirements = db.query(models.LevelRequirement).options(
@@ -504,14 +531,21 @@ def are_non_exam_requirements_met(db: Session, user: models.User, current_level:
             
     return True
 
-def perform_level_up(db: Session, user_id: int, tenant_id: int):
+def perform_level_up(db: Session, user_id: int, tenant_id: int, dog_id: Optional[int] = None):
     user = get_user(db, user_id, tenant_id)
     if not user: raise HTTPException(404, "User not found")
     
-    if not check_level_up_eligibility(db, user):
+    if not check_level_up_eligibility(db, user, dog_id):
         raise HTTPException(400, "Requirements not met")
 
-    current_level = db.query(models.Level).filter(models.Level.id == user.current_level_id).first()
+    current_level_id = None
+    if dog_id:
+        dog = db.query(models.Dog).filter(models.Dog.id == dog_id, models.Dog.owner_id == user_id).first()
+        if dog: current_level_id = dog.current_level_id
+    else:
+        current_level_id = user.current_level_id
+        
+    current_level = db.query(models.Level).filter(models.Level.id == current_level_id).first()
     requirements = db.query(models.LevelRequirement).filter(
         models.LevelRequirement.level_id == current_level.id,
         models.LevelRequirement.is_additional == False
@@ -519,12 +553,16 @@ def perform_level_up(db: Session, user_id: int, tenant_id: int):
 
     for req in requirements:
         # Mark ALL unconsumed achievements of this type as consumed, even if they exceed the required count
-        achievements_to_consume = db.query(models.Achievement).filter(
+        achievement_query = db.query(models.Achievement).filter(
             models.Achievement.user_id == user.id,
             models.Achievement.tenant_id == tenant_id,
             models.Achievement.training_type_id == req.training_type_id,
             models.Achievement.is_consumed == False
-        ).all()
+        )
+        if dog_id:
+            achievement_query = achievement_query.filter(models.Achievement.dog_id == dog_id)
+            
+        achievements_to_consume = achievement_query.all()
         
         for ach in achievements_to_consume:
             ach.is_consumed = True
@@ -535,8 +573,14 @@ def perform_level_up(db: Session, user_id: int, tenant_id: int):
         models.Level.rank_order > current_level.rank_order
     ).order_by(models.Level.rank_order.asc()).first()
     
-    user.current_level_id = next_level.id
-    db.add(user)
+    if dog_id:
+        dog = db.query(models.Dog).filter(models.Dog.id == dog_id, models.Dog.owner_id == user_id).first()
+        if dog:
+            dog.current_level_id = next_level.id
+            db.add(dog)
+    else:
+        user.current_level_id = next_level.id
+        db.add(user)
     db.commit()
     db.refresh(user)
     return user
@@ -594,17 +638,18 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
         ).first()
         
         if tt:
-            create_achievement(db, user.id, tenant_id, tt.id, db_tx.id)
+            create_achievement(db, user.id, tenant_id, tt.id, db_tx.id, dog_id=transaction.dog_id)
 
     db.commit()
     db.refresh(db_tx)
     return db_tx
 
 
-def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None, date_achieved: Optional[datetime] = None):
+def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None, date_achieved: Optional[datetime] = None, dog_id: Optional[int] = None):
     ach = models.Achievement(
         tenant_id=tenant_id,
         user_id=user_id,
+        dog_id=dog_id, # NEU
         training_type_id=training_type_id,
         transaction_id=transaction_id,
         date_achieved=date_achieved or datetime.now(timezone.utc)
@@ -616,7 +661,7 @@ def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_
     if tt and tt.category == 'exam':
         user = get_user(db, user_id, tenant_id)
         if user:
-             if not are_non_exam_requirements_met(db, user):
+             if not are_non_exam_requirements_met(db, user, dog_id=dog_id):
                  # Premature exam! Mark as consumed so it doesn't count.
                  ach.is_consumed = True
 
@@ -722,6 +767,55 @@ def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tena
     db.refresh(db_appt)
     return db_appt
 
+def create_recurring_appointments(db: Session, appointment: schemas.AppointmentRecurringCreate, tenant_id: int):
+    created_appointments = []
+    current_start = appointment.start_time
+    current_end = appointment.end_time
+    
+    count = 0
+    max_count = appointment.end_after_count or 100 # Safety limit
+    
+    while count < max_count:
+        if appointment.end_at_date and current_start > appointment.end_at_date:
+            break
+            
+        # Create the specific instance
+        appt_data = appointment.model_dump(exclude={"recurrence_pattern", "end_after_count", "end_at_date", "start_time", "end_time"})
+        appt_instance = schemas.AppointmentCreate(**appt_data, start_time=current_start, end_time=current_end)
+        
+        db_appt = create_appointment(db, appt_instance, tenant_id)
+        created_appointments.append(db_appt)
+        
+        count += 1
+        
+        # Calculate next date
+        if appointment.recurrence_pattern == 'daily':
+            current_start += timedelta(days=1)
+            current_end += timedelta(days=1)
+        elif appointment.recurrence_pattern == 'weekly':
+            current_start += timedelta(weeks=1)
+            current_end += timedelta(weeks=1)
+        elif appointment.recurrence_pattern == 'biweekly':
+            current_start += timedelta(weeks=2)
+            current_end += timedelta(weeks=2)
+        elif appointment.recurrence_pattern == 'weekdays':
+            # Skip Sat (5) and Sun (6)
+            days_to_add = 1
+            next_day = (current_start + timedelta(days=1)).weekday()
+            if next_day == 5: # Saturday
+                days_to_add = 3
+            elif next_day == 6: # Sunday
+                days_to_add = 2
+            current_start += timedelta(days=days_to_add)
+            current_end += timedelta(days=days_to_add)
+        else:
+            break # Unknown pattern
+            
+        if not appointment.end_after_count and not appointment.end_at_date:
+            break # No recurrence if no end criteria
+            
+    return created_appointments
+
 def get_appointments(db: Session, tenant_id: int):
     results = db.query(
         models.Appointment,
@@ -812,15 +906,23 @@ def delete_appointment(db: Session, appointment_id: int, tenant_id: int):
     db.commit()
     return True
 
-def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int):
+def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int, dog_id: Optional[int] = None):
     appt = get_appointment(db, appointment_id, tenant_id)
     if not appt:
         raise HTTPException(404, "Appointment not found")
         
-    existing = db.query(models.Booking).filter(
+    booking_query = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.user_id == user_id
-    ).first()
+    )
+    
+    if dog_id:
+        booking_query = booking_query.filter(models.Booking.dog_id == dog_id)
+    else:
+        # Falls kein Hund angegeben ist, prüfen wir ob es eine Buchung ohne Hund gibt
+        booking_query = booking_query.filter(models.Booking.dog_id == None)
+        
+    existing = booking_query.first()
     
     if existing:
         if existing.status == 'cancelled':
@@ -865,11 +967,11 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     if current_count >= appt.max_participants:
         new_status = 'waitlist'
 
-    booking = models.Booking()
     new_booking = models.Booking(
         tenant_id=tenant_id,
         appointment_id=appointment_id,
         user_id=user_id,
+        dog_id=dog_id, # NEU
         status=new_status
     )
     db.add(new_booking)
@@ -894,12 +996,19 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     
     return new_booking
 
-def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int):
-    booking = db.query(models.Booking).filter(
+def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: int, dog_id: Optional[int] = None):
+    booking_query = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.user_id == user_id,
         models.Booking.tenant_id == tenant_id
-    ).first()
+    )
+    
+    if dog_id:
+        booking_query = booking_query.filter(models.Booking.dog_id == dog_id)
+    else:
+        booking_query = booking_query.filter(models.Booking.dog_id == None)
+        
+    booking = booking_query.first()
     
     if not booking:
         raise HTTPException(404, "Booking not found")
@@ -963,7 +1072,10 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     }
 
 def get_participants(db: Session, tenant_id: int, appointment_id: int):
-    return db.query(models.Booking).options(joinedload(models.Booking.user)).filter(
+    return db.query(models.Booking).options(
+        joinedload(models.Booking.user),
+        joinedload(models.Booking.dog)
+    ).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.tenant_id == tenant_id
     ).all()
@@ -1013,13 +1125,24 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
     if user.balance < price:
         raise HTTPException(status_code=400, detail=f"Ungenügendes Guthaben ({user.balance}€). Erforderlich: {price}€")
         
-    # NEU: Double-Billing Check
-    existing_tx = db.query(models.Transaction).filter(
+    # NEU: Double-Billing Check (Inkl. dog_id Prüfung falls vorhanden)
+    existing_tx_query = db.query(models.Transaction).filter(
         models.Transaction.user_id == user.id,
         models.Transaction.tenant_id == tenant_id,
         models.Transaction.description == f"Abrechnung: {appt.title}"
-    ).first()
+    )
+    
+    # Optional: Falls mehrere Hunde denselben Kurs machen, könnte man hier dog_id prüfen
+    # Da Transaction aktuell keine dog_id hat (nur Achievement), belassen wir es bei der User-Prüfung 
+    # oder fügen dog_id zu Transaction hinzu? Im Plan stand nur Achievement/Booking/Dog.
+    # Da Achievements dog_id haben, reicht das für Level-Check.
+    
+    existing_tx = existing_tx_query.first()
     if existing_tx:
+        # Falls Transaktion existiert aber is_billed noch False ist -> Syncen
+        if not booking.is_billed:
+            booking.is_billed = True
+            db.commit()
         raise HTTPException(status_code=400, detail="Bereits abgerechnet.")
 
     # Transaktion erstellen
@@ -1030,7 +1153,7 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
         description=f"Abrechnung: {appt.title}",
         amount=-price,
         balance_after=user.balance - price,
-        booked_by_id=booked_by_id or user.id # Fallback auf User selbst, falls System-Aktion ohne ID
+        booked_by_id=booked_by_id or user.id 
     )
     user.balance -= price
     
@@ -1041,16 +1164,22 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
     config = tenant.config or {}
     
     if config.get('auto_progress_enabled'):
-        existing_achievement = db.query(models.Achievement).filter(
+        achievement_query = db.query(models.Achievement).filter(
             models.Achievement.user_id == user.id,
             models.Achievement.training_type_id == training_type.id,
             models.Achievement.date_achieved == appt.start_time
-        ).first()
+        )
+        
+        if booking.dog_id:
+            achievement_query = achievement_query.filter(models.Achievement.dog_id == booking.dog_id)
+            
+        existing_achievement = achievement_query.first()
         
         if not existing_achievement:
-            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=transaction.id, date_achieved=appt.start_time)
+            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=transaction.id, date_achieved=appt.start_time, dog_id=booking.dog_id)
             db.flush() 
     
+    booking.is_billed = True # NEU: Als abgerechnet markieren
     db.commit()
     db.refresh(user)
     return booking
@@ -1085,14 +1214,19 @@ def grant_progress_booking(db: Session, tenant_id: int, booking_id: int):
         raise HTTPException(400, "Diesem Termin ist keine Leistung zugeordnet.")
     
     # Check if exists
-    existing = db.query(models.Achievement).filter(
+    achievement_query = db.query(models.Achievement).filter(
         models.Achievement.user_id == booking.user_id,
         models.Achievement.training_type_id == appt.training_type_id,
         models.Achievement.date_achieved == appt.start_time
-    ).first()
+    )
+    
+    if booking.dog_id:
+        achievement_query = achievement_query.filter(models.Achievement.dog_id == booking.dog_id)
+        
+    existing = achievement_query.first()
     
     if not existing:
-        create_achievement(db, booking.user_id, tenant_id, appt.training_type_id, date_achieved=appt.start_time)
+        create_achievement(db, booking.user_id, tenant_id, appt.training_type_id, date_achieved=appt.start_time, dog_id=booking.dog_id)
         db.commit()
     return booking
 

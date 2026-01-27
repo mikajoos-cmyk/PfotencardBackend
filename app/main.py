@@ -1003,23 +1003,51 @@ def delete_user_endpoint(
 
 @app.put("/api/users/{user_id}/level", response_model=schemas.User)
 def manual_level_up(
-    user_id: int, level_update: schemas.UserLevelUpdate, db: Session = Depends(get_db),
+    user_id: int, level_update: schemas.UserLevelUpdate, 
+    dog_id: Optional[int] = None, # NEU
+    db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if dog_id:
+        dog = crud.get_dog(db, dog_id, tenant.id)
+        if not dog or dog.owner_id != user_id:
+             raise HTTPException(status_code=404, detail="Dog not found")
+        dog.current_level_id = level_update.level_id
+        db.add(dog)
+        db.commit()
+        db.refresh(dog)
+        return crud.get_user(db, user_id, tenant.id)
+        
     return crud.update_user_level(db, user_id, level_update.level_id)
 
 @app.post("/api/users/{user_id}/level-up", response_model=schemas.User)
 def perform_level_up_endpoint(
-    user_id: int, db: Session = Depends(get_db),
+    user_id: int, 
+    dog_id: Optional[int] = None, # NEU
+    db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    return crud.perform_level_up(db, user_id, tenant.id)
+    crud.perform_level_up(db, user_id, tenant.id, dog_id=dog_id)
+    return crud.get_user(db, user_id, tenant.id)
+
+@app.post("/api/users/{user_id}/dogs", response_model=schemas.Dog)
+def create_dog_for_user(
+    user_id: int, 
+    dog: schemas.DogCreate, 
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+):
+    if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.create_dog_for_user(db, dog, user_id, tenant.id)
 
 @app.post("/api/transactions", response_model=schemas.Transaction)
 def create_transaction(
@@ -1162,6 +1190,15 @@ def create_appointment(
     if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
     return crud.create_appointment(db, appointment, tenant.id)
 
+@app.post("/api/appointments/recurring", response_model=List[schemas.Appointment])
+def create_recurring_appointments(
+    appointment: schemas.AppointmentRecurringCreate, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']: raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.create_recurring_appointments(db, appointment, tenant.id)
+
 @app.put("/api/appointments/{appointment_id}", response_model=schemas.Appointment)
 def update_appointment(
     appointment_id: int, appointment: schemas.AppointmentUpdate, db: Session = Depends(get_db),
@@ -1193,11 +1230,14 @@ def read_appointments(
 
 @app.post("/api/appointments/{appointment_id}/book", response_model=schemas.Booking)
 def book_appointment(
-    appointment_id: int, db: Session = Depends(get_db),
+    appointment_id: int, 
+    dog_id: Optional[int] = None, # NEU
+    db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    return crud.create_booking(db, tenant.id, appointment_id, current_user.id)
+    # crud.create_booking muss dog_id unterstützen
+    return crud.create_booking(db, tenant.id, appointment_id, current_user.id, dog_id=dog_id)
 
 @app.get("/api/users/me/bookings", response_model=List[schemas.Booking])
 def read_my_bookings(
@@ -1208,12 +1248,14 @@ def read_my_bookings(
 
 @app.delete("/api/appointments/{appointment_id}/book")
 def cancel_appointment_booking(
-    appointment_id: int, db: Session = Depends(get_db),
+    appointment_id: int, 
+    dog_id: Optional[int] = None, # NEU
+    db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     # Rückgabetyp ist jetzt ein Dict, kein Schema mehr erzwingen oder Schema anpassen
-    return crud.cancel_booking(db, tenant.id, appointment_id, current_user.id)
+    return crud.cancel_booking(db, tenant.id, appointment_id, current_user.id, dog_id=dog_id)
 
 @app.get("/api/appointments/{appointment_id}/participants", response_model=List[schemas.Booking])
 def read_participants(
