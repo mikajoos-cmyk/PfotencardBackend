@@ -12,6 +12,7 @@ class TenantConfig(BaseModel):
     active_modules: List[str] = ["news", "documents"]
     auto_billing_enabled: bool = False
     auto_progress_enabled: bool = False
+    appointments: Dict[str, Any] = {"default_duration": 60, "max_participants": 10}
 
 class TenantBase(BaseModel):
     name: str
@@ -321,6 +322,7 @@ class AppointmentBase(BaseModel):
     trainer_id: Optional[int] = None
     target_level_ids: List[int] = []
     training_type_id: Optional[int] = None
+    price: Optional[float] = None # NEU
     is_open_for_all: bool = False
 
 class AppointmentCreate(AppointmentBase):
@@ -341,6 +343,7 @@ class AppointmentUpdate(BaseModel):
     trainer_id: Optional[int] = None
     target_level_ids: Optional[List[int]] = None
     training_type_id: Optional[int] = None
+    price: Optional[float] = None # NEU
     is_open_for_all: Optional[bool] = None
 
 class Appointment(AppointmentBase):
@@ -385,6 +388,10 @@ class LevelUpdateItem(BaseModel):
     color: Optional[str] = None
     has_additional_requirements: bool = False
     requirements: List[RequirementUpdateItem] = []
+    
+class AppointmentSettings(BaseModel):
+    default_duration: int = 60
+    max_participants: int = 10
 
 class SettingsUpdate(BaseModel):
     school_name: str
@@ -395,6 +402,7 @@ class SettingsUpdate(BaseModel):
     background_color: str
     sidebar_color: str
     open_for_all_color: Optional[str] = None
+    workshop_lecture_color: Optional[str] = None
     level_term: str
     vip_term: str
     allow_custom_top_up: bool = True
@@ -404,6 +412,7 @@ class SettingsUpdate(BaseModel):
     active_modules: List[str] = []
     auto_billing_enabled: bool = False
     auto_progress_enabled: bool = False
+    appointments: Optional[AppointmentSettings] = None
 
 class NewsletterSubscriberBase(BaseModel):
     email: EmailStr

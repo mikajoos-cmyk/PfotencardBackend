@@ -87,7 +87,7 @@ class Level(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="levels")
-    requirements = relationship("LevelRequirement", back_populates="level", cascade="all, delete-orphan")
+    requirements = relationship("LevelRequirement", back_populates="level", cascade="all, delete-orphan", order_by="LevelRequirement.rank_order")
     users = relationship("User", back_populates="current_level")
     dogs = relationship("Dog", back_populates="current_level")
 
@@ -100,6 +100,7 @@ class LevelRequirement(Base):
     training_type_id = Column(Integer, ForeignKey('training_types.id', ondelete="CASCADE"), nullable=False)
     required_count = Column(Integer, default=1)
     is_additional = Column(Boolean, default=False) # NEU: Markiert als Zusatzleistung
+    rank_order = Column(Integer, default=0) # NEU: Für Drag & Drop Sortierung
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     level = relationship("Level", back_populates="requirements")
@@ -300,6 +301,7 @@ class Appointment(Base):
     
     # NEU: Verknüpfung zu einer Leistung (TrainingType) für Abrechnung & Fortschritt
     training_type_id = Column(Integer, ForeignKey('training_types.id', ondelete="SET NULL"), nullable=True)
+    price = Column(Float, nullable=True) # NEU: Individueller Preis für diesen Termin
     
     is_open_for_all = Column(Boolean, default=False) # NEU: Wenn True, dürfen alle kommen
     

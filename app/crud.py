@@ -78,6 +78,8 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
         current_config["branding"]["logo_url"] = settings.logo_url
     if settings.open_for_all_color:
         current_config["branding"]["open_for_all_color"] = settings.open_for_all_color
+    if settings.workshop_lecture_color:
+        current_config["branding"]["workshop_lecture_color"] = settings.workshop_lecture_color
     
     # Wording Updates
     current_config["wording"] = current_config.get("wording", {})
@@ -95,6 +97,10 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     # NEU: Automatisierungseinstellungen
     current_config["auto_billing_enabled"] = settings.auto_billing_enabled
     current_config["auto_progress_enabled"] = settings.auto_progress_enabled
+    
+    # NEU: Standardwerte für Termine
+    if settings.appointments:
+        current_config["appointments"] = settings.appointments.model_dump()
 
     tenant.config = current_config
     flag_modified(tenant, "config")
@@ -168,7 +174,7 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
             
         if current_level.id:
             db.query(models.LevelRequirement).filter(models.LevelRequirement.level_id == current_level.id).delete()
-            for req_data in l_data.requirements:
+            for i, req_data in enumerate(l_data.requirements):
                 training_id = req_data.training_type_id
                 if training_id in temp_id_mapping:
                     training_id = temp_id_mapping[training_id]
@@ -177,7 +183,8 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
                     level_id=current_level.id,
                     training_type_id=training_id,
                     required_count=req_data.required_count,
-                    is_additional=req_data.is_additional
+                    is_additional=req_data.is_additional,
+                    rank_order=i
                 )
                 db.add(new_req)
 
@@ -755,6 +762,7 @@ def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tena
         max_participants=appointment.max_participants,
         trainer_id=appointment.trainer_id,
         training_type_id=appointment.training_type_id,
+        price=appointment.price, # NEU
         is_open_for_all=appointment.is_open_for_all
     )
     
@@ -1120,7 +1128,7 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
     if not training_type:
          raise HTTPException(status_code=400, detail="Zugeordnete Leistung nicht gefunden.")
          
-    price = training_type.default_price
+    price = appt.price if appt.price is not None else training_type.default_price
     
     if user.balance < price:
         raise HTTPException(status_code=400, detail=f"Ungenügendes Guthaben ({user.balance}€). Erforderlich: {price}€")
