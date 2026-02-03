@@ -392,6 +392,7 @@ class LevelUpdateItem(BaseModel):
 class AppointmentSettings(BaseModel):
     default_duration: int = 60
     max_participants: int = 10
+    color_rules: List[Dict[str, Any]] = []
 
 class SettingsUpdate(BaseModel):
     school_name: str
