@@ -305,6 +305,9 @@ class Appointment(Base):
     
     is_open_for_all = Column(Boolean, default=False) # NEU: Wenn True, dürfen alle kommen
     
+    # NEU: Block-Kurs ID (Gruppiert Termine zu einem Kurs)
+    block_id = Column(String(255), nullable=True)
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="appointments")

@@ -324,6 +324,7 @@ class AppointmentBase(BaseModel):
     training_type_id: Optional[int] = None
     price: Optional[float] = None # NEU
     is_open_for_all: bool = False
+    block_id: Optional[str] = None # NEU: Block-Kurs ID
 
 class AppointmentCreate(AppointmentBase):
     pass
@@ -332,6 +333,7 @@ class AppointmentRecurringCreate(AppointmentCreate):
     recurrence_pattern: str # daily, weekly, biweekly, weekdays
     end_after_count: Optional[int] = None
     end_at_date: Optional[datetime] = None
+    is_block: bool = False # NEU: Markiert als geschlossener Kurs
 
 class AppointmentUpdate(BaseModel):
     title: Optional[str] = None
@@ -345,6 +347,7 @@ class AppointmentUpdate(BaseModel):
     training_type_id: Optional[int] = None
     price: Optional[float] = None # NEU
     is_open_for_all: Optional[bool] = None
+    block_id: Optional[str] = None
 
 class Appointment(AppointmentBase):
     id: int

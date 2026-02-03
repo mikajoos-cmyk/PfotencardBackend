@@ -1223,10 +1223,12 @@ def delete_appointment(
 
 @app.get("/api/appointments", response_model=List[schemas.Appointment])
 def read_appointments(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
     db: Session = Depends(get_db), tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    return crud.get_appointments(db, tenant.id)
+    return crud.get_appointments(db, tenant.id, start_date=start_date, end_date=end_date)
 
 @app.post("/api/appointments/{appointment_id}/book", response_model=schemas.Booking)
 def book_appointment(
