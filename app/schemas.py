@@ -4,6 +4,22 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 from uuid import UUID
 
+class InvoiceSettings(BaseModel):
+    company_name: Optional[str] = None
+    address_line1: Optional[str] = None # Strasse Hausnr
+    address_line2: Optional[str] = None # PLZ Stadt
+    tax_number: Optional[str] = None
+    vat_id: Optional[str] = None
+    bank_name: Optional[str] = None
+    iban: Optional[str] = None
+    bic: Optional[str] = None
+    account_holder: Optional[str] = None
+    footer_text: Optional[str] = None
+    logo_url: Optional[str] = None # Optional override
+    vat_rate: float = 19.0
+    is_small_business: bool = False
+    small_business_text: Optional[str] = "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."
+
 class TenantConfig(BaseModel):
     branding: Dict[str, Any] = {} 
     wording: Dict[str, str] = {} 
@@ -13,6 +29,7 @@ class TenantConfig(BaseModel):
     auto_billing_enabled: bool = False
     auto_progress_enabled: bool = False
     appointments: Dict[str, Any] = {"default_duration": 60, "max_participants": 10}
+    invoice_settings: Optional[InvoiceSettings] = None
 
 class TenantBase(BaseModel):
     name: str
@@ -256,6 +273,7 @@ class TransactionBase(BaseModel):
     type: str 
     description: Optional[str] = None
     amount: float
+    invoice_number: Optional[str] = None
 
 class TransactionCreate(TransactionBase):
     user_id: int
@@ -417,6 +435,7 @@ class SettingsUpdate(BaseModel):
     auto_billing_enabled: bool = False
     auto_progress_enabled: bool = False
     appointments: Optional[AppointmentSettings] = None
+    invoice_settings: Optional[InvoiceSettings] = None
 
 class NewsletterSubscriberBase(BaseModel):
     email: EmailStr

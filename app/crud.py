@@ -16,6 +16,28 @@ def format_datetime_de(dt: datetime) -> str:
     if not dt: return ""
     return dt.strftime("%d.%m.%Y um %H:%M Uhr")
 
+def get_next_invoice_number(db: Session, tenant_id: int) -> str:
+    """
+    Generiert die nächste freie Rechnungsnummer für einen Tenant.
+    Nutzt Row Locking (with_for_update), um Race Conditions zu vermeiden.
+    Format: YYYY-NR (z.B. 2026-1001)
+    """
+    year = datetime.now().year
+    sequence_id = f"invoice_{tenant_id}_{year}"
+    
+    # Sequence laden oder erstellen
+    seq = db.query(models.SystemSequence).filter(models.SystemSequence.id == sequence_id).with_for_update().first()
+    
+    if not seq:
+        # Erster Eintrag für dieses Jahr/Mandant
+        seq = models.SystemSequence(id=sequence_id, current_value=1001)
+        db.add(seq)
+        db.flush() # ID reservieren
+    else:
+        seq.current_value += 1
+    
+    return f"{year}-{seq.current_value}"
+
 # --- TENANT & CONFIGURATION ---
 
 def get_tenant_by_subdomain(db: Session, subdomain: str):
@@ -101,6 +123,10 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     # NEU: Standardwerte für Termine
     if settings.appointments:
         current_config["appointments"] = settings.appointments.model_dump()
+
+    # NEU: Rechnungsdaten
+    if settings.invoice_settings:
+        current_config["invoice_settings"] = settings.invoice_settings.model_dump()
 
     tenant.config = current_config
     flag_modified(tenant, "config")
@@ -623,7 +649,13 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
 
     total_change = amount_to_add + bonus
     user.balance += total_change
+    new_balance = user.balance # Capture the new balance before commit
     db.add(user)
+
+    # NEU: Rechnungsnummer generieren, wenn es eine Einnahme ist
+    invoice_number = None
+    if transaction.amount > 0:
+        invoice_number = get_next_invoice_number(db, tenant_id)
 
     db_tx = models.Transaction(
         tenant_id=tenant_id,
@@ -631,9 +663,10 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
         booked_by_id=booked_by_id,
         type=transaction.type,
         description=transaction.description,
-        amount=total_change, # Gesamtbetrag auf dem Konto
-        balance_after=user.balance,
-        bonus=bonus # NEU: Hier wird der Bonus festgeschrieben!
+        amount=transaction.amount, # Betrag der Transaktion (ohne Bonus)
+        balance_after=new_balance,
+        bonus=bonus, # NEU: Hier wird der Bonus festgeschrieben!
+        invoice_number=invoice_number # NEU
     )
     db.add(db_tx)
     db.flush()

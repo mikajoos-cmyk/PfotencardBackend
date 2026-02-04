@@ -231,6 +231,9 @@ class Transaction(Base):
     # NEU: Speichert den Bonus explizit ab
     bonus = Column(Float, default=0.0)
 
+    # NEU: Fortlaufende Rechnungsnummer
+    invoice_number = Column(String(50), unique=True, nullable=True)
+
     tenant = relationship("Tenant", back_populates="transactions")
     user = relationship("User", foreign_keys=[user_id], back_populates="transactions")
     booked_by = relationship("User", foreign_keys=[booked_by_id], back_populates="booked_transactions")
@@ -452,3 +455,9 @@ class PushSubscription(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="push_subscriptions")
+
+class SystemSequence(Base):
+    __tablename__ = 'system_sequences'
+    
+    id = Column(String(50), primary_key=True) # z.B. "invoice_{tenant_id}"
+    current_value = Column(Integer, default=1000)

@@ -4,6 +4,7 @@ import shutil
 from starlette.responses import FileResponse
 from fastapi import Depends, FastAPI, HTTPException, status, UploadFile, File, Request, Header
 from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -12,7 +13,7 @@ import secrets
 import stripe
 import traceback
 
-from . import crud, models, schemas, auth, stripe_service, legal, notification_service
+from . import crud, models, schemas, auth, stripe_service, legal, notification_service, invoice_service
 from .storage_service import delete_file_from_storage, delete_folder_from_storage
 from .database import engine, get_db, SessionLocal
 from .config import settings
@@ -680,6 +681,26 @@ def get_portal_url(
         raise HTTPException(status_code=403, detail="Not authorized")
     return stripe_service.get_billing_portal_url(db, tenant.id, return_url)
 
+@app.post("/api/settings/invoice-preview")
+def preview_invoice_endpoint(
+    settings: schemas.InvoiceSettings,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    branding = tenant.config.get("branding", {})
+    branding_logo = branding.get("logo_url")
+    
+    pdf_buffer = invoice_service.generate_invoice_preview(settings.dict(), branding_logo_url=branding_logo)
+    
+    return StreamingResponse(
+        pdf_buffer, 
+        media_type="application/pdf"
+    )
+
 @app.get("/api/stripe/invoices", response_model=List[schemas.Invoice])
 def get_invoices_endpoint(
     db: Session = Depends(get_db),
@@ -689,6 +710,41 @@ def get_invoices_endpoint(
     if current_user.role != 'admin':
         raise HTTPException(status_code=403, detail="Not authorized")
     return stripe_service.get_invoices(db, tenant.id)
+
+# NEU: Rechnungs-Download Endpoint (Platzhalter)
+@app.get("/api/transactions/{transaction_id}/invoice")
+def get_transaction_invoice(
+    transaction_id: int,
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    # 1. Transaktion laden
+    transaction = db.query(models.Transaction).filter(
+        models.Transaction.id == transaction_id,
+        models.Transaction.tenant_id == tenant.id
+    ).first()
+    
+    if not transaction:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+        
+    # 2. Berechtigungsprüfung: Nur Admin oder der User selbst
+    if current_user.role != 'admin' and transaction.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this invoice")
+        
+    # 3. Prüfen ob eine Rechnungsnummer existiert
+    if not transaction.invoice_number:
+        raise HTTPException(status_code=404, detail="No invoice available for this transaction")
+
+    pdf_buffer = invoice_service.generate_invoice_pdf(transaction, tenant, transaction.user)
+    
+    filename = f"Rechnung_{transaction.invoice_number}.pdf"
+    
+    return StreamingResponse(
+        pdf_buffer, 
+        media_type="application/pdf", 
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 @app.post("/api/notifications/subscribe")
 def subscribe_to_push(
