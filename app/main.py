@@ -4,7 +4,7 @@ import shutil
 from starlette.responses import FileResponse
 from fastapi import Depends, FastAPI, HTTPException, status, UploadFile, File, Request, Header
 from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -444,31 +444,39 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
             payload, sig_header, endpoint_secret
         )
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid payload")
+        return JSONResponse(status_code=400, content={"error": "Invalid payload"})
     except stripe.error.SignatureVerificationError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
+        return JSONResponse(status_code=400, content={"error": "Invalid signature"})
+    except Exception as e:
+        print(f"Stripe Webhook Construction Error: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Webhook construction failed: {str(e)}"})
 
-    # --- EVENT HANDLING ---
-    if event['type'] == 'customer.subscription.updated':
-        subscription = event['data']['object']
-        await handle_subscription_update(subscription)
+    try:
+        # --- EVENT HANDLING ---
+        if event['type'] == 'customer.subscription.updated':
+            subscription = event['data']['object']
+            await handle_subscription_update(subscription)
 
-    elif event['type'] == 'customer.subscription.deleted':
-        subscription = event['data']['object']
-        await handle_subscription_deleted(subscription)
+        elif event['type'] == 'customer.subscription.deleted':
+            subscription = event['data']['object']
+            await handle_subscription_deleted(subscription)
 
-    # NEU: Handler für erfolgreiche Zahlungen (Verlängerungen) hinzufügen
-    elif event['type'] == 'invoice.payment_succeeded':
-        invoice = event['data']['object']
-        await handle_invoice_payment_succeeded(invoice)
+        # NEU: Handler für erfolgreiche Zahlungen (Verlängerungen) hinzufügen
+        elif event['type'] == 'invoice.payment_succeeded':
+            invoice = event['data']['object']
+            await handle_invoice_payment_succeeded(invoice)
 
-    # NEU: Handler für erfolgreiche Top-up Zahlungen
-    elif event['type'] == 'payment_intent.succeeded':
-        intent = event['data']['object']
-        if intent.get('metadata', {}).get('type') == 'balance_topup':
-            await handle_payment_intent_succeeded(intent)
+        # NEU: Handler für erfolgreiche Top-up Zahlungen
+        elif event['type'] == 'payment_intent.succeeded':
+            intent = event['data']['object']
+            if intent.get('metadata', {}).get('type') == 'balance_topup':
+                await handle_payment_intent_succeeded(intent)
 
-    return {"status": "success"}
+        return {"status": "success"}
+    except Exception as e:
+        print(f"CRITICAL WEBHOOK ERROR [{event['type']}]: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": f"Internal error during event handling: {str(e)}"})
 
 async def handle_subscription_update(subscription):
     db = SessionLocal() 
@@ -521,14 +529,23 @@ async def handle_payment_intent_succeeded(intent):
     db = SessionLocal()
     try:
         metadata = intent.get('metadata', {})
-        user_id = int(metadata.get('user_id'))
-        tenant_id = int(metadata.get('tenant_id'))
-        amount = float(metadata.get('base_amount'))
-        bonus = float(metadata.get('bonus_amount'))
+        
+        user_id_str = metadata.get('user_id')
+        tenant_id_str = metadata.get('tenant_id')
+        amount_str = metadata.get('base_amount')
+        bonus_str = metadata.get('bonus_amount')
+
+        if not all([user_id_str, tenant_id_str, amount_str]):
+            print(f"❌ Error: Missing metadata in PaymentIntent: {metadata}")
+            return
+
+        user_id = int(user_id_str)
+        tenant_id = int(tenant_id_str)
+        amount = float(amount_str)
+        bonus = float(bonus_str) if bonus_str else 0.0
 
         # Transaktion erstellen (nutzt crud.create_transaction)
-        # Wir müssen booked_by_id setzen. Für Stripe nutzen wir ggf. eine System-ID oder None.
-        # Hier nutzen wir None (System)
+        # WICHTIG: crud.create_transaction macht bereits db.commit() am Ende!
         tx_data = schemas.TransactionCreate(
             user_id=user_id,
             type="Aufladung",
@@ -536,12 +553,17 @@ async def handle_payment_intent_succeeded(intent):
             amount=amount
         )
         
-        crud.create_transaction(db, tx_data, booked_by_id=user_id, tenant_id=tenant_id)
-        print(f"✅ Success: Top-up of {amount+bonus}€ for User {user_id} processed via Webhook.")
+        db_tx = crud.create_transaction(db, tx_data, booked_by_id=user_id, tenant_id=tenant_id)
         
     except Exception as e:
-        print(f"❌ Error in handle_payment_intent_succeeded: {e}")
+        print(f"❌ CRITICAL ERROR in handle_payment_intent_succeeded: {e}")
         traceback.print_exc()
+        # Wir werfen den Fehler NICHT hoch, damit der Webhook-Handler (stripe_webhook)
+        # ggf. trotzdem eine strukturierte Antwort geben kann wenn gewünscht.
+        # Aber da wir hier in einer async Task sind die von stripe_webhook aufgerufen wird, 
+        # ist der 200 OK Response von stripe_webhook bereits gesendet oder wird gesendet?
+        # Nö, stripe_webhook wartet darauf.
+        raise e # Wir werfen es jetzt DOCH hoch, damit stripe_webhook es fängt!
     finally:
         db.close()
 

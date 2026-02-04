@@ -232,11 +232,13 @@ class Transaction(Base):
     bonus = Column(Float, default=0.0)
 
     # NEU: Fortlaufende Rechnungsnummer
-    invoice_number = Column(String(50), unique=True, nullable=True)
+    invoice_number = Column(String(50), nullable=True)
 
     tenant = relationship("Tenant", back_populates="transactions")
     user = relationship("User", foreign_keys=[user_id], back_populates="transactions")
     booked_by = relationship("User", foreign_keys=[booked_by_id], back_populates="booked_transactions")
+
+    __table_args__ = (UniqueConstraint('tenant_id', 'invoice_number', name='uix_tenant_invoice_number'),)
 
 
 class Achievement(Base):
