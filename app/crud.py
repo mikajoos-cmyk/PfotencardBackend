@@ -1,7 +1,8 @@
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import and_, func, or_, case
-from datetime import datetime, timedelta, timezone # <--- UPDATE
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from . import models, schemas, storage_service
 from fastapi import HTTPException
 import secrets
@@ -12,9 +13,56 @@ from .notification_service import notify_user
 
 # --- HELPER ---
 def format_datetime_de(dt: datetime) -> str:
-    """Hilfsfunktion für deutsche Datumsformatierung"""
-    if not dt: return ""
-    return dt.strftime("%d.%m.%Y um %H:%M Uhr")
+    """Hilfsfunktion: Datum/Uhrzeit in deutscher Darstellung wie im Frontend (Europe/Berlin)."""
+    if not dt:
+        return ""
+
+    # Wenn dt "naiv" ist (keine tzinfo), interpretieren wir es als UTC (DB-Standard)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    # 1) Bevorzugt mit IANA-TZ (korrekt inkl. historischer Regeln)
+    try:
+        # Hinweis: Unter Windows stellt das Paket "tzdata" die nötigen Daten bereit
+        # (siehe requirements.txt). Falls es dennoch nicht verfügbar ist, greifen wir
+        # unten auf eine manuelle DST-Berechnung zurück.
+        tz = ZoneInfo("Europe/Berlin")
+        local_dt = dt.astimezone(tz)
+        return local_dt.strftime("%d.%m.%Y um %H:%M Uhr")
+    except Exception:
+        pass
+
+    # 2) Fallback ohne ZoneInfo: robuste Sommerzeit-Berechnung für Deutschland
+    #    DST in Deutschland: von letzter Sonntag im März 01:00 UTC bis letzter Sonntag im Oktober 01:00 UTC
+    def last_sunday_utc(year: int, month: int) -> datetime:
+        # Bestimme den letzten Tag des Monats in UTC und gehe rückwärts bis Sonntag (weekday() == 6?)
+        # In Python: Monday=0 ... Sunday=6
+        if month == 12:
+            last_day = datetime(year, 12, 31, 1, 0, tzinfo=timezone.utc)  # 01:00 UTC am letzten Tag
+        else:
+            # 01:00 UTC am letzten Tag des Monats (nächster Monat - 1 Tag)
+            first_next_month = datetime(year, month + 1, 1, 1, 0, tzinfo=timezone.utc)
+            last_day = first_next_month - timedelta(days=1)
+        # Rolle zurück bis Sonntag
+        delta_days = (last_day.weekday() - 6) % 7
+        last_sun = last_day - timedelta(days=delta_days)
+        # Regel: Übergang 01:00 UTC am letzten Sonntag
+        return last_sun.replace(hour=1, minute=0, second=0, microsecond=0)
+
+    dt_utc = dt.astimezone(timezone.utc)
+    year = dt_utc.year
+    dst_start = last_sunday_utc(year, 3)   # letzter Sonntag im März, 01:00 UTC -> Begin DST (CEST)
+    dst_end = last_sunday_utc(year, 10)    # letzter Sonntag im Okt, 01:00 UTC -> Ende DST (zurück zu CET)
+
+    # Falls Termin im Jan/Feb aber dst_end gehört zum Vorjahr? Die obige Definition passt,
+    # weil wir immer die Grenzen im gleichen Jahr berechnen und Vergleiche gegen dt_utc machen.
+    # Für Datumsende Dez ist ebenfalls ok.
+
+    is_dst = dst_start <= dt_utc < dst_end
+    offset_hours = 2 if is_dst else 1  # CEST=UTC+2, CET=UTC+1
+
+    local_dt = dt_utc + timedelta(hours=offset_hours)
+    return local_dt.strftime("%d.%m.%Y um %H:%M Uhr")
 
 def get_next_invoice_number(db: Session, tenant_id: int) -> str:
     """
@@ -914,8 +962,14 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
     if not db_appt:
         return None
 
-    # Cache old start time for delta calculation
-    old_start_time = db_appt.start_time
+    # Cache old values for comparison
+    old_data = {
+        "title": db_appt.title,
+        "start_time": db_appt.start_time,
+        "location": db_appt.location,
+        "description": db_appt.description
+    }
+    
     update_data = update.model_dump(exclude_unset=True)
     
     target_level_ids = None
@@ -930,7 +984,7 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
         setattr(db_appt, key, value)
     
     # Calculate difference (Delta) - important for shifting entire series
-    delta = db_appt.start_time - old_start_time
+    delta = db_appt.start_time - old_data["start_time"]
         
     # --- NEU: BLOCK UPDATE LOGIC ---
     if db_appt.block_id:
@@ -964,6 +1018,47 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
     db.add(db_appt)
     db.commit()
     db.refresh(db_appt)
+
+    # --- NEU: Teilnehmer bei Änderungen benachrichtigen ---
+    try:
+        participants = db.query(models.Booking).filter(
+            models.Booking.appointment_id == appointment_id,
+            models.Booking.status == 'confirmed'
+        ).all()
+
+        if participants:
+            formatted_date = format_datetime_de(db_appt.start_time)
+            
+            # Änderungen zusammenfassen
+            changes = []
+            if db_appt.title != old_data["title"]:
+                changes.append(f"Titel: {old_data['title']} -> {db_appt.title}")
+            if db_appt.start_time != old_data["start_time"]:
+                changes.append(f"Zeit: {format_datetime_de(old_data['start_time'])} -> {format_datetime_de(db_appt.start_time)}")
+            if db_appt.location != old_data["location"]:
+                changes.append(f"Ort: {old_data['location'] or '-'} -> {db_appt.location or '-'}")
+            
+            change_text = "\n".join([f"• {c}" for c in changes]) if changes else "Details wurden aktualisiert."
+            
+            for p in participants:
+                notify_user(
+                    db=db,
+                    user_id=p.user_id,
+                    type="booking",  # respektiert notif_email_booking / notif_push_booking
+                    title="Termin aktualisiert",
+                    message=f"Der Termin '{db_appt.title}' wurde aktualisiert.\n\nFolgende Änderungen wurden vorgenommen:\n{change_text}",
+                    url="/bookings",
+                    details={
+                        "Kurs": db_appt.title,
+                        "Termin": formatted_date,
+                        "Ort": db_appt.location or "-",
+                        "Änderungen": ", ".join(changes) if changes else "Allg. Informationen"
+                    }
+                )
+    except Exception as _e:
+        # Silent log; Benachrichtigungsfehler sollen das Speichern nicht verhindern
+        print(f"WARN: Benachrichtigung nach Termin-Update fehlgeschlagen: {_e}")
+
     return db_appt
 
 def delete_appointment(db: Session, appointment_id: int, tenant_id: int):
@@ -983,14 +1078,14 @@ def delete_appointment(db: Session, appointment_id: int, tenant_id: int):
         notify_user(
             db=db,
             user_id=p.user_id,
-            type="alert",
+            type="booking", # Geändert von alert auf booking, da es ein Termin-Event ist
             title="Termin abgesagt",
             message=f"Der Termin '{db_appt.title}' am {formatted_date} wurde leider abgesagt.",
             url="/bookings",
             details={
                 "Kurs": db_appt.title,
-                "Ursprünglicher Termin": formatted_date,
-                "Grund": "Terminabsage durch Hundeschule"
+                "Datum": formatted_date,
+                "Status": "Abgesagt durch Hundeschule"
             }
         )
 
@@ -1520,7 +1615,7 @@ def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, 
             models.User.current_level_id.in_(level_ids)
         ).all()
         for u in users_in_levels:
-            recipient_ids.add(u.id)
+            recipient_ids.add(u[0]) # u ist ein Row-Tuple (id,)
 
     # 2. Zielgruppe: Termin-Teilnehmer (nur bestätigte)
     if db_post.target_appointments:
@@ -1532,37 +1627,39 @@ def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, 
             models.Booking.appointment_id.in_(appt_ids)
         ).all()
         for u in users_in_appts:
-            recipient_ids.add(u.user_id)
+            recipient_ids.add(u[0]) # u ist ein Row-Tuple (user_id,)
 
-    # 3. Fallback: Keine Zielgruppe = Alle Kunden
+    # 3. Fallback: Keine Zielgruppe = Alle aktiven Nutzer des Mandanten
     if not has_specific_targets:
-        all_customers = db.query(models.User.id).filter(
+        all_users = db.query(models.User.id).filter(
             models.User.tenant_id == tenant_id,
-            models.User.is_active == True,
-            models.User.role.in_(['kunde', 'customer'])
+            models.User.is_active == True
         ).all()
-        for u in all_customers:
-            recipient_ids.add(u.id)
+        for u in all_users:
+            recipient_ids.add(u[0]) # u ist ein Row-Tuple (id,)
 
     # 4. Senden (Loop durch alle Empfänger)
     print(f"DEBUG: Sende News an {len(recipient_ids)} Empfänger.")
     
     for uid in recipient_ids:
-        # Autor überspringen (optional)
+        # Autor überspringen
         if uid == author_id: 
             continue
             
-        notify_user(
-            db=db,
-            user_id=uid,
-            type="news",
-            title=f"Neuigkeit: {db_post.title}",
-            message=f"{db_post.content[:100]}..." if len(db_post.content) > 100 else db_post.content,
-            url="/news",
-            details={
-                "Titel": db_post.title
-            }
-        )
+        try:
+            notify_user(
+                db=db,
+                user_id=uid,
+                type="news",
+                title=f"Neuigkeit: {db_post.title}",
+                message=db_post.content, # Gesamten Inhalt senden, notify_user/Template kürzt ggf. sinnvoll
+                url="/news",
+                details={
+                    "Titel": db_post.title
+                }
+            )
+        except Exception as e:
+            print(f"WARN: Benachrichtigung an User {uid} fehlgeschlagen: {e}")
 
     return db_post
 

@@ -778,6 +778,15 @@ def subscribe_to_push(
     Speichert eine Push-Subscription für den aktuellen User.
     Vermeidet Duplikate durch Prüfung des Endpoints.
     """
+    p256dh = sub_data.keys.get("p256dh")
+    auth_key = sub_data.keys.get("auth")
+
+    # Validierung: Keys sollten eine gewisse Mindestlänge haben
+    # p256dh ist normalerweise ~87-88 chars, auth ist ~22-24 chars.
+    if not p256dh or len(p256dh) < 20 or not auth_key or len(auth_key) < 10:
+        print(f"WARN [Subscribe]: Ungültige Keys empfangen. p256dh len: {len(p256dh) if p256dh else 0}, auth len: {len(auth_key) if auth_key else 0}")
+        raise HTTPException(status_code=400, detail="Invalid subscription keys")
+
     # Bestehende Subscription für diesen Endpoint suchen
     existing = db.query(models.PushSubscription).filter(
         models.PushSubscription.endpoint == sub_data.endpoint,
@@ -786,20 +795,21 @@ def subscribe_to_push(
     
     if existing:
         # Falls vorhanden, p256dh und auth aktualisieren
-        existing.p256dh = sub_data.keys["p256dh"]
-        existing.auth = sub_data.keys["auth"]
+        existing.p256dh = p256dh
+        existing.auth = auth_key
     else:
         # Neu anlegen
         new_sub = models.PushSubscription(
             user_id=current_user.id,
             tenant_id=current_user.tenant_id,
             endpoint=sub_data.endpoint,
-            p256dh=sub_data.keys["p256dh"],
-            auth=sub_data.keys["auth"]
+            p256dh=p256dh,
+            auth=auth_key
         )
         db.add(new_sub)
     
     db.commit()
+    print(f"DEBUG [Subscribe]: Subscription erfolgreich für User {current_user.id} gespeichert. (p256dh len: {len(p256dh)})")
     return {"status": "success"}
 
 @app.post("/api/notifications/test")

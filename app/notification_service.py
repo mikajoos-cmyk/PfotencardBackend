@@ -2,9 +2,24 @@
 import json
 import resend
 from pywebpush import webpush, WebPushException
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.backends import default_backend
 from sqlalchemy.orm import Session
 from . import models
 from .config import settings
+
+# --- Monkeypatch für pywebpush / cryptography Inkompatibilität ---
+# In neueren cryptography Versionen muss ec.SECP256R1() als Instanz übergeben werden.
+# pywebpush 1.14.0 übergibt stattdessen die Klasse, was zum TypeError führt.
+original_generate_private_key = ec.generate_private_key
+
+def patched_generate_private_key(curve, backend=None):
+    if curve == ec.SECP256R1 and not isinstance(curve, ec.EllipticCurve):
+        curve = curve()
+    return original_generate_private_key(curve, backend)
+
+ec.generate_private_key = patched_generate_private_key
+# -----------------------------------------------------------------
 
 # Config laden
 resend.api_key = settings.RESEND_API_KEY
@@ -104,14 +119,24 @@ def send_push(db: Session, subscription: models.PushSubscription, title: str, me
             print(f"DEBUG [Push]: FEHLER - Fehlende Keys für Subscription ID {subscription.id}")
             return
 
+        # Sicherstellen, dass die Keys korrektes Padding haben (manche Browser senden es ohne)
+        def fix_padding(data: str):
+            missing_padding = len(data) % 4
+            if missing_padding:
+                data += '=' * (4 - missing_padding)
+            return data
+
         webpush(
             subscription_info={
                 "endpoint": subscription.endpoint,
-                "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth}
+                "keys": {
+                    "p256dh": fix_padding(subscription.p256dh), 
+                    "auth": fix_padding(subscription.auth)
+                }
             },
             data=payload,
             vapid_private_key=VAPID_PRIVATE_KEY,
-            vapid_claims=VAPID_CLAIMS
+            vapid_claims=VAPID_CLAIMS.copy()
         )
         print("DEBUG [Push]: ✅ Erfolgreich an Push-Service übergeben.")
         
@@ -129,7 +154,10 @@ def send_push(db: Session, subscription: models.PushSubscription, title: str, me
                 db.rollback()
                 
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
         print(f"DEBUG [Push]: ❌ Generischer Fehler: {str(e)}")
+        print(f"DEBUG [Push]: Traceback: {error_details}")
 
 def notify_user(db: Session, user_id: int, type: str, title: str, message: str, url: str = "/", details: dict = None):
     """
