@@ -111,6 +111,9 @@ def send_push(db: Session, subscription: models.PushSubscription, title: str, me
             "title": title,
             "body": message,
             "url": url,
+            "data": {
+                "url": url
+            },
             "icon": "/paw.png"
         })
         

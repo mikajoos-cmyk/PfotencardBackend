@@ -728,6 +728,23 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
         if tt:
             create_achievement(db, user.id, tenant_id, tt.id, db_tx.id, dog_id=transaction.dog_id)
 
+    # User über Aufladung informieren
+    if transaction.type == "Aufladung":
+        notify_user(
+            db=db,
+            user_id=user.id,
+            type="system",
+            title="Guthaben aufgeladen",
+            message=f"Dein Guthaben wurde erfolgreich um {total_change}€ aufgeladen.",
+            url="/transactions",
+            details={
+                "Betrag": f"{transaction.amount}€",
+                "Bonus": f"{bonus}€" if bonus > 0 else "Keiner",
+                "Gesamt": f"{total_change}€",
+                "Neuer Stand": f"{new_balance}€"
+            }
+        )
+
     db.commit()
     db.refresh(db_tx)
     return db_tx
@@ -794,7 +811,7 @@ def create_document(db: Session, user_id: int, tenant_id: int, file_name: str, f
         type="system", 
         title="Neues Dokument",
         message="Ein neues Dokument wurde in deiner Akte hinterlegt.",
-        url="/profile",
+        url="/dashboard",
         details={
             "Dokument": file_name,
             "Datum": format_datetime_de(doc.upload_date)
@@ -1047,7 +1064,7 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
                     type="booking",  # respektiert notif_email_booking / notif_push_booking
                     title="Termin aktualisiert",
                     message=f"Der Termin '{db_appt.title}' wurde aktualisiert.\n\nFolgende Änderungen wurden vorgenommen:\n{change_text}",
-                    url="/bookings",
+                    url="/appointments",
                     details={
                         "Kurs": db_appt.title,
                         "Termin": formatted_date,
@@ -1081,7 +1098,7 @@ def delete_appointment(db: Session, appointment_id: int, tenant_id: int):
             type="booking", # Geändert von alert auf booking, da es ein Termin-Event ist
             title="Termin abgesagt",
             message=f"Der Termin '{db_appt.title}' am {formatted_date} wurde leider abgesagt.",
-            url="/bookings",
+            url="/appointments",
             details={
                 "Kurs": db_appt.title,
                 "Datum": formatted_date,
@@ -1153,7 +1170,7 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
         type="booking",
         title=msg_title,
         message=msg_body,
-        url="/bookings",
+        url="/appointments",
         details={
             "Kurs": appt.title,
             "Datum": format_datetime_de(appt.start_time),
@@ -1273,7 +1290,7 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
                 type="booking",
                 title="Platz bestätigt (Nachgerückt)",
                 message=f"Gute Nachrichten! Du bist für '{booking.appointment.title}' nachgerückt.",
-                url="/bookings",
+                url="/appointments",
                 details={
                     "Kurs": booking.appointment.title,
                     "Datum": format_datetime_de(booking.appointment.start_time),
@@ -1288,7 +1305,7 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
         type="booking",
         title="Buchung storniert",
         message=f"Du hast deine Teilnahme an '{booking.appointment.title}' storniert.",
-        url="/bookings",
+        url="/appointments",
         details={
             "Kurs": booking.appointment.title,
             "Datum": format_datetime_de(booking.appointment.start_time)
@@ -1520,7 +1537,7 @@ def check_and_send_reminders(db: Session):
                 type="reminder",
                 title="Erinnerung: Termin beginnt bald",
                 message=f"Dein Termin '{appt.title}' beginnt in ca. {offset} Minuten.",
-                url="/bookings",
+                url="/appointments",
                 details={
                     "Kurs": appt.title,
                     "Beginn": format_datetime_de(appt.start_time),
@@ -1804,7 +1821,7 @@ def create_chat_message(db: Session, msg: schemas.ChatMessageCreate, sender_id: 
         type="chat",
         title=f"Neue Nachricht von {new_message.sender.name}",
         message=new_message.content[:100] if not new_message.file_url else "Datei gesendet",
-        url=f"/chat/{new_message.sender_id}"
+        url=f"/chat/{new_message.sender.auth_id or new_message.sender_id}"
     )
 
     return new_message

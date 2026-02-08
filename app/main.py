@@ -1452,20 +1452,45 @@ def send_chat_message(
 def get_conversations(current_user: schemas.User = Depends(auth.get_current_active_user), db: Session = Depends(get_db)):
     return crud.get_chat_conversations_for_user(db, current_user)
 
-@app.get("/api/chat/{other_user_id}", response_model=List[schemas.ChatMessage])
+@app.get("/api/chat/{other_user_identifier}", response_model=List[schemas.ChatMessage])
 def read_chat_history(
-    other_user_id: int, db: Session = Depends(get_db),
+    other_user_identifier: str, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
+    # Resolve identifier (could be ID or UUID)
+    other_user_id = None
+    if other_user_identifier.isdigit():
+        other_user_id = int(other_user_identifier)
+    else:
+        # Try as UUID
+        db_user = crud.get_user_by_auth_id(db, other_user_identifier, tenant.id)
+        if db_user:
+            other_user_id = db_user.id
+            
+    if not other_user_id:
+        raise HTTPException(status_code=404, detail="User not found")
+        
     return crud.get_chat_history(db, tenant.id, current_user.id, other_user_id)
 
-@app.post("/api/chat/{other_user_id}/read")
+@app.post("/api/chat/{other_user_identifier}/read")
 def mark_chat_read(
-    other_user_id: int, db: Session = Depends(get_db),
+    other_user_identifier: str, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
+    # Resolve identifier
+    other_user_id = None
+    if other_user_identifier.isdigit():
+        other_user_id = int(other_user_identifier)
+    else:
+        db_user = crud.get_user_by_auth_id(db, other_user_identifier, tenant.id)
+        if db_user:
+            other_user_id = db_user.id
+
+    if not other_user_id:
+        raise HTTPException(status_code=404, detail="User not found")
+
     crud.mark_messages_as_read(db, tenant.id, current_user.id, other_user_id)
     return {"ok": True}
 @app.post("/api/appointments/{appointment_id}/grant-progress")
