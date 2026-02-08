@@ -1014,25 +1014,27 @@ def read_user_public(auth_id: str, db: Session = Depends(get_db), tenant: models
 
 @app.get("/api/users/{user_id}", response_model=schemas.User)
 def read_user(
-    user_id: int, db: Session = Depends(get_db),
+    user_id: str, db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
-    db_user = crud.get_user(db, user_id, tenant.id)
+    resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
+    db_user = crud.get_user(db, resolved_id, tenant.id)
     if not db_user: raise HTTPException(status_code=404, detail="User not found")
-    if current_user.role in ['admin', 'mitarbeiter'] or current_user.id == user_id:
+    if current_user.role in ['admin', 'mitarbeiter'] or current_user.id == resolved_id:
         return db_user
     raise HTTPException(status_code=403, detail="Not authorized")
 
 @app.put("/api/users/{user_id}", response_model=schemas.User)
 def update_user_endpoint(
-    user_id: int, user_update: schemas.UserUpdate, db: Session = Depends(get_db),
+    user_id: str, user_update: schemas.UserUpdate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
-    if current_user.id != user_id and current_user.role not in ['admin', 'mitarbeiter']:
+    resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
+    if current_user.id != resolved_id and current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    updated = crud.update_user(db, user_id, tenant.id, user_update)
+    updated = crud.update_user(db, resolved_id, tenant.id, user_update)
     if not updated: raise HTTPException(status_code=404, detail="User not found")
     if user_update.password and updated.auth_id:
         try:
@@ -1042,17 +1044,18 @@ def update_user_endpoint(
 
 @app.put("/api/users/{user_id}/status", response_model=schemas.User)
 def update_user_status(
-    user_id: int, status: schemas.UserStatusUpdate, db: Session = Depends(get_db),
+    user_id: str, status: schemas.UserStatusUpdate, db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    return crud.update_user_status(db, user_id, tenant.id, status)
+    resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
+    return crud.update_user_status(db, resolved_id, tenant.id, status)
     
 @app.delete("/api/users/{user_id}")
 def delete_user_endpoint(
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user),
@@ -1060,11 +1063,12 @@ def delete_user_endpoint(
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    if current_user.id == user_id:
+    resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
+    if current_user.id == resolved_id:
         raise HTTPException(status_code=400, detail="You cannot delete yourself")
     
     # Optional: Verhindern, dass Mitarbeiter Admins löschen
-    db_user = crud.get_user(db, user_id, tenant.id)
+    db_user = crud.get_user(db, resolved_id, tenant.id)
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
         
@@ -1074,7 +1078,7 @@ def delete_user_endpoint(
     # Sichern der Auth ID vor dem Löschen in der DB
     auth_id = db_user.auth_id
 
-    success = crud.delete_user(db, user_id, tenant.id)
+    success = crud.delete_user(db, resolved_id, tenant.id)
     if not success:
         raise HTTPException(status_code=404, detail="User not found")
         
@@ -1091,7 +1095,7 @@ def delete_user_endpoint(
 
 @app.put("/api/users/{user_id}/level", response_model=schemas.User)
 def manual_level_up(
-    user_id: int, level_update: schemas.UserLevelUpdate, 
+    user_id: str, level_update: schemas.UserLevelUpdate, 
     dog_id: Optional[int] = None, # NEU
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
@@ -1100,21 +1104,22 @@ def manual_level_up(
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
     
+    resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
     if dog_id:
         dog = crud.get_dog(db, dog_id, tenant.id)
-        if not dog or dog.owner_id != user_id:
+        if not dog or dog.owner_id != resolved_id:
              raise HTTPException(status_code=404, detail="Dog not found")
         dog.current_level_id = level_update.level_id
         db.add(dog)
         db.commit()
         db.refresh(dog)
-        return crud.get_user(db, user_id, tenant.id)
+        return crud.get_user(db, resolved_id, tenant.id)
         
-    return crud.update_user_level(db, user_id, level_update.level_id)
+    return crud.update_user_level(db, resolved_id, level_update.level_id)
 
 @app.post("/api/users/{user_id}/level-up", response_model=schemas.User)
 def perform_level_up_endpoint(
-    user_id: int, 
+    user_id: str, 
     dog_id: Optional[int] = None, # NEU
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
@@ -1122,20 +1127,22 @@ def perform_level_up_endpoint(
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
-    crud.perform_level_up(db, user_id, tenant.id, dog_id=dog_id)
-    return crud.get_user(db, user_id, tenant.id)
+    resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
+    crud.perform_level_up(db, resolved_id, tenant.id, dog_id=dog_id)
+    return crud.get_user(db, resolved_id, tenant.id)
 
 @app.post("/api/users/{user_id}/dogs", response_model=schemas.Dog)
 def create_dog_for_user(
-    user_id: int, 
+    user_id: str, 
     dog: schemas.DogCreate, 
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
-    if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != user_id:
+    resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
+    if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != resolved_id:
         raise HTTPException(status_code=403, detail="Not authorized")
-    return crud.create_dog_for_user(db, dog, user_id, tenant.id)
+    return crud.create_dog_for_user(db, dog, resolved_id, tenant.id)
 
 @app.post("/api/transactions", response_model=schemas.Transaction)
 def create_transaction(
@@ -1190,22 +1197,71 @@ def delete_dog(
         
     # 2. Storage Cleanup (Bild löschen)
     if result.get("image_path"):
-        delete_file_from_storage(supabase, "public_uploads", result["image_path"])
+        # Wir löschen hier aus "public_uploads", da dies der Bucket für öffentliche Bilder ist
+        try:
+            supabase.storage.from_("public_uploads").remove([result["image_path"]])
+        except Exception:
+            pass
         
     return {"ok": True}
 
-
-@app.post("/api/users/{user_id}/documents", response_model=schemas.Document)
-async def upload_document(
-    user_id: int, upload_file: UploadFile = File(...),
+@app.post("/api/dogs/{dog_id}/image", response_model=schemas.Dog)
+async def upload_dog_image(
+    dog_id: int, 
+    upload_file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.verify_active_subscription),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
-    if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != user_id:
+    db_dog = crud.get_dog(db, dog_id, tenant.id)
+    if not db_dog: raise HTTPException(404, "Dog not found")
+    if current_user.role not in ['admin', 'mitarbeiter'] and db_dog.owner_id != current_user.id:
+        raise HTTPException(403, "Not authorized")
+
+    file_content = await upload_file.read()
+    # Eindeutiger Pfad im public_uploads bucket
+    file_extension = upload_file.filename.split('.')[-1] if '.' in upload_file.filename else 'jpg'
+    file_path_in_bucket = f"dogs/{tenant.id}/{dog_id}_{int(datetime.now().timestamp())}.{file_extension}"
+    
+    try:
+        # Vorheriges Bild löschen falls vorhanden
+        if db_dog.image_url:
+            try:
+                supabase.storage.from_("public_uploads").remove([db_dog.image_url])
+            except:
+                pass
+
+        supabase.storage.from_("public_uploads").upload(
+            path=file_path_in_bucket, file=file_content,
+            file_options={"content-type": upload_file.content_type, "upsert": "true"}
+        )
+        # Öffentliche URL abrufen
+        res = supabase.storage.from_("public_uploads").get_public_url(file_path_in_bucket)
+        public_url = res # get_public_url returns the string in newer versions or a dict in older ones. 
+        # In this project, it seems to be used for logo_url too.
+        
+        # In der DB speichern wir den Pfad im Bucket, um ihn später löschen zu können, 
+        # oder wir speichern die URL. Hier speichern wir den Pfad.
+        db_dog.image_url = file_path_in_bucket
+        db.commit()
+        db.refresh(db_dog)
+        return db_dog
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.post("/api/users/{user_id}/documents", response_model=schemas.Document)
+async def upload_document(
+    user_id: str, upload_file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+):
+    resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
+    if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != resolved_id:
         raise HTTPException(status_code=403, detail="Not authorized")
     file_content = await upload_file.read()
-    file_path_in_bucket = f"{tenant.id}/{user_id}/{upload_file.filename}"
+    file_path_in_bucket = f"{tenant.id}/{resolved_id}/{upload_file.filename}"
     try:
         supabase.storage.from_("documents").upload(
             path=file_path_in_bucket, file=file_content,
@@ -1213,7 +1269,7 @@ async def upload_document(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-    return crud.create_document(db, user_id, tenant.id, upload_file.filename, upload_file.content_type, file_path_in_bucket)
+    return crud.create_document(db, resolved_id, tenant.id, upload_file.filename, upload_file.content_type, file_path_in_bucket)
 
 @app.get("/api/documents/{document_id}")
 def read_document(

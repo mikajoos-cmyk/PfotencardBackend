@@ -201,6 +201,7 @@ class Dog(Base):
     breed = Column(String(255))
     birth_date = Column(Date)
     chip = Column(String(50), nullable=True)
+    image_url = Column(String(512), nullable=True)
     
     # NEU: Jeder Hund hat sein eigenes Level
     current_level_id = Column(Integer, ForeignKey('levels.id', ondelete="SET NULL"), nullable=True)

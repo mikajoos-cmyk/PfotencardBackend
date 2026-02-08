@@ -144,6 +144,7 @@ class DogBase(BaseModel):
     breed: Optional[str] = None
     birth_date: Optional[date] = None
     chip: Optional[str] = None
+    image_url: Optional[str] = None
     current_level_id: Optional[int] = None
 
 class DogCreate(DogBase):

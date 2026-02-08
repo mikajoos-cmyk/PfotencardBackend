@@ -492,7 +492,7 @@ def delete_dog(db: Session, dog_id: int, tenant_id: int):
     if not db_dog:
         return None
         
-    image_path_to_delete = db_dog.image_url # Falls du die URL/Pfad speicherst
+    image_path_to_delete = db_dog.image_url
     
     db.delete(db_dog)
     db.commit()

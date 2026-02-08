@@ -93,7 +93,6 @@ async def get_current_tenant(
         raise HTTPException(status_code=404, detail="No tenant specified (subdomain missing)")
 
     tenant = crud.get_tenant_by_subdomain(db, subdomain=subdomain)
-    print(tenant, 2387764238312313123428)
     if not tenant:
         raise HTTPException(status_code=404, detail=f"School '{subdomain}' not found")
         
@@ -101,6 +100,26 @@ async def get_current_tenant(
         raise HTTPException(status_code=400, detail="School account is inactive")
 
     return tenant
+
+
+def resolve_user_id(db: Session, user_id_str: str, tenant_id: int) -> int:
+    """
+    Hilfsfunktion, die eine user_id (Ganzzahl oder UUID-String) in die 
+    interne numerische ID auflöst.
+    """
+    # 1. Versuchen als Integer zu parsen
+    try:
+        return int(user_id_str)
+    except ValueError:
+        pass
+
+    # 2. Wenn kein Integer, als UUID / auth_id behandeln
+    user = crud.get_user_by_auth_id(db, user_id_str, tenant_id)
+    if user:
+        return user.id
+    
+    # 3. Wenn nicht gefunden, Exception werfen
+    raise HTTPException(status_code=404, detail="User not found (ID resolution failed)")
 
 
 async def get_current_active_user(
