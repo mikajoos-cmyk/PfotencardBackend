@@ -534,18 +534,23 @@ def check_level_up_eligibility(db: Session, user: models.User, dog_id: Optional[
     if not requirements:
         return True
 
-    # Split requirements into exam and non-exam
-    exam_reqs = [r for r in requirements if r.training_type and r.training_type.category == 'exam']
-    non_exam_reqs = [r for r in requirements if not (r.training_type and r.training_type.category == 'exam')]
+    # Split requirements into exam and non-exam (robust category check)
+    def _is_exam(cat: Optional[str]) -> bool:
+        return (cat or '').strip().lower() in ('exam', 'examination', 'prüfung', 'pruefung')
+    exam_reqs = [r for r in requirements if r.training_type and _is_exam(getattr(r.training_type, 'category', None))]
+    non_exam_reqs = [r for r in requirements if not (r.training_type and _is_exam(getattr(r.training_type, 'category', None)))]
 
-    unconsumed_achievements = db.query(
+    q = db.query(
         models.Achievement.training_type_id, 
         func.count(models.Achievement.id)
     ).filter(
         models.Achievement.user_id == user.id,
         models.Achievement.is_consumed == False,
         models.Achievement.tenant_id == user.tenant_id
-    ).group_by(models.Achievement.training_type_id).all()
+    )
+    if dog_id:
+        q = q.filter(models.Achievement.dog_id == dog_id)
+    unconsumed_achievements = q.group_by(models.Achievement.training_type_id).all()
     
     achievement_map = {TypeId: Count for TypeId, Count in unconsumed_achievements}
 
@@ -589,19 +594,24 @@ def are_non_exam_requirements_met(db: Session, user: models.User, current_level:
     if not requirements:
         return True
 
-    # Check non-exam requirements
-    non_exam_reqs = [r for r in requirements if not (r.training_type and r.training_type.category == 'exam')]
+    # Check non-exam requirements (robust category check)
+    def _is_exam(cat: Optional[str]) -> bool:
+        return (cat or '').strip().lower() in ('exam', 'examination', 'prüfung', 'pruefung')
+    non_exam_reqs = [r for r in requirements if not (r.training_type and _is_exam(getattr(r.training_type, 'category', None)))]
     if not non_exam_reqs:
         return True
 
-    unconsumed_achievements = db.query(
+    q = db.query(
         models.Achievement.training_type_id, 
         func.count(models.Achievement.id)
     ).filter(
         models.Achievement.user_id == user.id,
         models.Achievement.is_consumed == False,
         models.Achievement.tenant_id == user.tenant_id
-    ).group_by(models.Achievement.training_type_id).all()
+    )
+    if dog_id:
+        q = q.filter(models.Achievement.dog_id == dog_id)
+    unconsumed_achievements = q.group_by(models.Achievement.training_type_id).all()
     
     achievement_map = {TypeId: Count for TypeId, Count in unconsumed_achievements}
 
@@ -761,14 +771,14 @@ def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_
     )
 
     # CHECK: Premature Exam?
-    # check if 'exam' category
+    # robust check for exam category (supports 'Prüfung' etc.)
     tt = db.query(models.TrainingType).filter(models.TrainingType.id == training_type_id).first()
-    if tt and tt.category == 'exam':
+    cat = getattr(tt, 'category', None) if tt else None
+    if cat and (cat.strip().lower() in ('exam', 'examination', 'prüfung', 'pruefung')):
         user = get_user(db, user_id, tenant_id)
-        if user:
-             if not are_non_exam_requirements_met(db, user, dog_id=dog_id):
-                 # Premature exam! Mark as consumed so it doesn't count.
-                 ach.is_consumed = True
+        if user and not are_non_exam_requirements_met(db, user, dog_id=dog_id):
+            # Premature exam! Mark as consumed so it doesn't count now.
+            ach.is_consumed = True
 
     db.add(ach)
     return ach

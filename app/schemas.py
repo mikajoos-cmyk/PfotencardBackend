@@ -278,7 +278,7 @@ class TransactionBase(BaseModel):
     invoice_number: Optional[str] = None
 
 class TransactionCreate(TransactionBase):
-    user_id: int
+    user_id: Any
     dog_id: Optional[int] = None # NEU
     training_type_id: Optional[int] = None 
 

@@ -1152,11 +1152,16 @@ def create_transaction(
 ):
     if current_user.role not in ['admin', 'mitarbeiter']:
          raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # NEU: user_id auflösen (kann ID oder UUID sein)
+    resolved_id = auth.resolve_user_id(db, str(transaction.user_id), tenant.id)
+    transaction.user_id = resolved_id
+    
     return crud.create_transaction(db, transaction, current_user.id, tenant.id)
 
 @app.get("/api/transactions", response_model=List[schemas.Transaction])
 def read_transactions(
-    user_id: Optional[int] = None, db: Session = Depends(get_db),
+    user_id: Optional[str] = None, db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
@@ -1166,7 +1171,9 @@ def read_transactions(
     elif current_user.role in ['mitarbeiter', 'staff'] and not user_id:
         query = query.filter(models.Transaction.booked_by_id == current_user.id)
     elif user_id:
-        query = query.filter(models.Transaction.user_id == user_id)
+        # user_id auflösen
+        resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
+        query = query.filter(models.Transaction.user_id == resolved_id)
     return query.order_by(models.Transaction.date.desc()).all()
 
 @app.put("/api/dogs/{dog_id}", response_model=schemas.Dog)
