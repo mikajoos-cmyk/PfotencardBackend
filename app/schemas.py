@@ -190,6 +190,7 @@ class UserBase(BaseModel):
         "can_create_courses": False,
         "can_edit_status": False,
         "can_delete_customers": False,
+        "can_edit_customers": False,
         "can_create_messages": False
     }
 
