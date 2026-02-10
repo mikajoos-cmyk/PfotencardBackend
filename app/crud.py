@@ -513,7 +513,12 @@ def check_level_up_eligibility(db: Session, user: models.User, dog_id: Optional[
         current_level_id = user.current_level_id
 
     if not current_level_id:
-        return False
+        # Fallback: Erstes Level des Mandanten nehmen, falls noch keins gesetzt
+        first_level = db.query(models.Level).filter(models.Level.tenant_id == user.tenant_id).order_by(models.Level.rank_order.asc()).first()
+        if first_level:
+            current_level_id = first_level.id
+        else:
+            return False
 
     current_level = db.query(models.Level).filter(models.Level.id == current_level_id).first()
     next_level = db.query(models.Level).filter(
@@ -549,23 +554,24 @@ def check_level_up_eligibility(db: Session, user: models.User, dog_id: Optional[
         models.Achievement.tenant_id == user.tenant_id
     )
     if dog_id:
-        q = q.filter(models.Achievement.dog_id == dog_id)
+        # Berücksichtige auch ältere Einträge ohne dog_id (Legacy), damit manuell gebuchte Stunden nicht "verloren" sind
+        q = q.filter(or_(models.Achievement.dog_id == dog_id, models.Achievement.dog_id.is_(None)))
     unconsumed_achievements = q.group_by(models.Achievement.training_type_id).all()
     
     achievement_map = {TypeId: Count for TypeId, Count in unconsumed_achievements}
-
+    
     # 1. Check non-exam requirements first
     for req in non_exam_reqs:
         available = achievement_map.get(req.training_type_id, 0)
         if available < req.required_count:
             return False
-
+    
     # 2. Only if all non-exam requirements are met, check exams
     for req in exam_reqs:
         available = achievement_map.get(req.training_type_id, 0)
         if available < req.required_count:
             return False
-
+    
     return True
 
 
@@ -579,7 +585,12 @@ def are_non_exam_requirements_met(db: Session, user: models.User, current_level:
             target_level_id = user.current_level_id
             
         if not target_level_id:
-            return False
+            # Fallback: Erstes Level des Mandanten nehmen, falls noch keins gesetzt
+            first_level = db.query(models.Level).filter(models.Level.tenant_id == user.tenant_id).order_by(models.Level.rank_order.asc()).first()
+            if first_level:
+                target_level_id = first_level.id
+            else:
+                return True # Keine Level vorhanden -> Anforderungen technisch erfüllt
             
         current_level = db.query(models.Level).filter(models.Level.id == target_level_id).first()
         if not current_level: return False
@@ -597,8 +608,16 @@ def are_non_exam_requirements_met(db: Session, user: models.User, current_level:
     # Check non-exam requirements (robust category check)
     def _is_exam(cat: Optional[str]) -> bool:
         return (cat or '').strip().lower() in ('exam', 'examination', 'prüfung', 'pruefung')
+    
+    # DEBUG: Alle Requirements des Levels loggen
+    # print(f"DEBUG REQS: Level {current_level.name} (ID: {current_level.id}) has {len(requirements)} requirements")
+    # for r in requirements:
+    #     cat_r = getattr(r.training_type, 'category', 'N/A')
+    #     print(f"DEBUG REQS: Req ID {r.id}, Type {r.training_type.name}, Category {cat_r}, Count {r.required_count}")
+
     non_exam_reqs = [r for r in requirements if not (r.training_type and _is_exam(getattr(r.training_type, 'category', None)))]
     if not non_exam_reqs:
+        # print(f"DEBUG REQS: No non-exam requirements for Level {current_level.name}")
         return True
 
     q = db.query(
@@ -610,16 +629,21 @@ def are_non_exam_requirements_met(db: Session, user: models.User, current_level:
         models.Achievement.tenant_id == user.tenant_id
     )
     if dog_id:
-        q = q.filter(models.Achievement.dog_id == dog_id)
+        # Berücksichtige auch ältere Einträge ohne dog_id (Legacy), damit manuell gebuchte Stunden nicht "verloren" sind
+        q = q.filter(or_(models.Achievement.dog_id == dog_id, models.Achievement.dog_id.is_(None)))
     unconsumed_achievements = q.group_by(models.Achievement.training_type_id).all()
     
     achievement_map = {TypeId: Count for TypeId, Count in unconsumed_achievements}
-
+    # print(f"DEBUG REQS: Unconsumed achievements map: {achievement_map}")
+    
     for req in non_exam_reqs:
         available = achievement_map.get(req.training_type_id, 0)
+        # print(f"DEBUG REQS: Checking {req.training_type.name}: available={available}, required={req.required_count}")
         if available < req.required_count:
+            # print(f"DEBUG REQS: Requirement {req.training_type.name} NOT MET")
             return False
             
+    # print(f"DEBUG REQS: ALL non-exam requirements MET")
     return True
 
 def perform_level_up(db: Session, user_id: int, tenant_id: int, dog_id: Optional[int] = None):
@@ -774,13 +798,32 @@ def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_
     # robust check for exam category (supports 'Prüfung' etc.)
     tt = db.query(models.TrainingType).filter(models.TrainingType.id == training_type_id).first()
     cat = getattr(tt, 'category', None) if tt else None
-    if cat and (cat.strip().lower() in ('exam', 'examination', 'prüfung', 'pruefung')):
+    
+    ach_is_exam = cat and (cat.strip().lower() in ('exam', 'examination', 'prüfung', 'pruefung'))
+    
+    if ach_is_exam:
         user = get_user(db, user_id, tenant_id)
-        if user and not are_non_exam_requirements_met(db, user, dog_id=dog_id):
-            # Premature exam! Mark as consumed so it doesn't count now.
-            ach.is_consumed = True
+        if user:
+            # print(f"DEBUG EXAM CHECK: user={user.id}, dog_id={dog_id}, tt={training_type_id}")
+            if not are_non_exam_requirements_met(db, user, dog_id=dog_id):
+                # Premature exam! Mark as consumed so it doesn't count now.
+                # print(f"DEBUG EXAM CHECK: Premature exam for user {user.id}, marking as consumed")
+                ach.is_consumed = True
+            else:
+                # print(f"DEBUG EXAM CHECK: Requirements met for user {user.id}, marking as NOT consumed")
+                ach.is_consumed = False
 
     db.add(ach)
+    db.flush() # ID vergeben
+
+    # WICHTIG: Kein automatischer Level-Up mehr gewünscht!
+    # Der Benutzer muss den Button im Frontend nun selbst klicken.
+    
+    # if ach_is_exam and not ach.is_consumed:
+    #     user = get_user(db, user_id, tenant_id)
+    #     if check_level_up_eligibility(db, user, dog_id=dog_id):
+    #         perform_level_up(db, user_id, tenant_id, dog_id=dog_id)
+
     return ach
 
 # Update: Filter für user_id hinzugefügt, um spezifische Kundenhistorien zu laden
