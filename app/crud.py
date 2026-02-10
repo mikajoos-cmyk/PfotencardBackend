@@ -1385,10 +1385,13 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
         raise HTTPException(status_code=400, detail=f"Ungenügendes Guthaben ({user.balance}€). Erforderlich: {price}€")
         
     # NEU: Double-Billing Check (Inkl. dog_id Prüfung falls vorhanden)
+    # Wir machen die Beschreibung eindeutig durch Einbeziehung der appointment_id
+    billing_description = f"Abrechnung: {appt.title} (Termin-ID: {appt.id})"
+    
     existing_tx_query = db.query(models.Transaction).filter(
         models.Transaction.user_id == user.id,
         models.Transaction.tenant_id == tenant_id,
-        models.Transaction.description == f"Abrechnung: {appt.title}"
+        models.Transaction.description == billing_description
     )
     
     # Optional: Falls mehrere Hunde denselben Kurs machen, könnte man hier dog_id prüfen
@@ -1409,7 +1412,7 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
         tenant_id=tenant_id,
         user_id=user.id,
         type=training_type.name,
-        description=f"Abrechnung: {appt.title}",
+        description=billing_description,
         amount=-price,
         balance_after=user.balance - price,
         booked_by_id=booked_by_id or user.id 
@@ -1417,6 +1420,7 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
     user.balance -= price
     
     db.add(transaction)
+    db.flush() # NEU: Damit transaction.id für Achievement verfügbar ist
     
     # WICHTIG: Prüfen ob Auto-Progress aktiv ist bevor Achievement erstellt wird
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
