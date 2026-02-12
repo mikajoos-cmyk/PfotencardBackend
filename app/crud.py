@@ -1424,6 +1424,10 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
          
     price = appt.price if appt.price is not None else training_type.default_price
     
+    # VIP-Check: VIPs zahlen nichts
+    if user.is_vip:
+        price = 0
+    
     if user.balance < price:
         raise HTTPException(status_code=400, detail=f"Ungenügendes Guthaben ({user.balance}€). Erforderlich: {price}€")
         
@@ -1450,20 +1454,20 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
             db.commit()
         raise HTTPException(status_code=400, detail="Bereits abgerechnet.")
 
-    # Transaktion erstellen
-    transaction = models.Transaction(
-        tenant_id=tenant_id,
-        user_id=user.id,
-        type=training_type.name,
-        description=billing_description,
-        amount=-price,
-        balance_after=user.balance - price,
-        booked_by_id=booked_by_id or user.id 
-    )
-    user.balance -= price
-    
-    db.add(transaction)
-    db.flush() # NEU: Damit transaction.id für Achievement verfügbar ist
+    # Transaktion erstellen (Nur wenn Preis > 0 oder VIP-Info gewünscht? Hier: Nur bei Preis > 0)
+    if price > 0:
+        transaction = models.Transaction(
+            tenant_id=tenant_id,
+            user_id=user.id,
+            type=training_type.name,
+            description=billing_description,
+            amount=-price,
+            balance_after=user.balance - price,
+            booked_by_id=booked_by_id or user.id 
+        )
+        user.balance -= price
+        db.add(transaction)
+        db.flush() # NEU: Damit transaction.id für Achievement verfügbar ist
     
     # WICHTIG: Prüfen ob Auto-Progress aktiv ist bevor Achievement erstellt wird
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
@@ -1482,7 +1486,9 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
         existing_achievement = achievement_query.first()
         
         if not existing_achievement:
-            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=transaction.id, date_achieved=appt.start_time, dog_id=booking.dog_id)
+            # transaction.id ist None falls price == 0
+            t_id = transaction.id if price > 0 else None
+            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=t_id, date_achieved=appt.start_time, dog_id=booking.dog_id)
             db.flush() 
     
     booking.is_billed = True # NEU: Als abgerechnet markieren
