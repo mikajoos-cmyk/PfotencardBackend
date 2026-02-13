@@ -1077,7 +1077,7 @@ def update_user_endpoint(
         user_update.is_active = db_user.is_active
         # E-Mail, Name, Telefon, Passwort bleiben im user_update erhalten und werden geändert
 
-    # 6. SUPABASE SYNC (Auth) - Versuchen, aber bei Fehler nicht abbrechen
+# 6. SUPABASE SYNC (Auth) - Versuchen, aber bei Fehler nicht abbrechen
     password_changed = user_update.password is not None and len(user_update.password) > 0
     name_changed = user_update.name and user_update.name != db_user.name
 
@@ -1088,16 +1088,33 @@ def update_user_endpoint(
             # Admin-Client erstellen (braucht Service Role Key für Admin-Rechte)
             supabase_admin: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
+            # --- LOOP PREVENTION (NEU) ---
+            # Bevor wir Supabase updaten, prüfen wir, ob die E-Mail dort nicht schon korrekt ist.
+            if email_changed:
+                try:
+                    current_auth_user = supabase_admin.auth.admin.get_user_by_id(str(db_user.auth_id))
+                    # Prüfen auf user.email (Struktur der Response beachten)
+                    auth_user_obj = getattr(current_auth_user, 'user', current_auth_user)
+
+                    if auth_user_obj and auth_user_obj.email and auth_user_obj.email.lower() == user_update.email.lower():
+                        print(f"DEBUG: Loop Prevention - Supabase hat bereits die E-Mail {user_update.email}. Überspringe Auth-Update.")
+                        email_changed = False # Wir setzen das Flag zurück
+                except Exception as check_e:
+                    print(f"WARN: Konnte Supabase User Status nicht prüfen: {check_e}")
+            # -----------------------------
+
             attributes = {}
+
+            # WICHTIG: Hier fehlte der Rest der Logik im vorherigen Snippet!
             if email_changed:
                 attributes["email"] = user_update.email
-                
+
                 # Branding-Metadaten für die Bestätigungs-E-Mail hinzufügen
                 tenant_branding = tenant.config.get("branding", {})
                 branding_logo = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
                 branding_color = tenant_branding.get("primary_color") or "#22C55E"
                 branding_name = tenant.name or "Pfotencard"
-                
+
                 attributes["user_metadata"] = {
                     "branding_logo": branding_logo,
                     "branding_color": branding_color,
@@ -1105,28 +1122,17 @@ def update_user_endpoint(
                     "school_name": branding_name
                 }
 
-                # Redirect URL zur Tenant-Subdomain (wie bei Invite/Reset)
+                # Redirect URL zur Tenant-Subdomain
                 redirect_url = f"https://{tenant.subdomain}.pfotencard.de/"
                 if "localhost" in settings.SUPABASE_URL or "127.0.0.1" in settings.SUPABASE_URL:
                     redirect_url = "http://localhost:3000/anmelden"
-                
-                # WICHTIG: email_confirm auf False setzen (oder weglassen), damit Supabase die Bestätigungsmail sendet
-                # Wenn wir branding wollen, MUSS der User den Link klicken.
+
                 attributes["email_confirm"] = False
-                
-                # Wir fügen die redirect_url als Metadaten hinzu, falls das Template sie dort erwartet
                 attributes["user_metadata"]["redirect_to"] = redirect_url
-                
-                # Wir übergeben die redirect_url in den attributes (Supabase Auth Admin API unterstützt dies teilweise in den options)
-                # Bei update_user_by_id gibt es oft kein direktes redirect_to in den attributes, 
-                # aber wir können versuchen es über die GoTrue Admin API zu steuern falls unterstützt.
-                # WICHTIG: Wir setzen redirect_to direkt in die attributes. 
-                # Die Python Lib leitet dies an die GoTrue API weiter.
                 attributes["redirect_to"] = redirect_url
 
             if password_changed:
                 if len(user_update.password) < 6:
-                    # Hier werfen wir einen Fehler, weil ein ungültiges Passwort nicht gespeichert werden sollte
                     raise HTTPException(status_code=400, detail="Passwort muss mindestens 6 Zeichen lang sein.")
                 attributes["password"] = user_update.password
 
@@ -1136,17 +1142,13 @@ def update_user_endpoint(
                 attributes["user_metadata"]["name"] = user_update.name
 
             if attributes:
-                # WICHTIG: Wir nutzen direkt die auth_id aus dem User-Objekt
-                # Wir übergeben die redirect_url in den attributes, falls die API sie dort erwartet (GoTrue admin update)
-                # (Haben wir oben bereits zu attributes hinzugefügt, falls email_changed)
-
                 supabase_admin.auth.admin.update_user_by_id(str(db_user.auth_id), attributes)
                 print(f"DEBUG: Supabase Update erfolgreich. Felder: {list(attributes.keys())}")
 
         except HTTPException:
             raise  # HTTP Exceptions (z.B. Passwort zu kurz) weiterwerfen
         except Exception as e:
-            # Alle anderen Fehler loggen, aber NICHT abbrechen, damit die lokale DB trotzdem aktualisiert wird
+            # Alle anderen Fehler loggen, aber NICHT abbrechen
             print(f"WARNUNG: Supabase Sync fehlgeschlagen (Lokales Update wird trotzdem durchgeführt): {e}")
 
     # 7. LOKALES UPDATE DURCHFÜHREN (Public Schema)
@@ -1158,7 +1160,6 @@ def update_user_endpoint(
     except Exception as e:
         print(f"CRITICAL: Fehler beim lokalen DB Update: {e}")
         raise HTTPException(status_code=500, detail="Fehler beim Speichern in der Datenbank.")
-
 @app.put("/api/users/{user_id}/status", response_model=schemas.User)
 def update_user_status(
     user_id: str, status: schemas.UserStatusUpdate, db: Session = Depends(get_db),
