@@ -36,7 +36,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=15)
-    
+
     if "sub" in to_encode and "email" not in to_encode:
         to_encode["email"] = to_encode["sub"]
 
@@ -60,23 +60,23 @@ def get_subdomain(request: Request) -> Optional[str]:
     host = request.headers.get("host", "")
     if not host:
         return None
-    
+
     domain = host.split(":")[0]
-    
+
     # Ignoriere Localhost oder IP-Adressen (Fallback für Dev)
     if "localhost" in domain or "127.0.0.1" in domain:
         # return request.headers.get("x-tenant-id") # Fallback ID
         return "dev"
 
     parts = domain.split(".")
-    if len(parts) >= 3: 
+    if len(parts) >= 3:
         return parts[0]
-    
+
     return None
 
 
 async def get_current_tenant(
-    request: Request, db: Session = Depends(get_db)
+        request: Request, db: Session = Depends(get_db)
 ) -> models.Tenant:
     """
     Dependency, die den aktuellen Tenant basierend auf der Subdomain lädt.
@@ -95,7 +95,7 @@ async def get_current_tenant(
     tenant = crud.get_tenant_by_subdomain(db, subdomain=subdomain)
     if not tenant:
         raise HTTPException(status_code=404, detail=f"School '{subdomain}' not found")
-        
+
     if not tenant.is_active:
         raise HTTPException(status_code=400, detail="School account is inactive")
 
@@ -104,7 +104,7 @@ async def get_current_tenant(
 
 def resolve_user_id(db: Session, user_id_str: str, tenant_id: int) -> int:
     """
-    Hilfsfunktion, die eine user_id (Ganzzahl oder UUID-String) in die 
+    Hilfsfunktion, die eine user_id (Ganzzahl oder UUID-String) in die
     interne numerische ID auflöst.
     """
     # 1. Versuchen als Integer zu parsen
@@ -117,15 +117,15 @@ def resolve_user_id(db: Session, user_id_str: str, tenant_id: int) -> int:
     user = crud.get_user_by_auth_id(db, user_id_str, tenant_id)
     if user:
         return user.id
-    
+
     # 3. Wenn nicht gefunden, Exception werfen
     raise HTTPException(status_code=404, detail="User not found (ID resolution failed)")
 
 
 async def get_current_active_user(
-    token: str = Depends(oauth2_scheme), 
-    db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(get_current_tenant)
+        token: str = Depends(oauth2_scheme),
+        db: Session = Depends(get_db),
+        tenant: models.Tenant = Depends(get_current_tenant)
 ) -> schemas.User:
     """
     Validiert Token UND prüft, ob der User zum aktuellen Tenant gehört.
@@ -135,56 +135,57 @@ async def get_current_active_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     try:
         payload = jwt.decode(
-            token, 
-            settings.SECRET_KEY, 
-            algorithms=[settings.ALGORITHM], 
-            options={"verify_aud": False} 
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            options={"verify_aud": False}
         )
-        
+
+        # FIX: Wir holen uns 'sub' (die Supabase User UUID) und 'email'
+        auth_id: str = payload.get("sub")
         email: str = payload.get("email")
-        if not email:
-            email = payload.get("sub")
-        
-        if email is None:
+
+        if auth_id is None and email is None:
             raise credentials_exception
-            
-        token_data = schemas.TokenData(email=email)
-        
+
     except JWTError:
         raise credentials_exception
 
-    user = crud.get_user_by_email(db, email=token_data.email, tenant_id=tenant.id)
-    
+    # 1. Versuch: User über die Auth-ID (UUID) finden (Stabil gegen E-Mail-Änderungen)
+    user = None
+    if auth_id:
+        user = crud.get_user_by_auth_id(db, auth_id=auth_id, tenant_id=tenant.id)
+
+    # 2. Versuch: Fallback auf E-Mail (für Legacy User oder Admin-Login ohne Supabase-ID)
+    if not user and email:
+        user = crud.get_user_by_email(db, email=email, tenant_id=tenant.id)
+
     if user is None:
         raise HTTPException(status_code=401, detail="User not found in this school")
 
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
 
-    # --- HIER IST DIE WICHTIGE ÄNDERUNG ---
-    # Prüfen, ob das Abo der Schule abgelaufen ist (außer für Admins)
-    if True:#user.role != 'admin': # Admins kommen immer rein, um ggf. Rechnungen zu zahlen
+    # Prüfen, ob das Abo der Schule abgelaufen ist
+    if True:  # user.role != 'admin':
         if tenant.subscription_ends_at:
             now = datetime.now(timezone.utc)
-            # Pufferzeit beachten (optional, hier strikt)
             if tenant.subscription_ends_at < now:
-                # Wir geben ein strukturiertes Detail-Objekt zurück
                 error_detail = {
                     "code": "SUBSCRIPTION_EXPIRED",
                     "message": "Das Abonnement der Hundeschule ist abgelaufen.",
                     "support_email": tenant.support_email or "support@pfotencard.de"
                 }
-                # 402 Payment Required ist passend
                 raise HTTPException(
-                    status_code=402, 
-                    detail=error_detail 
+                    status_code=402,
+                    detail=error_detail
                 )
-    # --------------------------------------
 
     return user
+
 
 def verify_active_subscription(tenant: models.Tenant = Depends(get_current_tenant)):
     """
@@ -192,11 +193,11 @@ def verify_active_subscription(tenant: models.Tenant = Depends(get_current_tenan
     Wird für alle Schreib-Operationen (POST, PUT, DELETE) verwendet.
     """
     now = datetime.now(timezone.utc)
-    
+
     # Toleranz: Wir geben evtl. 24h Puffer, damit nicht mitten am Tag abgeschaltet wird
     if tenant.subscription_ends_at and tenant.subscription_ends_at < now:
         raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED, # Spezieller Code für Frontend
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,  # Spezieller Code für Frontend
             detail="Subscription expired. Please update your payment details."
         )
     return tenant

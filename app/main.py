@@ -1025,22 +1025,104 @@ def read_user(
         return db_user
     raise HTTPException(status_code=403, detail="Not authorized")
 
+
 @app.put("/api/users/{user_id}", response_model=schemas.User)
 def update_user_endpoint(
-    user_id: str, user_update: schemas.UserUpdate, db: Session = Depends(get_db),
-    tenant: models.Tenant = Depends(auth.verify_active_subscription),
-    current_user: schemas.User = Depends(auth.get_current_active_user),
+        user_id: str,
+        user_update: schemas.UserUpdate,
+        db: Session = Depends(get_db),
+        tenant: models.Tenant = Depends(auth.verify_active_subscription),
+        current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
+    # 1. ID auflösen (User ID kann int oder uuid string sein)
     resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
-    if current_user.id != resolved_id and current_user.role not in ['admin', 'mitarbeiter']:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    updated = crud.update_user(db, resolved_id, tenant.id, user_update)
-    if not updated: raise HTTPException(status_code=404, detail="User not found")
-    if user_update.password and updated.auth_id:
+
+    # 2. Zu bearbeitenden User aus DB laden
+    db_user = crud.get_user(db, user_id=resolved_id, tenant_id=tenant.id)
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # 3. Berechtigungsprüfung: Admin, Mitarbeiter oder der User selbst
+    is_self = current_user.id == resolved_id
+    is_staff = current_user.role in ['admin', 'mitarbeiter']
+
+    if not is_staff and not is_self:
+        raise HTTPException(status_code=403, detail="Not authorized to perform this action")
+
+    # 4. E-Mail-Änderungs-Check
+    # Wir prüfen, ob eine neue E-Mail gesendet wurde UND ob sie sich von der alten unterscheidet
+    email_changed = False
+    if user_update.email:
+        new_email_clean = user_update.email.lower().strip()
+        old_email_clean = db_user.email.lower().strip() if db_user.email else ""
+        if new_email_clean != old_email_clean:
+            email_changed = True
+
+    if email_changed:
+        # Nur Admins oder der User selbst dürfen die E-Mail ändern
+        if current_user.role != 'admin' and not is_self:
+            raise HTTPException(
+                status_code=403,
+                detail="Die E-Mail-Adresse kann aus Sicherheitsgründen nur vom Nutzer selbst oder einem Administrator geändert werden."
+            )
+
+    # 5. Einschränkungen für Kunden (dürfen sensible Felder nicht ändern)
+    if is_self and current_user.role in ['kunde', 'customer']:
+        # Wir überschreiben kritische Felder mit den alten Werten aus der DB, damit Kunden sich nicht selbst zum Admin machen
+        user_update.role = db_user.role
+        user_update.balance = db_user.balance
+        user_update.level_id = db_user.current_level_id
+        user_update.is_vip = db_user.is_vip
+        user_update.is_expert = db_user.is_expert
+        user_update.is_active = db_user.is_active
+        # E-Mail, Name, Telefon, Passwort bleiben im user_update erhalten und werden geändert
+
+    # 6. SUPABASE SYNC (Auth) - Versuchen, aber bei Fehler nicht abbrechen
+    password_changed = user_update.password is not None and len(user_update.password) > 0
+    name_changed = user_update.name and user_update.name != db_user.name
+
+    if (email_changed or password_changed or name_changed) and db_user.auth_id:
         try:
-            supabase.auth.admin.update_user_by_id(str(updated.auth_id), {"password": user_update.password})
-        except: pass
-    return updated
+            print(f"DEBUG: Starte Supabase Sync für User {db_user.id} (Auth ID: {db_user.auth_id})...")
+
+            # Admin-Client erstellen (braucht Service Role Key für Admin-Rechte)
+            supabase_admin: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+
+            attributes = {}
+            if email_changed:
+                attributes["email"] = user_update.email
+                # WICHTIG: Versuchen, die Bestätigung zu überspringen (Admin-Override), damit es sofort wirksam wird
+                attributes["email_confirm"] = True
+
+            if password_changed:
+                if len(user_update.password) < 6:
+                    # Hier werfen wir einen Fehler, weil ein ungültiges Passwort nicht gespeichert werden sollte
+                    raise HTTPException(status_code=400, detail="Passwort muss mindestens 6 Zeichen lang sein.")
+                attributes["password"] = user_update.password
+
+            if name_changed:
+                attributes["user_metadata"] = {"name": user_update.name}
+
+            if attributes:
+                # WICHTIG: Wir nutzen direkt die auth_id aus dem User-Objekt
+                supabase_admin.auth.admin.update_user_by_id(str(db_user.auth_id), attributes)
+                print(f"DEBUG: Supabase Update erfolgreich. Felder: {list(attributes.keys())}")
+
+        except HTTPException:
+            raise  # HTTP Exceptions (z.B. Passwort zu kurz) weiterwerfen
+        except Exception as e:
+            # Alle anderen Fehler loggen, aber NICHT abbrechen, damit die lokale DB trotzdem aktualisiert wird
+            print(f"WARNUNG: Supabase Sync fehlgeschlagen (Lokales Update wird trotzdem durchgeführt): {e}")
+
+    # 7. LOKALES UPDATE DURCHFÜHREN (Public Schema)
+    try:
+        updated_user = crud.update_user(db, resolved_id, tenant.id, user_update)
+        if not updated_user:
+            raise HTTPException(status_code=404, detail="User not found during update")
+        return updated_user
+    except Exception as e:
+        print(f"CRITICAL: Fehler beim lokalen DB Update: {e}")
+        raise HTTPException(status_code=500, detail="Fehler beim Speichern in der Datenbank.")
 
 @app.put("/api/users/{user_id}/status", response_model=schemas.User)
 def update_user_status(
