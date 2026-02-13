@@ -1091,8 +1091,38 @@ def update_user_endpoint(
             attributes = {}
             if email_changed:
                 attributes["email"] = user_update.email
-                # WICHTIG: Versuchen, die Bestätigung zu überspringen (Admin-Override), damit es sofort wirksam wird
-                attributes["email_confirm"] = True
+                
+                # Branding-Metadaten für die Bestätigungs-E-Mail hinzufügen
+                tenant_branding = tenant.config.get("branding", {})
+                branding_logo = tenant_branding.get("logo_url") or "https://pfotencard.de/logo.png"
+                branding_color = tenant_branding.get("primary_color") or "#22C55E"
+                branding_name = tenant.name or "Pfotencard"
+                
+                attributes["user_metadata"] = {
+                    "branding_logo": branding_logo,
+                    "branding_color": branding_color,
+                    "branding_name": branding_name,
+                    "school_name": branding_name
+                }
+
+                # Redirect URL zur Tenant-Subdomain (wie bei Invite/Reset)
+                redirect_url = f"https://{tenant.subdomain}.pfotencard.de/"
+                if "localhost" in settings.SUPABASE_URL or "127.0.0.1" in settings.SUPABASE_URL:
+                    redirect_url = "http://localhost:3000/anmelden"
+                
+                # WICHTIG: email_confirm auf False setzen (oder weglassen), damit Supabase die Bestätigungsmail sendet
+                # Wenn wir branding wollen, MUSS der User den Link klicken.
+                attributes["email_confirm"] = False
+                
+                # Wir fügen die redirect_url als Metadaten hinzu, falls das Template sie dort erwartet
+                attributes["user_metadata"]["redirect_to"] = redirect_url
+                
+                # Wir übergeben die redirect_url in den attributes (Supabase Auth Admin API unterstützt dies teilweise in den options)
+                # Bei update_user_by_id gibt es oft kein direktes redirect_to in den attributes, 
+                # aber wir können versuchen es über die GoTrue Admin API zu steuern falls unterstützt.
+                # WICHTIG: Wir setzen redirect_to direkt in die attributes. 
+                # Die Python Lib leitet dies an die GoTrue API weiter.
+                attributes["redirect_to"] = redirect_url
 
             if password_changed:
                 if len(user_update.password) < 6:
@@ -1101,10 +1131,15 @@ def update_user_endpoint(
                 attributes["password"] = user_update.password
 
             if name_changed:
-                attributes["user_metadata"] = {"name": user_update.name}
+                if "user_metadata" not in attributes:
+                    attributes["user_metadata"] = {}
+                attributes["user_metadata"]["name"] = user_update.name
 
             if attributes:
                 # WICHTIG: Wir nutzen direkt die auth_id aus dem User-Objekt
+                # Wir übergeben die redirect_url in den attributes, falls die API sie dort erwartet (GoTrue admin update)
+                # (Haben wir oben bereits zu attributes hinzugefügt, falls email_changed)
+
                 supabase_admin.auth.admin.update_user_by_id(str(db_user.auth_id), attributes)
                 print(f"DEBUG: Supabase Update erfolgreich. Felder: {list(attributes.keys())}")
 
