@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from . import models, schemas, storage_service
 from fastapi import HTTPException
 import secrets
+import uuid
 from typing import List, Optional
 
 # Notification Service importieren
@@ -280,6 +281,13 @@ def get_user(db: Session, user_id: int, tenant_id: int):
     ).first()
 
 def get_user_by_auth_id(db: Session, auth_id: str, tenant_id: int):
+    # Validierung: Nur weitermachen, wenn auth_id eine gültige UUID ist.
+    # Verhindert (psycopg2.errors.InvalidTextRepresentation) invalid input syntax for type uuid
+    try:
+        uuid.UUID(str(auth_id))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
     return db.query(models.User).options(
         joinedload(models.User.documents),
         joinedload(models.User.achievements),
@@ -296,7 +304,8 @@ def get_user_by_email(db: Session, email: str, tenant_id: int):
         models.User.tenant_id == tenant_id
     ).first()
 
-def get_users(db: Session, tenant_id: int, skip: int = 0, limit: int = 100, portfolio_of_user_id: Optional[int] = None):
+def get_users(db: Session, tenant_id: int, portfolio_of_user_id: Optional[int] = None):
+    print(f"DEBUG: get_users called for tenant {tenant_id}")
     query = db.query(models.User).options(
         joinedload(models.User.documents),
         joinedload(models.User.achievements),
@@ -305,13 +314,18 @@ def get_users(db: Session, tenant_id: int, skip: int = 0, limit: int = 100, port
     ).filter(models.User.tenant_id == tenant_id)
     
     if portfolio_of_user_id:
+        print(f"DEBUG: Filtering by portfolio of user {portfolio_of_user_id}")
         customer_ids = db.query(models.Transaction.user_id).filter(
             models.Transaction.booked_by_id == portfolio_of_user_id,
             models.Transaction.tenant_id == tenant_id
         ).distinct()
         query = query.filter(models.User.id.in_(customer_ids))
 
-    return query.order_by(models.User.name).offset(skip).limit(limit).all()
+    users = query.order_by(models.User.name).all()
+    print(f"DEBUG: get_users found {len(users)} users for tenant {tenant_id}:")
+    for u in users:
+        print(f"  - User: ID: {u.id}, Name: {u.name}, Role: {u.role}")
+    return users
 
 def search_users(db: Session, tenant_id: int, search_term: str):
     return db.query(models.User).filter(
@@ -336,6 +350,8 @@ def create_user(db: Session, user: schemas.UserCreate, tenant_id: int, auth_id: 
         auth_id=auth_id,
         email=user.email,
         name=user.name,
+        vorname=user.vorname,
+        nachname=user.nachname,
         role=user.role,
         is_active=user.is_active,
         balance=user.balance,
@@ -933,7 +949,7 @@ def create_recurring_appointments(db: Session, appointment: schemas.AppointmentR
     current_end = appointment.end_time
     
     count = 0
-    max_count = appointment.end_after_count or 100 # Safety limit
+    max_count = appointment.end_after_count or 1000000 # No artificial limit, just safety
     
     # NEU: Block ID generieren, falls es ein Kurs ist
     block_id = None
@@ -1567,14 +1583,12 @@ def check_and_send_reminders(db: Session):
     """
     now = datetime.now(timezone.utc)
     
-    # Performance: Wir laden nur Buchungen der nächsten 24h
-    upcoming_limit = now + timedelta(hours=24)
+    # Wir laden alle Buchungen, um Erinnerungen zu senden (kein 24h Limit mehr)
     
     # Lade alle bestätigten Buchungen für zukünftige Termine
     bookings = db.query(models.Booking).join(models.Appointment).join(models.User).filter(
         models.Booking.status == 'confirmed',
-        models.Appointment.start_time > now,
-        models.Appointment.start_time <= upcoming_limit
+        models.Appointment.start_time > now
     ).all()
     
     sent_count = 0
@@ -1743,7 +1757,7 @@ def create_news_post(db: Session, post: schemas.NewsPostCreate, author_id: int, 
 
     return db_post
 
-def get_news_posts(db: Session, tenant_id: int, current_user: models.User, skip: int = 0, limit: int = 50):
+def get_news_posts(db: Session, tenant_id: int, current_user: models.User):
     query = db.query(models.NewsPost).options(
         joinedload(models.NewsPost.author),
         joinedload(models.NewsPost.target_levels),
@@ -1793,7 +1807,7 @@ def get_news_posts(db: Session, tenant_id: int, current_user: models.User, skip:
         
         query = query.filter(or_(*filters))
 
-    posts = query.order_by(models.NewsPost.created_at.desc()).offset(skip).limit(limit).all()
+    posts = query.order_by(models.NewsPost.created_at.desc()).all()
     
     # Map target IDs back to schema
     for post in posts:
@@ -1889,7 +1903,7 @@ def create_chat_message(db: Session, msg: schemas.ChatMessageCreate, sender_id: 
 
     return new_message
 
-def get_chat_history(db: Session, tenant_id: int, user1_id: int, user2_id: int, limit: int = 100):
+def get_chat_history(db: Session, tenant_id: int, user1_id: int, user2_id: int):
     """
     Holt die Chat-Historie zwischen zwei Nutzern (egal wer Sender/Empfänger ist).
     Sortiert nach Datum aufsteigend (älteste zuerst).
@@ -1901,7 +1915,7 @@ def get_chat_history(db: Session, tenant_id: int, user1_id: int, user2_id: int, 
             models.ChatMessage.sender_id.in_([user1_id, user2_id]),
             models.ChatMessage.receiver_id.in_([user1_id, user2_id])
         )
-    ).order_by(models.ChatMessage.created_at.asc()).limit(limit).all()
+    ).order_by(models.ChatMessage.created_at.asc()).all()
     
     return messages
 

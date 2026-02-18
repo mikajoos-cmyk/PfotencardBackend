@@ -162,6 +162,8 @@ class Dog(DogBase):
 class UserBase(BaseModel):
     email: EmailStr
     name: str
+    vorname: Optional[str] = None
+    nachname: Optional[str] = None
     role: str
     is_active: bool = True
     balance: float = 0.0
@@ -202,6 +204,8 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     name: Optional[str] = None
+    vorname: Optional[str] = None
+    nachname: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
     balance: Optional[float] = None

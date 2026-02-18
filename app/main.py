@@ -897,7 +897,7 @@ def create_user(
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
     # 1. Sicherheits-Check: Nur Admins/Mitarbeiter dürfen einladen
-    if current_user.role not in ['admin', 'mitarbeiter']:
+    if current_user.role not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     # 2. Prüfen ob User bereits in der lokalen Datenbank dieser Schule existiert
@@ -919,7 +919,10 @@ def create_user(
             "branding_logo": logo_url,
             "branding_color": primary_color,
             "school_name": tenant.name,
-            "tenant_id": tenant.id
+            "tenant_id": tenant.id,
+            "name": user.name,
+            "vorname": user.vorname,
+            "nachname": user.nachname
         }
         
         # --- KORREKTUR START ---
@@ -968,30 +971,48 @@ def create_user(
     return crud.create_user(db=db, user=user, tenant_id=tenant.id, auth_id=auth_id)
 
 
+STAFF_ROLES = ['admin', 'mitarbeiter', 'staff', 'trainer']
+
 @app.get("/api/users/staff", response_model=List[schemas.User])
 def read_staff_users(
     current_user: schemas.User = Depends(auth.get_current_active_user),
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter', 'customer', 'kunde']:
+    if current_user.role not in STAFF_ROLES + ['customer', 'kunde']:
          raise HTTPException(status_code=403, detail="Not authorized")
+    
+    print(f"DEBUG: Fetching staff for tenant {tenant.id} ({tenant.name})")
+    
+    # Erstmal alle User des Tenants holen, um zu sehen, was da ist
+    all_users = db.query(models.User).filter(models.User.tenant_id == tenant.id).all()
+    print(f"DEBUG: Total users for tenant: {len(all_users)}")
+    print("DEBUG: All Users of this tenant:")
+    for u in all_users:
+        print(f"  - ID: {u.id}, Name: {u.name}, Email: {u.email}, Role: {u.role}, Active: {u.is_active}")
+    
     staff = db.query(models.User).filter(
         models.User.tenant_id == tenant.id,
-        models.User.role.in_(['admin', 'mitarbeiter']),
+        models.User.role.in_(STAFF_ROLES),
         models.User.is_active == True
     ).all()
+    
+    print(f"DEBUG: Filtering for STAFF_ROLES: {STAFF_ROLES}")
+    print(f"DEBUG: Found {len(staff)} active staff members:")
+    for s in staff:
+        print(f"  - STAFF: ID: {s.id}, Name: {s.name}, Role: {s.role}")
+    
     return staff
 
 @app.get("/api/users", response_model=List[schemas.User])
 def read_users(
-    skip: int = 0, limit: int = 100, db: Session = Depends(get_db),
+    db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
-    if current_user.role not in ['admin', 'mitarbeiter']:
+    if current_user.role not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Not authorized")
-    return crud.get_users(db, tenant.id, skip=skip, limit=limit)
+    return crud.get_users(db, tenant.id)
 
 @app.get("/api/users/by-auth/{auth_id}", response_model=schemas.User)
 def read_user_by_auth(
@@ -1001,7 +1022,7 @@ def read_user_by_auth(
 ):
     db_user = crud.get_user_by_auth_id(db, auth_id, tenant.id)
     if not db_user: raise HTTPException(status_code=404, detail="User not found")
-    if current_user.role in ['admin', 'mitarbeiter'] or current_user.auth_id == auth_id:
+    if current_user.role in STAFF_ROLES or current_user.auth_id == auth_id:
         return db_user
     raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -1021,7 +1042,7 @@ def read_user(
     resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
     db_user = crud.get_user(db, resolved_id, tenant.id)
     if not db_user: raise HTTPException(status_code=404, detail="User not found")
-    if current_user.role in ['admin', 'mitarbeiter'] or current_user.id == resolved_id:
+    if current_user.role in STAFF_ROLES or current_user.id == resolved_id:
         return db_user
     raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -1044,7 +1065,7 @@ def update_user_endpoint(
 
     # 3. Berechtigungsprüfung: Admin, Mitarbeiter oder der User selbst
     is_self = current_user.id == resolved_id
-    is_staff = current_user.role in ['admin', 'mitarbeiter']
+    is_staff = current_user.role in STAFF_ROLES
 
     if not is_staff and not is_self:
         raise HTTPException(status_code=403, detail="Not authorized to perform this action")
@@ -1075,13 +1096,15 @@ def update_user_endpoint(
         user_update.is_vip = db_user.is_vip
         user_update.is_expert = db_user.is_expert
         user_update.is_active = db_user.is_active
-        # E-Mail, Name, Telefon, Passwort bleiben im user_update erhalten und werden geändert
+        # E-Mail, Name, Vorname, Nachname, Telefon, Passwort bleiben im user_update erhalten und werden geändert
 
-# 6. SUPABASE SYNC (Auth) - Versuchen, aber bei Fehler nicht abbrechen
+    # 6. SUPABASE SYNC (Auth) - Versuchen, aber bei Fehler nicht abbrechen
     password_changed = user_update.password is not None and len(user_update.password) > 0
     name_changed = user_update.name and user_update.name != db_user.name
+    vorname_changed = user_update.vorname and user_update.vorname != db_user.vorname
+    nachname_changed = user_update.nachname and user_update.nachname != db_user.nachname
 
-    if (email_changed or password_changed or name_changed) and db_user.auth_id:
+    if (email_changed or password_changed or name_changed or vorname_changed or nachname_changed) and db_user.auth_id:
         try:
             print(f"DEBUG: Starte Supabase Sync für User {db_user.id} (Auth ID: {db_user.auth_id})...")
 
@@ -1105,7 +1128,6 @@ def update_user_endpoint(
 
             attributes = {}
 
-            # WICHTIG: Hier fehlte der Rest der Logik im vorherigen Snippet!
             if email_changed:
                 attributes["email"] = user_update.email
 
@@ -1136,10 +1158,15 @@ def update_user_endpoint(
                     raise HTTPException(status_code=400, detail="Passwort muss mindestens 6 Zeichen lang sein.")
                 attributes["password"] = user_update.password
 
-            if name_changed:
+            if name_changed or vorname_changed or nachname_changed:
                 if "user_metadata" not in attributes:
                     attributes["user_metadata"] = {}
-                attributes["user_metadata"]["name"] = user_update.name
+                if name_changed:
+                    attributes["user_metadata"]["name"] = user_update.name
+                if vorname_changed:
+                    attributes["user_metadata"]["vorname"] = user_update.vorname
+                if nachname_changed:
+                    attributes["user_metadata"]["nachname"] = user_update.nachname
 
             if attributes:
                 supabase_admin.auth.admin.update_user_by_id(str(db_user.auth_id), attributes)
@@ -1615,11 +1642,11 @@ def delete_news(
 
 @app.get("/api/news", response_model=List[schemas.NewsPost])
 def read_news(
-    skip: int = 0, limit: int = 50, db: Session = Depends(get_db),
+    db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    return crud.get_news_posts(db, tenant.id, current_user, skip, limit)
+    return crud.get_news_posts(db, tenant.id, current_user)
 
 @app.post("/api/chat", response_model=schemas.ChatMessage)
 def send_chat_message(

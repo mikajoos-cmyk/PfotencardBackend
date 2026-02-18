@@ -429,10 +429,11 @@ def get_subscription_details(db: Session, tenant_id: int):
         "upcoming_plan": tenant.upcoming_plan
     }
 
-def get_invoices(db: Session, tenant_id: int, limit: int = 12):
+def get_invoices(db: Session, tenant_id: int, limit: int = 100):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant or not tenant.stripe_customer_id: return []
     try:
+        # Load all invoices (Stripe limit is 100 per call, if we need more we would need pagination, but 100 is better than 12)
         invoices = stripe.Invoice.list(customer=tenant.stripe_customer_id, limit=limit)
         results = []
         for i in invoices.data:

@@ -185,3 +185,5 @@ push_subscriptions, appointment_target_levels, app_status, news_target_trainings
   - is_vip (BOOLEAN)
   - is_expert (BOOLEAN)
   - current_level_id (INTEGER)
+  - vorname (VARCHAR(255))
+  - nachname (VARCHAR(255))

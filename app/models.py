@@ -116,6 +116,8 @@ class User(Base):
     auth_id = Column(UUID, nullable=True) # Verknüpfung zu Supabase Auth
     
     name = Column(String(255), index=True, nullable=False)
+    vorname = Column(String(255), nullable=True)
+    nachname = Column(String(255), nullable=True)
     email = Column(String(255), index=True, nullable=False)
     hashed_password = Column(String(255), nullable=True)
     

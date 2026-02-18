@@ -118,7 +118,12 @@ def resolve_user_id(db: Session, user_id_str: str, tenant_id: int) -> int:
     if user:
         return user.id
 
-    # 3. Wenn nicht gefunden, Exception werfen
+    # 3. Fallback: Als Email behandeln
+    user = crud.get_user_by_email(db, user_id_str, tenant_id)
+    if user:
+        return user.id
+
+    # 4. Wenn nicht gefunden, Exception werfen
     raise HTTPException(status_code=404, detail="User not found (ID resolution failed)")
 
 
