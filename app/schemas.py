@@ -424,9 +424,10 @@ class AppointmentSettings(BaseModel):
 
 class WidgetSettings(BaseModel):
     type: str = "status"
-    theme: str = "light"
-    primary_color: str = "f97316"
+    theme: Optional[str] = "light"
+    primary_color: Optional[str] = "f97316"
     layout: str = "compact"
+    limit: int = 5
     height: int = 200
 
 class SettingsUpdate(BaseModel):
