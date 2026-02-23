@@ -134,7 +134,7 @@ class User(Base):
 
     # Benachrichtigungseinstellungen
     notifications_email = Column(Boolean, default=True)
-    notifications_push = Column(Boolean, default=True)
+    notifications_push = Column(Boolean, default=False)
     
     # Granulare E-Mail Einstellungen
     notif_email_overall = Column(Boolean, default=True)
@@ -145,12 +145,12 @@ class User(Base):
     notif_email_alert = Column(Boolean, default=True)
     
     # Granulare Push Einstellungen
-    notif_push_overall = Column(Boolean, default=True)
-    notif_push_chat = Column(Boolean, default=True)
-    notif_push_news = Column(Boolean, default=True)
-    notif_push_booking = Column(Boolean, default=True)
-    notif_push_reminder = Column(Boolean, default=True)
-    notif_push_alert = Column(Boolean, default=True)
+    notif_push_overall = Column(Boolean, default=False)
+    notif_push_chat = Column(Boolean, default=False)
+    notif_push_news = Column(Boolean, default=False)
+    notif_push_booking = Column(Boolean, default=False)
+    notif_push_reminder = Column(Boolean, default=False)
+    notif_push_alert = Column(Boolean, default=False)
 
     # Erinnerungseinstellungen
     reminder_offset_minutes = Column(Integer, default=60)

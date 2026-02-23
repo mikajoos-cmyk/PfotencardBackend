@@ -171,7 +171,7 @@ class UserBase(BaseModel):
     is_vip: bool = False
     is_expert: bool = False
     current_level_id: Optional[int] = None
-    notifications_push: bool = True
+    notifications_push: bool = False
     
     notif_email_overall: bool = True
     notif_email_chat: bool = True
@@ -180,12 +180,12 @@ class UserBase(BaseModel):
     notif_email_reminder: bool = True
     notif_email_alert: bool = True
     
-    notif_push_overall: bool = True
-    notif_push_chat: bool = True
-    notif_push_news: bool = True
-    notif_push_booking: bool = True
-    notif_push_reminder: bool = True
-    notif_push_alert: bool = True
+    notif_push_overall: bool = False
+    notif_push_chat: bool = False
+    notif_push_news: bool = False
+    notif_push_booking: bool = False
+    notif_push_reminder: bool = False
+    notif_push_alert: bool = False
     
     reminder_offset_minutes: int = 60
     permissions: Dict[str, bool] = {
@@ -419,7 +419,15 @@ class LevelUpdateItem(BaseModel):
 class AppointmentSettings(BaseModel):
     default_duration: int = 60
     max_participants: int = 10
+    cancelation_period_hours: int = 0
     color_rules: List[Dict[str, Any]] = []
+
+class WidgetSettings(BaseModel):
+    type: str = "status"
+    theme: str = "light"
+    primary_color: str = "f97316"
+    layout: str = "compact"
+    height: int = 200
 
 class SettingsUpdate(BaseModel):
     school_name: str
@@ -442,6 +450,7 @@ class SettingsUpdate(BaseModel):
     auto_progress_enabled: bool = False
     appointments: Optional[AppointmentSettings] = None
     invoice_settings: Optional[InvoiceSettings] = None
+    widgets: Optional[WidgetSettings] = None
 
 class NewsletterSubscriberBase(BaseModel):
     email: EmailStr

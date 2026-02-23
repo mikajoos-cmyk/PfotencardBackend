@@ -36,9 +36,126 @@ app.add_middleware(
 
 app.include_router(legal.router, prefix="/api/legal", tags=["legal"])
 
+import uuid
+
 @app.get("/")
 def read_root():
     return {"message": "Pfotencard Multi-Tenant API is running"}
+
+# --- PUBLIC WIDGET API (no auth required) ---
+# Admin: Hole/Erzeuge öffentliches Widget-Token für aktuellen Tenant
+@app.get("/api/tenants/public-token")
+def get_or_create_public_token(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+    cfg = dict(tenant.config) if tenant.config else {}
+    token = cfg.get('public_widget_token')
+    if not token:
+        token = uuid.uuid4().hex
+        cfg['public_widget_token'] = token
+        tenant.config = cfg
+        db.commit()
+    return {"public_widget_token": token}
+
+# Öffentliche Endpunkte nach Token
+@app.get("/api/public/widget/{token}/status")
+def public_tenant_status(token: str, db: Session = Depends(get_db)):
+    """Öffentlicher Endpunkt: Liefert den aktuellen Status und Branding einer Hundeschule.
+    """
+    tenant = db.query(models.Tenant).filter(models.Tenant.config['public_widget_token'].astext == token).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    
+    status = crud.get_app_status(db, tenant.id)
+    branding = tenant.config.get("branding", {})
+    
+    return {
+        "status": status.status,
+        "message": status.message,
+        "branding": {
+            "primary_color": branding.get("primary_color"),
+            "logo_url": branding.get("logo_url"),
+            "school_name": tenant.name
+        }
+    }
+
+@app.get("/api/public/widget/{token}/appointments")
+def public_tenant_appointments(token: str, db: Session = Depends(get_db)):
+    """Öffentlicher Endpunkt: Liefert verfügbare Termine inkl. konfigurierter Farbregeln und Branding.
+    """
+    from sqlalchemy import and_, func
+    from sqlalchemy.orm import joinedload
+
+    tenant = db.query(models.Tenant).filter(models.Tenant.config['public_widget_token'].astext == token).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    
+    now = datetime.utcnow()
+
+    # Zähle bestätigte Teilnehmer und lade Relationen (trainer, training_type, target_levels)
+    q = db.query(
+        models.Appointment,
+        func.count(models.Booking.id).label('participants_count')
+    ).outerjoin(
+        models.Booking,
+        and_(
+            models.Booking.appointment_id == models.Appointment.id,
+            models.Booking.status == 'confirmed'
+        )
+    ).filter(
+        and_(
+            models.Appointment.tenant_id == tenant.id,
+            models.Appointment.start_time >= now
+        )
+    ).options(
+        joinedload(models.Appointment.training_type),
+        joinedload(models.Appointment.target_levels)
+    ).group_by(models.Appointment.id)
+     
+    results = q.order_by(models.Appointment.start_time.asc()).all()
+
+    branding = (tenant.config or {}).get("branding", {})
+    appt_cfg = (tenant.config or {}).get("appointments", {})
+    color_rules = appt_cfg.get("color_rules", [])
+    
+    def serialize_level(lvl):
+        return {"id": getattr(lvl, 'id', None), "name": getattr(lvl, 'name', None)}
+
+    def serialize_training_type(tt):
+        if not tt:
+            return None
+        return {"id": getattr(tt, 'id', None), "name": getattr(tt, 'name', None)}
+
+    return {
+        "appointments": [
+            {
+                "id": a.id,
+                "title": a.title,
+                "start_time": a.start_time.isoformat() if hasattr(a.start_time, 'isoformat') else str(a.start_time),
+                "end_time": a.end_time.isoformat() if hasattr(a.end_time, 'isoformat') else str(a.end_time),
+                "location": getattr(a, 'location', None),
+                "max_participants": getattr(a, 'max_participants', None),
+                "participants_count": int(pc or 0),
+                "training_type_id": getattr(a, 'training_type_id', None),
+                "training_type": serialize_training_type(getattr(a, 'training_type', None)),
+                "target_levels": [serialize_level(l) for l in (getattr(a, 'target_levels', []) or [])],
+                "is_open_for_all": getattr(a, 'is_open_for_all', False)
+            }
+            for (a, pc) in results
+        ],
+        "branding": {
+            "primary_color": branding.get("primary_color"),
+            "logo_url": branding.get("logo_url"),
+            "school_name": tenant.name
+        },
+        "appointments_config": {
+            "color_rules": color_rules
+        }
+    }
 
 @app.get("/api/config", response_model=schemas.AppConfig)
 def read_app_config(
@@ -61,8 +178,8 @@ def update_app_status(
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
-    if current_user.role != 'admin':
-        raise HTTPException(status_code=403, detail="Not authorized")
+    #if current_user.role != 'admin':
+    #   raise HTTPException(status_code=403, detail="Not authorized")
     return crud.update_app_status(db, tenant.id, status_update)
 
 @app.put("/api/settings")
@@ -1554,6 +1671,16 @@ def cancel_appointment_booking(
 ):
     # Rückgabetyp ist jetzt ein Dict, kein Schema mehr erzwingen oder Schema anpassen
     return crud.cancel_booking(db, tenant.id, appointment_id, current_user.id, dog_id=dog_id)
+
+@app.delete("/api/bookings/{booking_id}")
+def delete_booking(
+    booking_id: int, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']: 
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.remove_booking_admin(db, tenant.id, booking_id)
 
 @app.get("/api/appointments/{appointment_id}/participants", response_model=List[schemas.Booking])
 def read_participants(

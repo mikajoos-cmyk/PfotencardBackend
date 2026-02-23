@@ -177,6 +177,10 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     if settings.invoice_settings:
         current_config["invoice_settings"] = settings.invoice_settings.model_dump()
 
+    # NEU: Widget-Einstellungen
+    if settings.widgets:
+        current_config["widgets"] = settings.widgets.model_dump()
+
     tenant.config = current_config
     flag_modified(tenant, "config")
     
@@ -1294,6 +1298,26 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     if not booking:
         raise HTTPException(404, "Booking not found")
 
+    # 1a. Stornierungsfrist aus Tenant-Konfiguration laden und prüfen (Server-seitig erzwingen)
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    config = dict(tenant.config) if tenant and tenant.config else {}
+    appt_settings = config.get("appointments", {}) if isinstance(config, dict) else {}
+    try:
+        cancel_hours = int(appt_settings.get("cancelation_period_hours", 0) or 0)
+    except Exception:
+        cancel_hours = 0
+
+    now = datetime.now(timezone.utc)
+    # Grundregel: Nach Beginn des Termins keine Stornierung
+    appt_start = booking.appointment.start_time
+    if appt_start <= now:
+        raise HTTPException(400, "Stornierung nicht mehr möglich: Termin hat bereits begonnen.")
+    # Konfigurierte Frist beachten (0 = bis Terminbeginn möglich)
+    if cancel_hours > 0:
+        cancel_limit = appt_start - timedelta(hours=cancel_hours)
+        if now > cancel_limit:
+            raise HTTPException(400, "Stornierung nicht mehr möglich: Stornierungsfrist abgelaufen.")
+
     # 2. Block-Kurs Logik: Prüfen ob Stornierung erlaubt & Rekursion
     if booking.appointment.block_id:
         # Finde den ERSTEN Termin des Blocks
@@ -1303,8 +1327,14 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
         ).order_by(models.Appointment.start_time.asc()).first()
         
         # Regel: Storno nur erlaubt, wenn der Kurs noch nicht begonnen hat (Startzeit des ersten Termins in der Zukunft)
-        if first_appt and first_appt.start_time <= datetime.now(timezone.utc):
+        if first_appt and first_appt.start_time <= now:
              raise HTTPException(400, "Stornierung nicht mehr möglich, da der Kurs bereits begonnen hat.")
+        
+        # Zusätzlich: Stornierungsfrist auch für Blockkurse anwenden (bezogen auf den ersten Termin)
+        if first_appt and cancel_hours > 0:
+            block_cancel_limit = first_appt.start_time - timedelta(hours=cancel_hours)
+            if now > block_cancel_limit:
+                raise HTTPException(400, "Stornierung nicht mehr möglich: Stornierungsfrist für den Kurs abgelaufen.")
              
         # Wenn erlaubt: Storniere ALLE zukünftigen Buchungen dieses Blocks für diesen User
         # (Da wir gerade validiert haben, dass der Kurs noch nicht begonnen hat, sind das effektiv ALLE Termine)
@@ -1317,16 +1347,7 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
         ).all()
         
         for bb in block_bookings:
-            # Rekursiv stornieren (aber ohne erneute Block-Prüfung um Endlosschleife zu vermeiden? 
-            # Nein, wir setzen den Status direkt hier, um Side-Effects zu kontrollieren)
-            # Einfacher: Wir rufen cancel_booking für die anderen NICHT auf, sondern setzen sie hier auf cancelled
-            # Aber wir müssen Nachrücker-Logik beachten.
-            # Am sichersten: Wir iterieren und setzen Status manuell + Nachrücker Logik kopieren?
-            # Oder wir erlauben den rekursiven Aufruf, müssen aber die "Course Started" Prüfung so gestalten, dass sie für zukünftige Termine passt.
-            # Da wir oben "first_appt.start_time <= now" prüfen, gilt das für alle gleich.
-            
-            # Strategie: Wir setzen den Status hier direkt auf cancelled und triggern KEINE eigene Notification pro Termin, 
-            # sondern nur EINE Sammel-Info? Oder einfach Status ändern.
+            # Strategie: Wir setzen den Status hier direkt auf cancelled
             # Bei Blocks ist Nachrücken komplexer. Vereinfachung: Wir entfernen die Buchung einfach.
             bb.status = 'cancelled'
             bb.attended = False
@@ -1388,6 +1409,51 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
         "status": "cancelled", 
         "promoted_user_id": promoted_user_id
     }
+
+def remove_booking_admin(db: Session, tenant_id: int, booking_id: int):
+    booking = db.query(models.Booking).filter(
+        models.Booking.id == booking_id,
+        models.Booking.tenant_id == tenant_id
+    ).first()
+    
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+
+    previous_status = booking.status
+    appointment_id = booking.appointment_id
+    
+    booking.status = 'cancelled'
+    booking.attended = False
+    
+    promoted_user_id = None
+    
+    if previous_status == 'confirmed':
+        next_in_line = db.query(models.Booking).filter(
+            models.Booking.appointment_id == appointment_id,
+            models.Booking.tenant_id == tenant_id,
+            models.Booking.status == 'waitlist'
+        ).order_by(models.Booking.created_at.asc()).first()
+        
+        if next_in_line:
+            next_in_line.status = 'confirmed'
+            promoted_user_id = next_in_line.user_id
+            
+            notify_user(
+                db=db,
+                user_id=promoted_user_id,
+                type="booking",
+                title="Platz bestätigt (Nachgerückt)",
+                message=f"Gute Nachrichten! Du bist für '{booking.appointment.title}' nachgerückt.",
+                url="/appointments",
+                details={
+                    "Kurs": booking.appointment.title,
+                    "Datum": format_datetime_de(booking.appointment.start_time),
+                    "Hinweis": "Ein Platz wurde frei und du bist nachgerückt."
+                }
+            )
+
+    db.commit()
+    return {"status": "removed", "promoted_user_id": promoted_user_id}
 
 def get_participants(db: Session, tenant_id: int, appointment_id: int):
     return db.query(models.Booking).options(
