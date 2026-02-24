@@ -103,6 +103,7 @@ class SubscriptionUpdate(BaseModel):
     subdomain: str
     plan: str
     billing_details: Optional[BillingDetails] = None
+    trial_allowed: bool = True
 
 class TrainingTypeBase(BaseModel):
     name: str

@@ -769,7 +769,7 @@ def create_subscription(
         raise HTTPException(status_code=403, detail="Not authorized")
         
     return stripe_service.create_checkout_session(
-        db, tenant.id, data.plan, cycle, current_user.email, data.billing_details
+        db, tenant.id, data.plan, cycle, current_user.email, data.billing_details, data.trial_allowed
     )
 
 @app.post("/api/stripe/cancel")

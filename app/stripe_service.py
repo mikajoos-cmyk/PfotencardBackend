@@ -200,7 +200,7 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
 
 # --- CHECKOUT & UPDATE ---
 
-def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str, billing_details=None):
+def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str, billing_details=None, trial_allowed=True):
     from sqlalchemy.orm.attributes import flag_modified
 
     print(f"DEBUG: Starting Checkout/Update for Tenant {tenant_id} -> {plan} ({cycle})")
@@ -447,15 +447,17 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             traceback.print_exc()
             raise HTTPException(400, f"Update failed: {str(e)}")
 
-    # --- NEW SUBSCRIPTION ---
+        # --- NEW SUBSCRIPTION ---
     else:
-        print("✨ Creating NEW Subscription")
+        print(f"✨ Creating NEW Subscription (Trial allowed: {trial_allowed})")
         trial_days = 0
-        now = datetime.now(timezone.utc)
-        trial_end_absolute = tenant.created_at + timedelta(days=14)
-        if trial_end_absolute > now:
-            delta = trial_end_absolute - now
-            trial_days = delta.days
+        
+        if trial_allowed:
+            now = datetime.now(timezone.utc)
+            trial_end_absolute = tenant.created_at + timedelta(days=14)
+            if trial_end_absolute > now:
+                delta = trial_end_absolute - now
+                trial_days = delta.days
 
         sub_data = {
             'customer': customer_id,
