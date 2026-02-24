@@ -343,11 +343,23 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     except:
                         pass
 
+                # Prüfen, ob Kunde eine Standard-Zahlungsmethode hat
+                has_payment_method = False
+                try:
+                    customer = stripe.Customer.retrieve(customer_id)
+                    default_payment_method = safe_get(customer, 'invoice_settings', {}).get('default_payment_method')
+                    has_payment_method = default_payment_method is not None
+                except:
+                    pass
+
+                # Bei vorhandener Zahlungsmethode: Sofort abbuchen, sonst Payment Element
+                payment_behavior = 'allow_incomplete' if not has_payment_method else 'error_if_incomplete'
+
                 updated_sub_step1 = stripe.Subscription.modify(
                     safe_get(active_subscription, 'id'),
                     items=[{'id': safe_get(current_item, 'id'), 'price': target_price_id}],
                     proration_behavior='always_invoice',
-                    payment_behavior='default_incomplete',
+                    payment_behavior=payment_behavior,
                     expand=['latest_invoice.payment_intent']
                 )
 
@@ -367,8 +379,17 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
 
                 inv = safe_get(updated_sub_step1, 'latest_invoice')
                 amount_due = safe_get(inv, 'amount_due', 0) / 100.0
+                updated_status = safe_get(updated_sub_step1, 'status')
 
-                # --- IMMER EIN PAYMENT/SETUP ELEMENT ERZWINGEN ---
+                # Wenn bereits bezahlt (bei Bestandskunden mit Zahlungsmethode)
+                if updated_status == 'active' and amount_due == 0:
+                    return {
+                        "subscriptionId": safe_get(updated_sub_step1, 'id'),
+                        "status": "success",
+                        "message": "Upgrade erfolgreich und bezahlt"
+                    }
+
+                # Sonst: Payment Element für offene Zahlung
                 secret = extract_client_secret(inv)
                 if not secret:
                     si = stripe.SetupIntent.create(customer=customer_id, usage='off_session',
@@ -451,7 +472,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
     else:
         print(f"✨ Creating NEW Subscription (Trial allowed: {trial_allowed})")
         trial_days = 0
-        
+
         if trial_allowed:
             now = datetime.now(timezone.utc)
             trial_end_absolute = tenant.created_at + timedelta(days=14)
@@ -459,10 +480,23 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 delta = trial_end_absolute - now
                 trial_days = delta.days
 
+        # Prüfen, ob Kunde bereits eine Standard-Zahlungsmethode hat
+        has_payment_method = False
+        try:
+            customer = stripe.Customer.retrieve(customer_id)
+            default_payment_method = safe_get(customer, 'invoice_settings', {}).get('default_payment_method')
+            has_payment_method = default_payment_method is not None
+        except:
+            pass
+
+        # Für Bestandskunden mit Zahlungsmethode: Automatische Abbuchung
+        # Für neue Kunden oder Trial: Payment Element anzeigen
+        payment_behavior = 'allow_incomplete' if (not has_payment_method or trial_days > 0) else 'error_if_incomplete'
+
         sub_data = {
             'customer': customer_id,
             'items': [{"price": target_price_id}],
-            'payment_behavior': 'default_incomplete',
+            'payment_behavior': payment_behavior,
             'payment_settings': {'save_default_payment_method': 'on_subscription'},
             'expand': ['latest_invoice.payment_intent', 'pending_setup_intent'],
             'metadata': {"tenant_id": tenant.id, "plan_name": plan, "cycle": cycle, "upcoming_plan": "",
@@ -477,10 +511,19 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             tenant.upcoming_plan = None
             update_tenant_from_subscription(db, tenant, sub)
 
+            sub_status = safe_get(sub, 'status')
             inv = safe_get(sub, 'latest_invoice')
             amount_due = safe_get(inv, 'amount_due', 0) / 100.0
 
-            # --- IMMER EIN PAYMENT/SETUP ELEMENT ERZWINGEN ---
+            # Wenn bereits bezahlt (bei Bestandskunden mit Zahlungsmethode)
+            if sub_status == 'active' and amount_due == 0:
+                return {
+                    "subscriptionId": safe_get(sub, 'id'),
+                    "status": "success",
+                    "message": "Abo erfolgreich erstellt und bezahlt"
+                }
+
+            # Sonst: Payment Element anzeigen
             secret = extract_client_secret(inv) or extract_client_secret(safe_get(sub, 'pending_setup_intent'))
             if not secret:
                 si = stripe.SetupIntent.create(customer=customer_id, usage='off_session',
