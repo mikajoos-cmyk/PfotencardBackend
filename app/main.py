@@ -782,6 +782,16 @@ def cancel_subscription_endpoint(
         raise HTTPException(status_code=403, detail="Not authorized")
     return stripe_service.cancel_subscription(db, tenant.id)
 
+@app.post("/api/stripe/reactivate")
+def reactivate_subscription_endpoint(
+    db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return stripe_service.reactivate_subscription(db, tenant.id)
+
 @app.post("/api/stripe/create-topup-intent")
 def create_topup_intent_endpoint(
     data: schemas.TopUpIntentCreate,

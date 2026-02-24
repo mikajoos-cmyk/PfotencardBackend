@@ -1,8 +1,9 @@
 # app/stripe_service.py
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import stripe
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from .config import settings
 from . import models
 import traceback
@@ -206,7 +207,6 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         try:
             customer_name = billing_details.company_name if billing_details.company_name else billing_details.name
             
-            # Adresse bei Stripe hinterlegen
             stripe.Customer.modify(
                 customer_id,
                 name=customer_name,
@@ -218,7 +218,6 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 }
             )
 
-            # USt-ID (VAT ID) verarbeiten (Relevant für B2B / Reverse Charge)
             if billing_details.vat_id:
                 existing_tax_ids = stripe.Customer.list_tax_ids(customer_id)
                 for tax_id_obj in existing_tax_ids.data:
@@ -229,6 +228,22 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     type="eu_vat", 
                     value=billing_details.vat_id
                 )
+                
+            # --- FIX 1: Daten auch in unserer Datenbank speichern fürs Autofill ---
+            current_config = dict(tenant.config) if tenant.config else {}
+            inv_settings = current_config.get("invoice_settings", {})
+            inv_settings["company_name"] = billing_details.company_name
+            inv_settings["account_holder"] = billing_details.name
+            inv_settings["address_line1"] = billing_details.address_line1
+            inv_settings["address_line2"] = f"{billing_details.postal_code} {billing_details.city}"
+            if billing_details.vat_id:
+                inv_settings["vat_id"] = billing_details.vat_id
+            
+            current_config["invoice_settings"] = inv_settings
+            tenant.config = current_config
+            flag_modified(tenant, "config") # Meldet SQLAlchemy, dass das JSON-Feld geändert wurde
+            db.commit()
+
         except Exception as e:
             print(f"Fehler beim Speichern der Rechnungsdaten: {e}")
             raise HTTPException(400, f"Fehler bei Rechnungsdaten (z.B. ungültige USt-ID): {str(e)}")
@@ -292,12 +307,19 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     inv = safe_get(active_subscription, 'latest_invoice')
                     setup = safe_get(active_subscription, 'pending_setup_intent')
                     secret = extract_client_secret(inv) or extract_client_secret(setup)
+                    
+                    # Hier amount_due setzen
+                    amount_due = 0.0
+                    if isinstance(inv, dict):
+                        amount_due = safe_get(inv, 'amount_due', 0) / 100.0
+                    
                     if secret:
                         return {
                             "subscriptionId": safe_get(active_subscription, 'id'),
                             "clientSecret": secret,
                             "status": "payment_needed",
-                            "nextPaymentAmount": target_amount
+                            "nextPaymentAmount": target_amount,
+                            "amountDue": amount_due  # <- WICHTIG
                         }
                 # --- NEU ENDE ---
 
@@ -331,7 +353,6 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             if is_upgrade or is_trial:
                 # Schedule auflösen falls vorhanden
                 sched_id = safe_get(active_subscription, 'schedule')
-                # 'schedule' kann ID-String oder Objekt sein, je nach Expand
                 if isinstance(sched_id, dict): sched_id = sched_id.get('id')
                 
                 if sched_id:
@@ -343,7 +364,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     safe_get(active_subscription, 'id'),
                     items=[{'id': safe_get(current_item, 'id'), 'price': target_price_id}],
                     proration_behavior='always_invoice',
-                    payment_behavior='pending_if_incomplete',
+                    payment_behavior='default_incomplete', # <-- FIX 1: Erzwingt IMMER die Auswahl der Zahlungsmethode!
                     expand=['latest_invoice.payment_intent']
                 )
                 
@@ -362,11 +383,18 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 db.commit()
                 
                 inv = safe_get(updated_sub_step1, 'latest_invoice')
+                
+                # --- FIX 2: Zu zahlenden Betrag für Frontend auslesen ---
+                amount_due = 0.0
+                if isinstance(inv, dict):
+                    amount_due = safe_get(inv, 'amount_due', 0) / 100.0
+
                 return {
                     "subscriptionId": safe_get(updated_sub_step1, 'id'),
                     "clientSecret": extract_client_secret(inv),
                     "status": "updated",
-                    "nextPaymentAmount": target_amount
+                    "nextPaymentAmount": target_amount,
+                    "amountDue": amount_due
                 }
             
             # B) DOWNGRADE (Schedule)
@@ -408,8 +436,6 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 period_end_ts = int(period_end_ts)
 
                 # 3. Start-Zeit der AKTUELLEN Phase finden (für Phase 1)
-                # schedule_obj.phases enthält die Phasen. Wir nehmen die erste (aktuelle).
-                # Wenn wir 'start_date' nicht originalgetreu übergeben, meckert Stripe.
                 current_phase_start = schedule_obj.phases[0].start_date
 
                 print(f"DEBUG: Modifying schedule {sched_id}. Phase 1 start: {current_phase_start}, end: {period_end_ts}")
@@ -422,14 +448,12 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     end_behavior='release', 
                     phases=[
                         {
-                            # Phase 1: Aktuell (Startdatum muss exakt stimmen!)
                             'start_date': current_phase_start, 
                             'end_date': period_end_ts, 
                             'items': [{'price': current_price_id, 'quantity': 1}],
                             'metadata': current_metadata 
                         },
                         {
-                            # Phase 2: Neuer Plan
                             'start_date': period_end_ts,
                             'items': [{'price': target_price_id, 'quantity': 1}],
                             'metadata': {"tenant_id": tenant.id, "plan_name": plan} 
@@ -449,6 +473,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
 
         except Exception as e:
             print(f"FATAL ERROR in create_checkout_session: {e}")
+            import traceback
             traceback.print_exc()
             raise HTTPException(400, f"Update failed: {str(e)}")
 
@@ -457,9 +482,11 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         print("✨ Creating NEW Subscription")
         trial_days = 0
         now = datetime.now(timezone.utc)
-        if tenant.subscription_ends_at and tenant.subscription_ends_at > now:
-            delta = tenant.subscription_ends_at - now
-            trial_days = min(delta.days + 1, 14)
+        
+        trial_end_absolute = tenant.created_at + timedelta(days=14)
+        if trial_end_absolute > now:
+            delta = trial_end_absolute - now
+            trial_days = delta.days
 
         sub_data = {
             'customer': customer_id,
@@ -482,11 +509,17 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             inv = safe_get(sub, 'latest_invoice')
             setup = safe_get(sub, 'pending_setup_intent')
             
+            # --- FIX 3: Betrag für neues Abo auslesen ---
+            amount_due = 0.0
+            if isinstance(inv, dict):
+                amount_due = safe_get(inv, 'amount_due', 0) / 100.0
+
             return {
                 "subscriptionId": safe_get(sub, 'id'),
                 "clientSecret": extract_client_secret(inv) or extract_client_secret(setup),
                 "status": "created",
-                "nextPaymentAmount": target_amount
+                "nextPaymentAmount": target_amount,
+                "amountDue": amount_due
             }
         except Exception as e:
             raise HTTPException(400, f"Create failed: {str(e)}")
@@ -502,14 +535,38 @@ def cancel_subscription(db: Session, tenant_id: int):
             sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
             sched_id = safe_get(sub, 'schedule')
             if sched_id: stripe.SubscriptionSchedule.release(sched_id)
-        except: pass
+        except:
+            pass
 
         sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=True)
         tenant.upcoming_plan = None
         tenant.next_payment_amount = 0.0
         update_tenant_from_subscription(db, tenant, sub)
         return {"message": "Cancelled"}
-    except Exception as e: raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+def reactivate_subscription(db: Session, tenant_id: int):
+    """
+    Reaktiviert ein zum Zeitraumende gekündigtes Abo, indem `cancel_at_period_end` wieder auf False gesetzt wird.
+    """
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant or not tenant.stripe_subscription_id:
+        raise HTTPException(400, "No active subscription")
+    try:
+        # Aktuelle Subscription holen
+        sub = stripe.Subscription.retrieve(tenant.stripe_subscription_id)
+        # Falls bereits vollständig gekündigt, kein Reaktivieren möglich
+        status = safe_get(sub, 'status')
+        if status == 'canceled':
+            raise HTTPException(400, "Subscription already canceled")
+        # Reaktivieren
+        sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=False)
+        update_tenant_from_subscription(db, tenant, sub)
+        return {"message": "Reactivated"}
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 def get_billing_portal_url(db: Session, tenant_id: int, return_url: str):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
