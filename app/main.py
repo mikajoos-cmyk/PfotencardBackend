@@ -768,7 +768,9 @@ def create_subscription(
     if current_user.role != 'admin':
         raise HTTPException(status_code=403, detail="Not authorized")
         
-    return stripe_service.create_checkout_session(db, tenant.id, data.plan, cycle, current_user.email)
+    return stripe_service.create_checkout_session(
+        db, tenant.id, data.plan, cycle, current_user.email, data.billing_details
+    )
 
 @app.post("/api/stripe/cancel")
 def cancel_subscription_endpoint(

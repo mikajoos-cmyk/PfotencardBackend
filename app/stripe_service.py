@@ -180,7 +180,7 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
 
 # --- CHECKOUT & UPDATE ---
 
-def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str):
+def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str, billing_details=None):
     print(f"DEBUG: Starting Checkout/Update for Tenant {tenant_id} -> {plan} ({cycle})")
     
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
@@ -200,18 +200,72 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
         except Exception as e: raise HTTPException(400, f"Stripe Error: {e}")
             
     customer_id = tenant.stripe_customer_id
+
+    # --- NEU START: Customer mit Rechnungsdaten updaten ---
+    if billing_details:
+        try:
+            customer_name = billing_details.company_name if billing_details.company_name else billing_details.name
+            
+            # Adresse bei Stripe hinterlegen
+            stripe.Customer.modify(
+                customer_id,
+                name=customer_name,
+                address={
+                    "line1": billing_details.address_line1,
+                    "postal_code": billing_details.postal_code,
+                    "city": billing_details.city,
+                    "country": billing_details.country,
+                }
+            )
+
+            # USt-ID (VAT ID) verarbeiten (Relevant für B2B / Reverse Charge)
+            if billing_details.vat_id:
+                existing_tax_ids = stripe.Customer.list_tax_ids(customer_id)
+                for tax_id_obj in existing_tax_ids.data:
+                    stripe.Customer.delete_tax_id(customer_id, tax_id_obj.id)
+                
+                stripe.Customer.create_tax_id(
+                    customer_id,
+                    type="eu_vat", 
+                    value=billing_details.vat_id
+                )
+        except Exception as e:
+            print(f"Fehler beim Speichern der Rechnungsdaten: {e}")
+            raise HTTPException(400, f"Fehler bei Rechnungsdaten (z.B. ungültige USt-ID): {str(e)}")
+    # --- NEU ENDE ---
+
     active_subscription = None
     
     # Abo laden
     if tenant.stripe_subscription_id:
         try:
+            # WICHTIG: expand mit 'latest_invoice.payment_intent' für unbezahlte Abos
             active_subscription = stripe.Subscription.retrieve(
                 tenant.stripe_subscription_id,
-                expand=['items.data', 'schedule'] # Schedule gleich mitladen wenn möglich
+                expand=['items.data', 'schedule', 'latest_invoice.payment_intent', 'pending_setup_intent'] 
             )
             sub_status = safe_get(active_subscription, 'status')
-            if sub_status not in ['active', 'trialing', 'past_due', 'incomplete', 'unpaid']:
+            
+            # --- NEU: SELF-HEALING MECHANISMUS ---
+            # Falls ein Webhook verloren ging und die DB noch denkt, das Abo sei 'incomplete',
+            # Stripe aber sagt, es ist 'incomplete_expired' oder 'canceled'.
+            if sub_status in ['canceled', 'incomplete_expired']:
+                print(f"Self-Healing: Subscription in Stripe is {sub_status}. Updating DB.")
+                update_tenant_from_subscription(db, tenant, active_subscription)
+                active_subscription = None # Erzwingt die Erstellung eines neuen Abos unten
+                
+            # Wenn das Abo noch unbezahlt ist und der User jetzt einen ANDEREN Plan wählt:
+            # Wir stornieren die alte unbezahlte Subscription und erstellen gleich eine saubere neue.
+            elif sub_status in ['incomplete', 'unpaid'] and get_nested(active_subscription, 'items', 'data', 0, 'price', 'id') != target_price_id:
+                try:
+                    stripe.Subscription.cancel(safe_get(active_subscription, 'id'))
+                except:
+                    pass
+                active_subscription = None # Erzwingt neue Erstellung
+                
+            elif sub_status not in ['active', 'trialing', 'past_due', 'incomplete', 'unpaid']:
                 active_subscription = None
+                
         except Exception as e: 
             print(f"DEBUG: Could not fetch subscription: {e}")
             active_subscription = None
@@ -231,6 +285,22 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             
             # --- SPEZIALFALL: Downgrade abbrechen / Beim aktuellen Plan bleiben ---
             if current_price_id == target_price_id:
+                
+                # --- NEU START: Incomplete (unbezahlte) Abos fortsetzen ---
+                sub_status = safe_get(active_subscription, 'status')
+                if sub_status in ['incomplete', 'unpaid']:
+                    inv = safe_get(active_subscription, 'latest_invoice')
+                    setup = safe_get(active_subscription, 'pending_setup_intent')
+                    secret = extract_client_secret(inv) or extract_client_secret(setup)
+                    if secret:
+                        return {
+                            "subscriptionId": safe_get(active_subscription, 'id'),
+                            "clientSecret": secret,
+                            "status": "payment_needed",
+                            "nextPaymentAmount": target_amount
+                        }
+                # --- NEU ENDE ---
+
                 # Wenn ein Schedule existiert (z.B. geplanter Downgrade), diesen löschen!
                 sched_id = safe_get(active_subscription, 'schedule')
                 if isinstance(sched_id, dict): sched_id = sched_id.get('id')

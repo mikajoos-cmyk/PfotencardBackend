@@ -90,9 +90,19 @@ class SubscriptionDetails(BaseModel):
 class AVVAccept(BaseModel):
     version: str = "1.0"
 
+class BillingDetails(BaseModel):
+    company_name: Optional[str] = None
+    name: str
+    address_line1: str
+    postal_code: str
+    city: str
+    country: str = "DE"
+    vat_id: Optional[str] = None
+
 class SubscriptionUpdate(BaseModel):
     subdomain: str
     plan: str
+    billing_details: Optional[BillingDetails] = None
 
 class TrainingTypeBase(BaseModel):
     name: str
