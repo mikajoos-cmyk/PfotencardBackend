@@ -19,7 +19,7 @@ from .database import engine, get_db, SessionLocal
 from .config import settings
 from supabase import create_client, Client
 
-models.Base.metadata.create_all(bind=engine)
+#models.Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
