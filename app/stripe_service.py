@@ -78,7 +78,34 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
         sub_id = safe_get(subscription, 'id')
         status = safe_get(subscription, 'status')
         metadata = safe_get(subscription, 'metadata') or {}
-        
+
+        # --- FIX 1: Abgebrochene oder abgelaufene Abos direkt sperren ---
+        # Wenn das Abo ungültig ist, setzen wir den Plan sofort zurück und entziehen den Zugriff
+        if status in ['canceled', 'incomplete_expired', 'unpaid']:
+            ended_at = safe_get(subscription, 'ended_at') or safe_get(subscription, 'canceled_at')
+
+            tenant.stripe_subscription_id = sub_id
+            tenant.stripe_subscription_status = status
+            tenant.plan = 'starter'
+            tenant.cancel_at_period_end = False
+
+            # Setze das Enddatum auf die Vergangenheit/Jetzt, damit der Zugriff sofort erlischt
+            if ended_at:
+                tenant.subscription_ends_at = datetime.fromtimestamp(ended_at, tz=timezone.utc)
+            else:
+                tenant.subscription_ends_at = datetime.now(timezone.utc)
+
+            tenant.next_payment_amount = 0.0
+            tenant.next_payment_date = None
+            tenant.upcoming_plan = None
+
+            db.add(tenant)
+            db.commit()
+            db.refresh(tenant)
+            print(f"✅ Tenant synced (CANCELED/EXPIRED). Reverted to starter.")
+            return
+        # -----------------------------------------------------------------
+
         # 1. ENDDATUM
         current_period_end = safe_get(subscription, 'current_period_end')
         if not current_period_end:
@@ -92,7 +119,7 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
         # Status Update
         tenant.stripe_subscription_id = sub_id
         tenant.stripe_subscription_status = status
-        
+
         # Kündigungsstatus
         stripe_cancel_flag = safe_get(subscription, 'cancel_at_period_end')
         if stripe_cancel_flag or (cancel_at is not None):
@@ -102,21 +129,23 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
                 tenant.subscription_ends_at = datetime.fromtimestamp(final_end_date, tz=timezone.utc)
         else:
             tenant.cancel_at_period_end = False
+            # --- FIX 2: Datum nur in die Zukunft setzen, wenn WIRKLICH bezahlt oder im Trial ---
+            # 'incomplete' Abos dürfen das Enddatum nicht verlängern!
             if status == 'trialing' and trial_end:
-                 tenant.subscription_ends_at = datetime.fromtimestamp(trial_end, tz=timezone.utc)
-            elif current_period_end:
-                 tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
+                tenant.subscription_ends_at = datetime.fromtimestamp(trial_end, tz=timezone.utc)
+            elif status == 'active' and current_period_end:
+                tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
 
         # 2. PLAN & UPCOMING
-        if safe_get(metadata, 'plan_name'):
-            tenant.plan = safe_get(metadata, 'plan_name')
-
-        if status in ['active', 'trialing', 'incomplete']:
+        # --- FIX 3: Plan-Update nur, wenn aktiv ---
+        if status in ['active', 'trialing']:
+            if safe_get(metadata, 'plan_name'):
+                tenant.plan = safe_get(metadata, 'plan_name')
             tenant.is_active = True
 
         # 3. PREIS VORSCHAU (Ziel-Plan Preis)
         target_plan_name = tenant.upcoming_plan if tenant.upcoming_plan else tenant.plan
-        
+
         # Zyklus raten
         current_cycle = "monthly"
         try:
@@ -124,9 +153,10 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
             if items_data:
                 interval = get_nested(items_data[0], 'plan', 'interval')
                 if interval == 'year': current_cycle = "yearly"
-        except: pass
+        except:
+            pass
 
-        if not tenant.cancel_at_period_end and status not in ['canceled', 'incomplete_expired', 'unpaid']:
+        if not tenant.cancel_at_period_end and status not in ['canceled', 'incomplete_expired', 'unpaid', 'incomplete']:
             price_conf = get_plan_config(target_plan_name, current_cycle)
             if price_conf:
                 tenant.next_payment_amount = price_conf["amount"]
@@ -145,6 +175,7 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
 
     except Exception as e:
         print(f"❌ Error syncing tenant DB: {e}")
+        import traceback
         traceback.print_exc()
 
 # --- CHECKOUT & UPDATE ---
