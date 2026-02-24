@@ -76,6 +76,7 @@ def public_tenant_status(token: str, db: Session = Depends(get_db)):
     return {
         "status": status.status,
         "message": status.message,
+        "updated_at": status.updated_at.isoformat() if hasattr(status.updated_at, 'isoformat') else str(status.updated_at),
         "branding": {
             "primary_color": branding.get("primary_color"),
             "logo_url": branding.get("logo_url"),
