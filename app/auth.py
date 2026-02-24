@@ -175,28 +175,32 @@ async def get_current_active_user(
         raise HTTPException(status_code=400, detail="Inactive user")
 
     # Prüfen, ob das Abo der Schule abgelaufen ist
-    if True:  # user.role != 'admin':
-        if tenant.subscription_ends_at:
-            now = datetime.now(timezone.utc)
-            if tenant.subscription_ends_at < now:
-                error_detail = {
-                    "code": "SUBSCRIPTION_EXPIRED",
-                    "message": "Das Abonnement der Hundeschule ist abgelaufen.",
-                    "support_email": tenant.support_email or "support@pfotencard.de"
-                }
-                raise HTTPException(
-                    status_code=402,
-                    detail=error_detail
-                )
+    # if True:  # user.role != 'admin':
+    #     if tenant.subscription_ends_at:
+    #         now = datetime.now(timezone.utc)
+    #         if tenant.subscription_ends_at < now:
+    #             error_detail = {
+    #                 "code": "SUBSCRIPTION_EXPIRED",
+    #                 "message": "Das Abonnement der Hundeschule ist abgelaufen.",
+    #                 "support_email": tenant.support_email or "support@pfotencard.de"
+    #             }
+    #             raise HTTPException(
+    #                 status_code=402,
+    #                 detail=error_detail
+    #             )
 
     return user
 
 
-def verify_active_subscription(tenant: models.Tenant = Depends(get_current_tenant)):
+def verify_active_subscription(request: Request, tenant: models.Tenant = Depends(get_current_tenant)):
     """
     Blockiert den Zugriff, wenn das Abo abgelaufen ist.
     Wird für alle Schreib-Operationen (POST, PUT, DELETE) verwendet.
     """
+    # Sonderlocke: create-subscription darf IMMER aufgerufen werden, auch wenn das Abo abgelaufen ist
+    if "/api/stripe/create-subscription" in request.url.path:
+        return tenant
+
     now = datetime.now(timezone.utc)
 
     # Toleranz: Wir geben evtl. 24h Puffer, damit nicht mitten am Tag abgeschaltet wird
