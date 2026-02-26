@@ -112,6 +112,10 @@ class TenantStatus(BaseModel):
     # NEU: AVV Status
     avv_accepted_at: Optional[datetime] = None
     avv_version: Optional[str] = None
+    
+    # NEU: Zusätzliche Daten für den AVV
+    tenant_address: Optional[str] = None
+    current_avv_version: str = "1.0"
 
 class SubscriptionDetails(BaseModel):
     plan: Optional[str] = None

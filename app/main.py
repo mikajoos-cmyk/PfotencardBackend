@@ -287,6 +287,21 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
     elif tenant.stripe_subscription_status == 'trialing':
         in_trial = True
 
+    # --- AVV Daten aufbereiten ---
+    current_avv_version = "1.0"
+    tenant_address = ""
+    # Versuche Adresse aus legal_settings zu laden
+    legal = tenant.config.get("legal_settings", {}) if tenant.config else {}
+    if legal:
+        street = legal.get("street", "")
+        house = legal.get("house_number", "")
+        zip_c = legal.get("zip_code", "")
+        city = legal.get("city", "")
+        if street or city:
+            tenant_address = f"{street} {house}, {zip_c} {city}".strip()
+            if tenant_address.startswith(","): tenant_address = tenant_address[1:].strip()
+            if tenant_address.endswith(","): tenant_address = tenant_address[:-1].strip()
+
     return {
         "exists": True, 
         "name": tenant.name,
@@ -305,9 +320,11 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "next_payment_date": tenant.next_payment_date,
         "upcoming_plan": tenant.upcoming_plan,
         
-        # NEU: AVV Status
+        # NEU: AVV Status & Daten
         "avv_accepted_at": tenant.avv_accepted_at,
-        "avv_version": tenant.avv_accepted_version
+        "avv_version": tenant.avv_accepted_version,
+        "tenant_address": tenant_address,
+        "current_avv_version": current_avv_version
     }
 
 # Sicherheit: Nur mit Secret Key ausführbar
