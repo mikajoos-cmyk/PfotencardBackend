@@ -19,7 +19,7 @@ from .database import engine, get_db, SessionLocal
 from .config import settings
 from supabase import create_client, Client
 
-#models.Base.metadata.create_all(bind=engine)
+models.Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
@@ -1675,6 +1675,16 @@ def read_my_bookings(
     current_user: schemas.User = Depends(auth.get_current_active_user)
 ):
     return crud.get_user_bookings(db, tenant.id, current_user.id)
+
+@app.get("/api/users/{user_id}/bookings", response_model=List[schemas.Booking])
+def read_user_bookings(
+    user_id: int,
+    db: Session = Depends(get_db), tenant: models.Tenant = Depends(auth.get_current_tenant),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter'] and current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.get_user_bookings(db, tenant.id, user_id)
 
 @app.delete("/api/appointments/{appointment_id}/book")
 def cancel_appointment_booking(

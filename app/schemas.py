@@ -20,6 +20,38 @@ class InvoiceSettings(BaseModel):
     is_small_business: bool = False
     small_business_text: Optional[str] = "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."
 
+class WidgetSettings(BaseModel):
+    type: str = "status"
+    theme: Optional[str] = "light"
+    primary_color: Optional[str] = "f97316"
+    layout: str = "compact"
+    limit: int = 5
+    height: int = 200
+
+class LegalSettings(BaseModel):
+    company_name: Optional[str] = ""
+    legal_form: str = "individual"
+    owner_name: Optional[str] = ""
+    representative: Optional[str] = ""
+    registry_court: Optional[str] = ""
+    registry_number: Optional[str] = ""
+    street: Optional[str] = ""
+    house_number: Optional[str] = ""
+    zip_code: Optional[str] = ""
+    city: Optional[str] = ""
+    email_public: Optional[str] = ""
+    email_support: Optional[str] = ""
+    phone: Optional[str] = ""
+    supervisory_authority: Optional[str] = ""
+    has_vat_id: bool = False
+    vat_id: Optional[str] = ""
+    separate_billing_address: bool = False
+    billing_company_name: Optional[str] = ""
+    billing_street: Optional[str] = ""
+    billing_house_number: Optional[str] = ""
+    billing_zip_code: Optional[str] = ""
+    billing_city: Optional[str] = ""
+
 class TenantConfig(BaseModel):
     branding: Dict[str, Any] = {} 
     wording: Dict[str, str] = {} 
@@ -30,6 +62,8 @@ class TenantConfig(BaseModel):
     auto_progress_enabled: bool = False
     appointments: Dict[str, Any] = {"default_duration": 60, "max_participants": 10}
     invoice_settings: Optional[InvoiceSettings] = None
+    widgets: Optional[WidgetSettings] = None
+    legal_settings: Optional[LegalSettings] = None
 
 class TenantBase(BaseModel):
     name: str
@@ -333,20 +367,6 @@ class BookingCreate(BookingBase):
     dog_id: Optional[int] = None # NEU
     is_billed: bool = False # NEU
 
-class Booking(BookingBase):
-    id: int
-    tenant_id: int
-    appointment_id: int
-    user_id: int
-    status: str
-    attended: bool
-    is_billed: bool = False # NEU
-    dog_id: Optional[int] = None # NEU
-    created_at: datetime
-    user: Optional[User] = None
-    dog: Optional[Dog] = None
-    class Config: from_attributes = True
-
 class AppointmentBase(BaseModel):
     title: str
     description: Optional[str] = None
@@ -360,6 +380,31 @@ class AppointmentBase(BaseModel):
     price: Optional[float] = None # NEU
     is_open_for_all: bool = False
     block_id: Optional[str] = None # NEU: Block-Kurs ID
+
+class AppointmentShort(AppointmentBase):
+    id: int
+    tenant_id: int
+    created_at: datetime
+    participants_count: Optional[int] = None 
+    trainer: Optional[User] = None
+    training_type: Optional[TrainingType] = None
+    target_levels: List[Level] = []
+    class Config: from_attributes = True
+
+class Booking(BookingBase):
+    id: int
+    tenant_id: int
+    appointment_id: int
+    user_id: int
+    status: str
+    attended: bool
+    is_billed: bool = False # NEU
+    dog_id: Optional[int] = None # NEU
+    created_at: datetime
+    user: Optional[User] = None
+    dog: Optional[Dog] = None
+    appointment: Optional[AppointmentShort] = None # NEU: Damit Termin-Details im UI sichtbar sind
+    class Config: from_attributes = True
 
 class AppointmentCreate(AppointmentBase):
     pass
@@ -433,14 +478,6 @@ class AppointmentSettings(BaseModel):
     cancelation_period_hours: int = 0
     color_rules: List[Dict[str, Any]] = []
 
-class WidgetSettings(BaseModel):
-    type: str = "status"
-    theme: Optional[str] = "light"
-    primary_color: Optional[str] = "f97316"
-    layout: str = "compact"
-    limit: int = 5
-    height: int = 200
-
 class SettingsUpdate(BaseModel):
     school_name: str
     support_email: Optional[str] = None
@@ -462,6 +499,7 @@ class SettingsUpdate(BaseModel):
     auto_progress_enabled: bool = False
     appointments: Optional[AppointmentSettings] = None
     invoice_settings: Optional[InvoiceSettings] = None
+    legal_settings: Optional[LegalSettings] = None
     widgets: Optional[WidgetSettings] = None
 
 class NewsletterSubscriberBase(BaseModel):

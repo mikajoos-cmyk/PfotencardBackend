@@ -177,6 +177,10 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     if settings.invoice_settings:
         current_config["invoice_settings"] = settings.invoice_settings.model_dump()
 
+    # NEU: Rechtliche Daten
+    if settings.legal_settings:
+        current_config["legal_settings"] = settings.legal_settings.model_dump()
+
     # NEU: Widget-Einstellungen
     if settings.widgets:
         current_config["widgets"] = settings.widgets.model_dump()
@@ -1465,7 +1469,11 @@ def get_participants(db: Session, tenant_id: int, appointment_id: int):
     ).all()
 
 def get_user_bookings(db: Session, tenant_id: int, user_id: int):
-    return db.query(models.Booking).filter(
+    return db.query(models.Booking).options(
+        joinedload(models.Booking.appointment).joinedload(models.Appointment.training_type),
+        joinedload(models.Booking.appointment).joinedload(models.Appointment.trainer),
+        joinedload(models.Booking.dog)
+    ).filter(
         models.Booking.user_id == user_id,
         models.Booking.tenant_id == tenant_id,
         models.Booking.status.in_(['confirmed', 'waitlist'])
@@ -2161,16 +2169,24 @@ def update_app_status(db: Session, tenant_id: int, status_update: schemas.AppSta
         models.User.is_active == True
     ).all()
     
+    # Mapping für Status-Anzeige
+    status_map = {
+        "active": "Aktiv",
+        "cancelled": "Abgesagt",
+        "maintenance": "Wartungsarbeiten"
+    }
+    display_status = status_map.get(status_update.status, status_update.status)
+
     for u in active_users:
         notify_user(
             db=db,
             user_id=u.id,
             type="alert",
             title="Status Update",
-            message=status_update.message or f"Der Status der App hat sich auf '{status_update.status}' geändert.",
+            message=status_update.message or f"Der Status der App hat sich auf '{display_status}' geändert.",
             url="/",
             details={
-                "Neuer Status": status_update.status,
+                "Neuer Status": display_status,
                 "Nachricht": status_update.message or "-"
             }
         )
