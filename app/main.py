@@ -79,6 +79,7 @@ def public_tenant_status(token: str, db: Session = Depends(get_db)):
         "updated_at": status.updated_at.isoformat() if hasattr(status.updated_at, 'isoformat') else str(status.updated_at),
         "branding": {
             "primary_color": branding.get("primary_color"),
+            "background_color": branding.get("background_color"),
             "logo_url": branding.get("logo_url"),
             "school_name": tenant.name
         }
@@ -150,6 +151,7 @@ def public_tenant_appointments(token: str, db: Session = Depends(get_db)):
         ],
         "branding": {
             "primary_color": branding.get("primary_color"),
+            "background_color": branding.get("background_color"),
             "logo_url": branding.get("logo_url"),
             "school_name": tenant.name
         },
