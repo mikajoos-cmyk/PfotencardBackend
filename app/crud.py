@@ -1486,7 +1486,7 @@ def toggle_attendance(db: Session, tenant_id: int, booking_id: int, booked_by_id
     db.refresh(booking)
     return booking
 
-def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Optional[int] = None):
+def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Optional[int] = None, auto_commit: bool = True):
     booking = db.query(models.Booking).filter(
         models.Booking.id == booking_id,
         models.Booking.tenant_id == tenant_id
@@ -1533,7 +1533,8 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
         # Falls Transaktion existiert aber is_billed noch False ist -> Syncen
         if not booking.is_billed:
             booking.is_billed = True
-            db.commit()
+            if auto_commit:
+                db.commit()
         raise HTTPException(status_code=400, detail="Bereits abgerechnet.")
 
     # Transaktion erstellen (Nur wenn Preis > 0 oder VIP-Info gewünscht? Hier: Nur bei Preis > 0)
@@ -1574,29 +1575,47 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
             db.flush() 
     
     booking.is_billed = True # NEU: Als abgerechnet markieren
-    db.commit()
-    db.refresh(user)
+    
+    if auto_commit:
+        db.commit()
+        db.refresh(user)
+    
     return booking
 
 def bill_all_participants(db: Session, tenant_id: int, appointment_id: int, booked_by_id: Optional[int] = None):
     bookings = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.status == 'confirmed',
-        models.Booking.attended == True,
+        # models.Booking.attended == True, # Entfernt, um alle bestätigten abzurechnen
         models.Booking.tenant_id == tenant_id
     ).all()
     
     results = []
     for booking in bookings:
+        # Falls bereits abgerechnet, überspringen wir diesen Teilnehmer leise oder mit Erfolg
+        if booking.is_billed:
+            results.append({"booking_id": booking.id, "status": "success", "detail": "Bereits abgerechnet"})
+            continue
+
         try:
-            bill_booking(db, tenant_id, booking.id, booked_by_id=booked_by_id)
+            # Wir nutzen einen Savepoint (nested transaction), damit ein Fehler bei einem Teilnehmer
+            # nicht die gesamte Session korrumpiert und wir trotzdem für die anderen weitermachen können.
+            with db.begin_nested():
+                bill_booking(db, tenant_id, booking.id, booked_by_id=booked_by_id, auto_commit=False)
+            
+            # Nach erfolgreichem nested block können wir für diesen Teilnehmer committen
+            db.commit()
             results.append({"booking_id": booking.id, "status": "success"})
         except HTTPException as e:
+            # nested transaction wird automatisch zurückgerollt durch den context manager
             results.append({"booking_id": booking.id, "status": "error", "detail": e.detail})
+        except Exception as e:
+            # Unerwartete Fehler abfangen
+            results.append({"booking_id": booking.id, "status": "error", "detail": str(e)})
             
     return results
 
-def grant_progress_booking(db: Session, tenant_id: int, booking_id: int):
+def grant_progress_booking(db: Session, tenant_id: int, booking_id: int, auto_commit: bool = True):
     booking = db.query(models.Booking).filter(
         models.Booking.id == booking_id,
         models.Booking.tenant_id == tenant_id
@@ -1621,24 +1640,29 @@ def grant_progress_booking(db: Session, tenant_id: int, booking_id: int):
     
     if not existing:
         create_achievement(db, booking.user_id, tenant_id, appt.training_type_id, date_achieved=appt.start_time, dog_id=booking.dog_id)
-        db.commit()
+        if auto_commit:
+            db.commit()
     return booking
 
 def grant_all_progress(db: Session, tenant_id: int, appointment_id: int):
     bookings = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
         models.Booking.status == 'confirmed',
-        models.Booking.attended == True,
+        # models.Booking.attended == True, # Entfernt
         models.Booking.tenant_id == tenant_id
     ).all()
     
     results = []
     for booking in bookings:
         try:
-            grant_progress_booking(db, tenant_id, booking.id)
+            with db.begin_nested():
+                grant_progress_booking(db, tenant_id, booking.id, auto_commit=False)
+            db.commit()
             results.append({"booking_id": booking.id, "status": "success"})
         except HTTPException as e:
             results.append({"booking_id": booking.id, "status": "error", "detail": e.detail})
+        except Exception as e:
+            results.append({"booking_id": booking.id, "status": "error", "detail": str(e)})
     return results
 
 # --- CHECK AND SEND REMINDERS ---
