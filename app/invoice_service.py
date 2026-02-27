@@ -87,7 +87,21 @@ def generate_invoice_pdf(transaction: models.Transaction, tenant: models.Tenant,
         logger.error(f"Logo error: {e}")
 
     # Sender Address (Absenderzeile klein)
-    sender_line = f"{company_name}, {address_line1}, {address_line2}"
+    is_small_business = inv_settings.get("is_small_business", False)
+    
+    if is_small_business:
+        # Kleingewerbe: "Fantasiename – Inh. Vorname Nachname" oder nur "Vorname Nachname"
+        owner_name = inv_settings.get("owner_name") or ""
+        fantasie_name = inv_settings.get("fantasie_name") or ""
+        if fantasie_name and owner_name:
+            sender_company = f"{fantasie_name} – Inh. {owner_name}"
+        else:
+            sender_company = owner_name or fantasie_name or company_name
+    else:
+        # GmbH: Nur offizieller Firmenname
+        sender_company = company_name
+
+    sender_line = f"{sender_company}, {address_line1}, {address_line2}"
     c.setFont("Helvetica", 8)
     # Positioning adapted to A4 standard window envelope
     c.drawString(50, A4[1] - inch - 120, sender_line)
@@ -113,7 +127,7 @@ def generate_invoice_pdf(transaction: models.Transaction, tenant: models.Tenant,
     right_x = A4[0] - inch - 135
     info_start_y = A4[1] - inch - 110
     
-    c.drawString(right_x, info_start_y + 25, f"{company_name}") # Wiederholung Firmenname oben rechts
+    c.drawString(right_x, info_start_y + 25, f"{sender_company}") # Wiederholung Firmenname oben rechts
     c.drawString(right_x, info_start_y, f"{address_line1}")
     c.drawString(right_x, info_start_y - 14, f"{address_line2}")
     
@@ -135,14 +149,25 @@ def generate_invoice_pdf(transaction: models.Transaction, tenant: models.Tenant,
     # Format currency
     amount_str = f"{abs(transaction.amount):.2f}".replace('.', ',') + " €"
     
-    table_data = [
-        ["Pos.", "Beschreibung", "Menge", "Einzelpreis", "Gesamtpreis"],
-        ["1", transaction.description or "Leistung", "1", amount_str, amount_str]
-    ]
+    vat_rate = inv_settings.get("vat_rate", 19.0)
+    is_small_business = inv_settings.get("is_small_business", False)
+
+    if is_small_business:
+        table_data = [
+            ["Pos.", "Beschreibung", "Menge", "Einzelpreis", "Gesamtpreis"],
+            ["1", transaction.description or "Leistung", "1", amount_str, amount_str]
+        ]
+        col_widths = [40, 250, 50, 80, 80]
+    else:
+        # Bei GmbH MwSt. in der Zeile anzeigen
+        table_data = [
+            ["Pos.", "Beschreibung", "MwSt.", "Menge", "Einzelpreis", "Gesamtpreis"],
+            ["1", transaction.description or "Leistung", f"{vat_rate}%", "1", amount_str, amount_str]
+        ]
+        col_widths = [30, 220, 40, 50, 80, 80]
     
     table_y = A4[1] - inch - 300
     
-    col_widths = [40, 250, 50, 80, 80]
     t = Table(table_data, colWidths=col_widths)
     t.setStyle(TableStyle([
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
@@ -160,21 +185,19 @@ def generate_invoice_pdf(transaction: models.Transaction, tenant: models.Tenant,
     total_y = table_y - h - 30
     c.setFont("Helvetica-Bold", 10)
     
-    vat_rate = inv_settings.get("vat_rate", 19.0)
-    is_small_business = inv_settings.get("is_small_business", False)
     amount = abs(transaction.amount)
     
-    if is_small_business or vat_rate == 0:
+    if is_small_business:
         # Kleinunternehmer
         amount_str = f"{amount:.2f}".replace('.', ',') + " €"
-        c.drawRightString(A4[0] - 50, total_y, f"Gesamtbetrag: {amount_str}")
+        c.drawRightString(A4[0] - 50, total_y, f"Rechnungsbetrag: {amount_str}")
         
         total_y -= 25
         c.setFont("Helvetica", 9)
-        small_business_text = inv_settings.get("small_business_text") or "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."
+        small_business_text = inv_settings.get("small_business_text") or "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet und ausgewiesen."
         c.drawString(50, total_y, small_business_text)
     else:
-        # Normal (Brutto-Rechnung)
+        # GmbH (Brutto-Rechnung - MwSt. herausrechnen)
         netto = amount / (1 + (vat_rate / 100))
         tax = amount - netto
         
@@ -183,16 +206,16 @@ def generate_invoice_pdf(transaction: models.Transaction, tenant: models.Tenant,
         gross_str = f"{amount:.2f}".replace('.', ',') + " €"
         
         c.setFont("Helvetica", 10)
-        c.drawRightString(A4[0] - 150, total_y, "Netto-Betrag:")
+        c.drawRightString(A4[0] - 150, total_y, "Gesamt Netto:")
         c.drawRightString(A4[0] - 50, total_y, netto_str)
         
         total_y -= 15
-        c.drawRightString(A4[0] - 150, total_y, f"MwSt. ({vat_rate}%):")
+        c.drawRightString(A4[0] - 150, total_y, f"zuzüglich {vat_rate}% MwSt.:")
         c.drawRightString(A4[0] - 50, total_y, tax_str)
         
         total_y -= 20
         c.setFont("Helvetica-Bold", 10)
-        c.drawRightString(A4[0] - 150, total_y, "Gesamtbetrag:")
+        c.drawRightString(A4[0] - 150, total_y, "Rechnungsbetrag (Brutto):")
         c.drawRightString(A4[0] - 50, total_y, gross_str)
         
         total_y -= 25
@@ -214,28 +237,66 @@ def draw_footer(c, settings):
     c.setStrokeColor(colors.lightgrey)
     c.line(50, footer_y + 15, A4[0]-50, footer_y + 15)
     
+    is_small_business = settings.get("is_small_business", False)
+    
     company = settings.get("company_name", "")
+    if is_small_business:
+        # Bei Kleingewerbe evtl. nur Inhabername in der Fußzeile falls Fantasiename zu lang
+        owner_name = settings.get("owner_name") or ""
+        fantasie_name = settings.get("fantasie_name") or ""
+        if fantasie_name and owner_name:
+            company = f"{fantasie_name} – {owner_name}"
+        else:
+            company = owner_name or fantasie_name or company
+
     bank = settings.get("bank_name", "")
     iban = settings.get("iban", "")
     bic = settings.get("bic", "")
     tax_nr = settings.get("tax_number", "")
     vat_id = settings.get("vat_id", "")
+    reg_court = settings.get("registry_court", "")
+    reg_nr = settings.get("registry_number", "")
     footer_text = settings.get("footer_text", "")
     
     # Column 1: Company & Text
-    c.drawString(50, footer_y, company)
+    c.drawString(50, footer_y, company[:50])
+    
+    y_offset = 12
+
     if footer_text:
         c.setFont("Helvetica", 7)
-        c.drawString(50, footer_y - 12, footer_text[:60]) # First line
-        c.drawString(50, footer_y - 22, footer_text[60:120]) # Second line
+        c.drawString(50, footer_y - y_offset, footer_text[:60]) # First line
+        c.drawString(50, footer_y - y_offset - 10, footer_text[60:120]) # Second line
     
-    # Column 2: Tax
+    # Column 2: Tax & Registry
     c.setFont("Helvetica", 8)
     col2_x = 220
-    if tax_nr:
-        c.drawString(col2_x, footer_y, f"Steuer-Nr: {tax_nr}")
-    if vat_id:
-        c.drawString(col2_x, footer_y - 12, f"USt-ID: {vat_id}")
+    current_col2_y = footer_y
+    if is_small_business:
+        if tax_nr:
+            c.drawString(col2_x, current_col2_y, f"Steuernummer: {tax_nr}")
+            current_col2_y -= 12
+        if vat_id:
+            c.drawString(col2_x, current_col2_y, f"USt-ID: {vat_id}")
+            current_col2_y -= 12
+    else:
+        # GmbH: USt-IdNr zwingend falls vorhanden
+        if vat_id:
+            c.drawString(col2_x, current_col2_y, f"USt-ID: {vat_id}")
+            current_col2_y -= 12
+            #if tax_nr:
+            #    c.drawString(col2_x, current_col2_y, f"Steuer-Nr: {tax_nr}")
+            #    current_col2_y -= 12
+        elif tax_nr:
+            c.drawString(col2_x, current_col2_y, f"Steuer-Nr: {tax_nr}")
+            current_col2_y -= 12
+    
+    # Registergericht & Nummer (falls vorhanden) unter die Steuernummer
+    print(42343434, reg_court, reg_nr)
+    if reg_court or reg_nr:
+        print("ererre", reg_court, reg_nr)
+        reg_line = f"{reg_court} {reg_nr}".strip()
+        c.drawString(col2_x, current_col2_y, reg_line[:60])
 
     # Column 3: Bank
     col3_x = 380

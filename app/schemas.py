@@ -10,6 +10,8 @@ class InvoiceSettings(BaseModel):
     address_line2: Optional[str] = None # PLZ Stadt
     tax_number: Optional[str] = None
     vat_id: Optional[str] = None
+    registry_court: Optional[str] = None
+    registry_number: Optional[str] = None
     bank_name: Optional[str] = None
     iban: Optional[str] = None
     bic: Optional[str] = None
@@ -19,6 +21,8 @@ class InvoiceSettings(BaseModel):
     vat_rate: float = 19.0
     is_small_business: bool = False
     small_business_text: Optional[str] = "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."
+    owner_name: Optional[str] = None
+    fantasie_name: Optional[str] = None
 
 class WidgetSettings(BaseModel):
     type: str = "status"
