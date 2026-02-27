@@ -288,7 +288,7 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         in_trial = True
 
     # --- AVV Daten aufbereiten ---
-    current_avv_version = "1.0"
+    current_avv_version = settings.CURRENT_AVV_VERSION
     tenant_address = ""
     # Versuche Adresse aus legal_settings zu laden
     legal = tenant.config.get("legal_settings", {}) if tenant.config else {}

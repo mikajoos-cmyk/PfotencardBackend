@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     VAPID_PRIVATE_KEY: str
     VITE_VAPID_PUBLIC_KEY: str
 
+    # Rechtliches
+    CURRENT_AVV_VERSION: str = "1.0"
+
     # Neue Schreibweise für Pydantic v2
     model_config = SettingsConfigDict(
         env_file=".env",
