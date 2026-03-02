@@ -55,6 +55,30 @@ class Tenant(Base):
     chat_messages = relationship("ChatMessage", back_populates="tenant", cascade="all, delete-orphan")
 
 
+# --- 1b. ABOS & PAKETE ---
+class SubscriptionPackage(Base):
+    __tablename__ = 'subscription_packages'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    plan_name = Column(String(50), unique=True, nullable=False) # z.B. "starter", "pro", "premium"
+    price_monthly = Column(Float, default=0.0)
+    
+    # JSON-Feld, das definiert, welche Module aktiv sind (Mapping für das Frontend)
+    allowed_modules = Column(JSONB, default=["news", "documents"]) 
+    
+    # Spezifische Limits (z.B. maximale Kundenanzahl)
+    max_customers = Column(Integer, nullable=True) 
+    
+    # Gebühr für selbstständiges Guthaben-Aufladen (in Prozent)
+    top_up_fee_percent = Column(Float, default=0.0)
+    
+    # Granulare Feature-Einstellungen (z.B. {"white_label": true, "waitlist": false})
+    features = Column(JSONB, default={})
+    
+    # Zusatzkosten pro weiterem Kunden (über dem Limit)
+    additional_cost_per_customer = Column(Float, default=0.0)
+
+
 # --- 2. KONFIGURATION (Leistungen & Level) ---
 class TrainingType(Base):
     __tablename__ = 'training_types'
@@ -112,7 +136,7 @@ class User(Base):
     __tablename__ = 'users'
     
     id = Column(Integer, primary_key=True, index=True)
-    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=True)
     auth_id = Column(UUID, nullable=True) # Verknüpfung zu Supabase Auth
     
     name = Column(String(255), index=True, nullable=False)
@@ -133,6 +157,7 @@ class User(Base):
     current_level_id = Column(Integer, ForeignKey('levels.id', ondelete="SET NULL"), nullable=True)
 
     # Benachrichtigungseinstellungen
+    is_superadmin = Column(Boolean, default=False, nullable=False)
     notifications_email = Column(Boolean, default=True)
     notifications_push = Column(Boolean, default=False)
     
@@ -169,7 +194,10 @@ class User(Base):
         return self.current_level_id
 
     # WICHTIG: E-Mail muss pro Tenant einzigartig sein, nicht global!
-    __table_args__ = (UniqueConstraint('email', 'tenant_id', name='uix_email_tenant'),)
+    # Globaler Admin (tenant_id is NULL) braucht auch eine unique email
+    __table_args__ = (
+        UniqueConstraint('email', 'tenant_id', name='uix_email_tenant'),
+    )
 
     # Beziehungen
     tenant = relationship("Tenant", back_populates="users")

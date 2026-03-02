@@ -109,6 +109,28 @@ def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
         
+    # Validierung der aktiven Module basierend auf dem Paket
+    if tenant.plan:
+        package = db.query(models.SubscriptionPackage).filter(
+            models.SubscriptionPackage.plan_name == tenant.plan
+        ).first()
+        
+        if package:
+            # Kopie der Config, um das Original in der DB nicht zu verändern
+            config = dict(tenant.config) if tenant.config else {}
+            active_modules = config.get("active_modules", [])
+            allowed_modules = package.allowed_modules or []
+            
+            # Nur Module erlauben, die im Paket enthalten sind
+            validated_modules = [m for m in active_modules if m in allowed_modules]
+            
+            # Falls gar keine Module aktiv sind, die Standard-Module des Pakets nehmen
+            if not validated_modules and not active_modules:
+                validated_modules = allowed_modules
+                
+            config["active_modules"] = validated_modules
+            tenant.config = config
+    
     levels = db.query(models.Level).options(
         joinedload(models.Level.requirements).joinedload(models.LevelRequirement.training_type)
     ).filter(models.Level.tenant_id == tenant_id).order_by(models.Level.rank_order).all()

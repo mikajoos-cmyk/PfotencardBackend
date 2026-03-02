@@ -121,6 +121,32 @@ class TenantStatus(BaseModel):
     tenant_address: Optional[str] = None
     current_avv_version: str = "1.0"
 
+# --- 1b. ABOS & PAKETE ---
+class SubscriptionPackageBase(BaseModel):
+    plan_name: str
+    price_monthly: float = 0.0
+    allowed_modules: List[str] = ["news", "documents"]
+    max_customers: Optional[int] = None
+    top_up_fee_percent: float = 0.0
+    features: Dict[str, bool] = {}
+    additional_cost_per_customer: float = 0.0
+
+class SubscriptionPackageCreate(SubscriptionPackageBase):
+    pass
+
+class SubscriptionPackage(SubscriptionPackageBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+class SuperAdminStats(BaseModel):
+    total_tenants: int
+    active_tenants: int
+    total_revenue: float
+    total_users: int
+    new_tenants_last_month: int
+
 class SubscriptionDetails(BaseModel):
     plan: Optional[str] = None
     status: Optional[str] = None
@@ -224,6 +250,7 @@ class UserBase(BaseModel):
     is_vip: bool = False
     is_expert: bool = False
     current_level_id: Optional[int] = None
+    is_superadmin: bool = False
     notifications_push: bool = False
     
     notif_email_overall: bool = True
@@ -267,6 +294,7 @@ class UserUpdate(BaseModel):
     is_expert: Optional[bool] = None
     current_level_id: Optional[int] = None
     level_id: Optional[int] = None
+    is_superadmin: Optional[bool] = None
     notifications_push: Optional[bool] = None
     
     notif_email_overall: Optional[bool] = None
@@ -318,7 +346,7 @@ class Achievement(AchievementBase):
 
 class User(UserBase):
     id: int
-    tenant_id: int
+    tenant_id: Optional[int] = None
     auth_id: Optional[UUID] = None
     customer_since: datetime
     dogs: List[Dog] = []

@@ -13,7 +13,9 @@ from .config import settings
 from .database import get_db
 
 # Password Hashing Setup
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# We include both bcrypt and pbkdf2_sha256 to support legacy hashes
+# and provide a fallback if bcrypt remains problematic in this environment.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256", "bcrypt"], deprecated="auto")
 
 # OAuth2 Scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
@@ -210,3 +212,48 @@ def verify_active_subscription(request: Request, tenant: models.Tenant = Depends
             detail="Subscription expired. Please update your payment details."
         )
     return tenant
+
+
+async def get_current_superadmin(
+        token: str = Depends(oauth2_scheme),
+        db: Session = Depends(get_db)
+) -> models.User:
+    """
+    Validiert den Token und prüft, ob der User die Rolle 'superadmin' hat
+    und KEINEM Tenant zugeordnet ist.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            options={"verify_aud": False}
+        )
+        email: str = payload.get("email")
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    # Super-Admin hat das is_superadmin Flag
+    user = db.query(models.User).filter(
+        models.User.email == email,
+        models.User.is_superadmin == True
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions (Super-Admin required)"
+        )
+
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+
+    return user

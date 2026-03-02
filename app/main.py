@@ -14,6 +14,7 @@ import stripe
 import traceback
 
 from . import crud, models, schemas, auth, stripe_service, legal, notification_service, invoice_service
+from .routers import superadmin
 from .storage_service import delete_file_from_storage, delete_folder_from_storage
 from .database import engine, get_db, SessionLocal
 from .config import settings
@@ -35,6 +36,7 @@ app.add_middleware(
 )
 
 app.include_router(legal.router, prefix="/api/legal", tags=["legal"])
+app.include_router(superadmin.router)
 
 import uuid
 
@@ -44,6 +46,11 @@ def read_root():
 
 # --- PUBLIC WIDGET API (no auth required) ---
 # Admin: Hole/Erzeuge öffentliches Widget-Token für aktuellen Tenant
+@app.get("/api/packages", response_model=List[schemas.SubscriptionPackage])
+def get_public_packages(db: Session = Depends(get_db)):
+    """Öffentlicher Endpunkt für die Paket-Übersicht."""
+    return db.query(models.SubscriptionPackage).all()
+
 @app.get("/api/tenants/public-token")
 def get_or_create_public_token(
     db: Session = Depends(get_db),
@@ -253,7 +260,7 @@ async def login_for_access_token(
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
-        data={"sub": user.email, "tenant_id": tenant.id}, 
+        data={"sub": user.email, "email": user.email, "tenant_id": tenant.id}, 
         expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer", "user": user}
