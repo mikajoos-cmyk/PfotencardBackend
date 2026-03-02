@@ -7,6 +7,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 import secrets
@@ -294,7 +295,7 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
     elif tenant.stripe_subscription_status == 'trialing':
         in_trial = True
 
-    # --- AVV Daten aufbereiten ---
+    # NEU: AVV Daten aufbereiten
     current_avv_version = settings.CURRENT_AVV_VERSION
     tenant_address = ""
     # Versuche Adresse aus legal_settings zu laden
@@ -308,6 +309,41 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
             tenant_address = f"{street} {house}, {zip_c} {city}".strip()
             if tenant_address.startswith(","): tenant_address = tenant_address[1:].strip()
             if tenant_address.endswith(","): tenant_address = tenant_address[:-1].strip()
+
+    # NEU: Usage & Limits laden
+    customer_count = db.query(models.User).filter(
+        models.User.tenant_id == tenant.id,
+        models.User.role == "kunde"
+    ).count()
+
+    # Paket-Limits laden
+    package = db.query(models.SubscriptionPackage).filter(
+        models.SubscriptionPackage.plan_name == tenant.plan
+    ).first()
+
+    max_customers = package.max_customers if package else None
+    additional_cost_per_customer = package.additional_cost_per_customer if package else 0.0
+    
+    # Bevorzuge den Wert direkt vom Tenant, Fallback auf Paket
+    top_up_fee_percent = tenant.top_up_fee_percent if tenant.top_up_fee_percent is not None else (package.top_up_fee_percent if package else 0.0)
+    top_up_fee_fixed = tenant.top_up_fee_fixed if tenant.top_up_fee_fixed is not None else (package.top_up_fee_fixed if package else 0.0)
+
+    # NEU: Summe der Top-up Gebühren im aktuellen Abrechnungszeitraum berechnen
+    current_billing_period_fees = 0.0
+    if tenant.subscription_ends_at:
+        # Wir nehmen an, dass der aktuelle Zeitraum 1 Monat vor dem subscription_ends_at beginnt
+        # (Dies ist eine Vereinfachung, aber meistens korrekt für monatliche Abos)
+        period_start = tenant.subscription_ends_at - timedelta(days=32) # Puffer
+        
+        # Falls wir genauere Infos hätten (z.B. last_payment_date), könnten wir die nutzen.
+        # Aber meistens ist das current_period_start in Stripe.
+        # Hier filtern wir einfach alle Transaktionen seit period_start
+        period_fees = db.query(func.sum(models.Transaction.top_up_fee)).filter(
+            models.Transaction.tenant_id == tenant.id,
+            models.Transaction.date >= period_start,
+            models.Transaction.top_up_fee > 0
+        ).scalar()
+        current_billing_period_fees = float(period_fees) if period_fees else 0.0
 
     return {
         "exists": True, 
@@ -331,7 +367,15 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "avv_accepted_at": tenant.avv_accepted_at,
         "avv_version": tenant.avv_accepted_version,
         "tenant_address": tenant_address,
-        "current_avv_version": current_avv_version
+        "current_avv_version": current_avv_version,
+
+        # NEU: Usage Daten
+        "customer_count": customer_count,
+        "max_customers": max_customers,
+        "additional_cost_per_customer": additional_cost_per_customer,
+        "top_up_fee_percent": top_up_fee_percent,
+        "top_up_fee_fixed": top_up_fee_fixed,
+        "current_billing_period_fees": current_billing_period_fees
     }
 
 # Sicherheit: Nur mit Secret Key ausführbar
@@ -688,13 +732,22 @@ async def handle_payment_intent_succeeded(intent):
         amount = float(amount_str)
         bonus = float(bonus_str) if bonus_str else 0.0
 
+        # Gebühr berechnen
+        top_up_fee = 0.0
+        tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+        if tenant:
+            # Nutze den Prozentwert vom Tenant (Fallback auf Paket ist in update_tenant_from_subscription geregelt)
+            fee_percent = tenant.top_up_fee_percent or 0.0
+            top_up_fee = round(amount * (fee_percent / 100.0), 2)
+
         # Transaktion erstellen (nutzt crud.create_transaction)
         # WICHTIG: crud.create_transaction macht bereits db.commit() am Ende!
         tx_data = schemas.TransactionCreate(
             user_id=user_id,
             type="Aufladung",
             description=f"Online-Aufladung via Stripe: {amount}€ + {bonus}€ Bonus",
-            amount=amount
+            amount=amount,
+            top_up_fee=top_up_fee
         )
         
         db_tx = crud.create_transaction(db, tx_data, booked_by_id=user_id, tenant_id=tenant_id)

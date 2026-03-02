@@ -794,6 +794,7 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
         amount=transaction.amount, # Betrag der Transaktion (ohne Bonus)
         balance_after=new_balance,
         bonus=bonus, # NEU: Hier wird der Bonus festgeschrieben!
+        top_up_fee=transaction.top_up_fee, # NEU: Gebühr speichern
         invoice_number=invoice_number # NEU
     )
     db.add(db_tx)

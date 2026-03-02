@@ -91,6 +91,8 @@ class Tenant(TenantBase):
     # NEU:
     avv_accepted_at: Optional[datetime] = None
     avv_accepted_version: Optional[str] = None
+    top_up_fee_percent: float = 0.0
+    top_up_fee_fixed: float = 0.0
 
     class Config:
         from_attributes = True
@@ -120,6 +122,14 @@ class TenantStatus(BaseModel):
     # NEU: Zusätzliche Daten für den AVV
     tenant_address: Optional[str] = None
     current_avv_version: str = "1.0"
+    
+    # NEU: Usage & Limits
+    customer_count: int = 0
+    max_customers: Optional[int] = None
+    additional_cost_per_customer: float = 0.0
+    top_up_fee_percent: float = 0.0
+    top_up_fee_fixed: float = 0.0
+    current_billing_period_fees: float = 0.0
 
 # --- 1b. ABOS & PAKETE ---
 class SubscriptionPackageBase(BaseModel):
@@ -128,6 +138,7 @@ class SubscriptionPackageBase(BaseModel):
     allowed_modules: List[str] = ["news", "documents"]
     max_customers: Optional[int] = None
     top_up_fee_percent: float = 0.0
+    top_up_fee_fixed: float = 0.0
     features: Dict[str, bool] = {}
     additional_cost_per_customer: float = 0.0
 
@@ -366,15 +377,17 @@ class TransactionCreate(TransactionBase):
     user_id: Any
     dog_id: Optional[int] = None # NEU
     training_type_id: Optional[int] = None 
+    top_up_fee: float = 0.0
 
 class Transaction(TransactionBase):
     id: int
     tenant_id: int
     user_id: int
-    booked_by_id: int
+    booked_by_id: Optional[int] = None
     balance_after: float
     date: datetime
     bonus: float = 0.0
+    top_up_fee: float = 0.0
     class Config: from_attributes = True
 
 class Token(BaseModel):

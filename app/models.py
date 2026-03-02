@@ -43,6 +43,11 @@ class Tenant(Base):
     upcoming_plan = Column(String(50), nullable=True) # z.B. 'pro' wenn ein Wechsel ansteht
     # ---------------------------------------------------
 
+    # --- NEU: Gebühren & Limits (Kopiert vom Paket für Persistenz) ---
+    top_up_fee_percent = Column(Float, default=0.0) # Gebühr bei selbstständiger Aufladung (Prozent)
+    top_up_fee_fixed = Column(Float, default=0.0)   # Gebühr bei selbstständiger Aufladung (Fixbetrag)
+    # -----------------------------------------------------------------
+
     # Beziehungen (Ein Tenant hat viele...)
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
     dogs = relationship("Dog", back_populates="tenant", cascade="all, delete-orphan")
@@ -71,6 +76,9 @@ class SubscriptionPackage(Base):
     
     # Gebühr für selbstständiges Guthaben-Aufladen (in Prozent)
     top_up_fee_percent = Column(Float, default=0.0)
+    
+    # Gebühr für selbstständiges Guthaben-Aufladen (Fixbetrag in Euro)
+    top_up_fee_fixed = Column(Float, default=0.0)
     
     # Granulare Feature-Einstellungen (z.B. {"white_label": true, "waitlist": false})
     features = Column(JSONB, default={})
@@ -262,6 +270,9 @@ class Transaction(Base):
     
     # NEU: Speichert den Bonus explizit ab
     bonus = Column(Float, default=0.0)
+
+    # NEU: Service-Gebühr bei selbstständiger Aufladung
+    top_up_fee = Column(Float, default=0.0)
 
     # NEU: Fortlaufende Rechnungsnummer
     invoice_number = Column(String(50), nullable=True)

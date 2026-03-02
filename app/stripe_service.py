@@ -162,6 +162,15 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
         # 3. PREIS VORSCHAU (Ziel-Plan Preis)
         target_plan_name = tenant.upcoming_plan if tenant.upcoming_plan else tenant.plan
 
+        # --- NEU: Gebühren vom Paket synchronisieren ---
+        package = db.query(models.SubscriptionPackage).filter(
+            models.SubscriptionPackage.plan_name == target_plan_name
+        ).first()
+        if package:
+            tenant.top_up_fee_percent = package.top_up_fee_percent
+            tenant.top_up_fee_fixed = getattr(package, 'top_up_fee_fixed', 0.0)
+        # -----------------------------------------------
+
         # --- FIX: Cycle aus Metadata statt raten ---
         target_cycle = safe_get(metadata, 'upcoming_cycle') if tenant.upcoming_plan else safe_get(metadata, 'cycle')
 
