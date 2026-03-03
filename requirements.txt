@@ -14,6 +14,7 @@ stripe
 pywebpush==1.14.0
 resend==0.8.0
 reportlab==4.2.2
-requests==2.31.0
+requests>=2.31.0
+urllib3>=1.26.18,<2.0.0
 tzdata
 apscheduler==3.10.4
