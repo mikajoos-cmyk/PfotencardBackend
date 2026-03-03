@@ -15,13 +15,13 @@ import stripe
 import traceback
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
-from .billing_cron import report_stripe_usage
+from app.billing_cron import report_stripe_usage
 
-from . import crud, models, schemas, auth, stripe_service, legal, notification_service, invoice_service
-from .routers.superadmin import router as superadmin_router
-from .storage_service import delete_file_from_storage, delete_folder_from_storage
-from .database import engine, get_db, SessionLocal
-from .config import settings
+from app import crud, models, schemas, auth, stripe_service, legal, notification_service, invoice_service
+from app.routers.superadmin import router as superadmin_router
+from app.storage_service import delete_file_from_storage, delete_folder_from_storage
+from app.database import engine, get_db, SessionLocal
+from app.config import settings
 from supabase import create_client, Client
 
 models.Base.metadata.create_all(bind=engine)
