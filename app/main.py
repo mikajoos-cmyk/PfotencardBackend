@@ -18,7 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .billing_cron import report_stripe_usage
 
 from . import crud, models, schemas, auth, stripe_service, legal, notification_service, invoice_service
-from .routers import superadmin
+from .routers.superadmin import router as superadmin_router
 from .storage_service import delete_file_from_storage, delete_folder_from_storage
 from .database import engine, get_db, SessionLocal
 from .config import settings
@@ -64,7 +64,7 @@ app.add_middleware(
 )
 
 app.include_router(legal.router, prefix="/api/legal", tags=["legal"])
-app.include_router(superadmin.router)
+app.include_router(superadmin_router)
 
 import uuid
 
