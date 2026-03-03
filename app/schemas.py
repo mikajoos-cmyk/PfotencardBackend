@@ -141,6 +141,12 @@ class SubscriptionPackageBase(BaseModel):
     top_up_fee_fixed: float = 0.0
     features: Dict[str, bool] = {}
     additional_cost_per_customer: float = 0.0
+    
+    # Stripe IDs (optional bei Create, werden vom System gesetzt)
+    stripe_product_id: Optional[str] = None
+    stripe_price_id_base: Optional[str] = None
+    stripe_price_id_users: Optional[str] = None
+    stripe_price_id_fees: Optional[str] = None
 
 class SubscriptionPackageCreate(SubscriptionPackageBase):
     pass
@@ -377,7 +383,7 @@ class TransactionCreate(TransactionBase):
     user_id: Any
     dog_id: Optional[int] = None # NEU
     training_type_id: Optional[int] = None 
-    top_up_fee: float = 0.0
+    top_up_fee: Optional[float] = None
 
 class Transaction(TransactionBase):
     id: int

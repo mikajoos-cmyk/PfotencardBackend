@@ -13,6 +13,9 @@ from datetime import datetime, timedelta, timezone
 import secrets
 import stripe
 import traceback
+from contextlib import asynccontextmanager
+from apscheduler.schedulers.background import BackgroundScheduler
+from .billing_cron import report_stripe_usage
 
 from . import crud, models, schemas, auth, stripe_service, legal, notification_service, invoice_service
 from .routers import superadmin
@@ -22,7 +25,31 @@ from .config import settings
 from supabase import create_client, Client
 
 models.Base.metadata.create_all(bind=engine)
-app = FastAPI()
+
+# Funktion, die dem Scheduler eine frische DB-Session gibt
+def run_billing_job():
+    db = SessionLocal()
+    try:
+        report_stripe_usage(db)
+    finally:
+        db.close()
+
+# Lifespan-Handler für FastAPI (startet den Scheduler mit dem Server)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = BackgroundScheduler()
+    
+    # Führt den Job jeden Tag um 23:50 Uhr aus
+    scheduler.add_job(run_billing_job, 'cron', hour=23, minute=50)
+    
+    # Alternativ für den Test-Betrieb: alle 5 Minuten
+    # scheduler.add_job(run_billing_job, 'interval', minutes=5)
+    
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(lifespan=lifespan)
 
 supabase: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
@@ -324,26 +351,61 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
     max_customers = package.max_customers if package else None
     additional_cost_per_customer = package.additional_cost_per_customer if package else 0.0
     
-    # Bevorzuge den Wert direkt vom Tenant, Fallback auf Paket
-    top_up_fee_percent = tenant.top_up_fee_percent if tenant.top_up_fee_percent is not None else (package.top_up_fee_percent if package else 0.0)
-    top_up_fee_fixed = tenant.top_up_fee_fixed if tenant.top_up_fee_fixed is not None else (package.top_up_fee_fixed if package else 0.0)
+    # Priorität für top_up_fee_percent: 
+    # Wenn am Paket ein Wert > 0 definiert ist, nehmen wir diesen (das ist die Einstellung aus dem Admin Panel/Paket)
+    # Nur wenn im Paket 0 steht (oder kein Paket da ist), schauen wir beim Tenant nach.
+    # Dies stellt sicher, dass Änderungen am Paket im Admin Panel sofort auf alle Tenants dieses Pakets wirken.
+    top_up_fee_percent = 0.0
+    if package and package.top_up_fee_percent > 0:
+        top_up_fee_percent = package.top_up_fee_percent
+    elif tenant.top_up_fee_percent is not None:
+        top_up_fee_percent = tenant.top_up_fee_percent
+
+    # Gleiches für fixed fee
+    top_up_fee_fixed = 0.0
+    if package and package.top_up_fee_fixed > 0:
+        top_up_fee_fixed = package.top_up_fee_fixed
+    elif tenant.top_up_fee_fixed is not None:
+        top_up_fee_fixed = tenant.top_up_fee_fixed
 
     # NEU: Summe der Top-up Gebühren im aktuellen Abrechnungszeitraum berechnen
     current_billing_period_fees = 0.0
     if tenant.subscription_ends_at:
-        # Wir nehmen an, dass der aktuelle Zeitraum 1 Monat vor dem subscription_ends_at beginnt
-        # (Dies ist eine Vereinfachung, aber meistens korrekt für monatliche Abos)
-        period_start = tenant.subscription_ends_at - timedelta(days=32) # Puffer
+        # Wir berechnen den Start des aktuellen Zeitraums basierend auf dem Enddatum
+        # Wenn es ein monatliches Abo ist, ist der Start 1 Monat vor dem Ende.
         
-        # Falls wir genauere Infos hätten (z.B. last_payment_date), könnten wir die nutzen.
-        # Aber meistens ist das current_period_start in Stripe.
-        # Hier filtern wir einfach alle Transaktionen seit period_start
+        interval_days = 30
+        if tenant.plan and 'year' in tenant.plan.lower():
+            interval_days = 365
+            
+        period_start = tenant.subscription_ends_at - timedelta(days=interval_days)
+        
+        # Falls das Abo gerade erst gestartet ist, nehmen wir das created_at des Tenants als Untergrenze
+        if tenant.created_at and period_start < tenant.created_at:
+            period_start = tenant.created_at
+        
+        # Logging für die Berechnung hinzufügen
+        print(f"DEBUG [Billing]: Berechne Top-up Fees für Tenant {tenant.id} ({tenant.name})")
+        print(f"DEBUG [Billing]: Plan: {tenant.plan}, Zeitraum: {period_start} bis {tenant.subscription_ends_at}")
+
+        # Wir summieren die top_up_fee aus der transactions Tabelle
         period_fees = db.query(func.sum(models.Transaction.top_up_fee)).filter(
             models.Transaction.tenant_id == tenant.id,
             models.Transaction.date >= period_start,
             models.Transaction.top_up_fee > 0
         ).scalar()
+        
         current_billing_period_fees = float(period_fees) if period_fees else 0.0
+        
+        # Zusätzliches Logging für das Ergebnis
+        transaction_count = db.query(models.Transaction).filter(
+            models.Transaction.tenant_id == tenant.id,
+            models.Transaction.date >= period_start,
+            models.Transaction.top_up_fee > 0
+        ).count()
+        print(f"DEBUG [Billing]: Gefundene Transaktionen mit Gebühren: {transaction_count}, Gesamtsumme: {current_billing_period_fees}")
+    else:
+        print(f"DEBUG [Billing]: Kein subscription_ends_at für Tenant {tenant.id} gefunden, überspringe Gebührenberechnung.")
 
     return {
         "exists": True, 
@@ -732,22 +794,17 @@ async def handle_payment_intent_succeeded(intent):
         amount = float(amount_str)
         bonus = float(bonus_str) if bonus_str else 0.0
 
-        # Gebühr berechnen
-        top_up_fee = 0.0
-        tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
-        if tenant:
-            # Nutze den Prozentwert vom Tenant (Fallback auf Paket ist in update_tenant_from_subscription geregelt)
-            fee_percent = tenant.top_up_fee_percent or 0.0
-            top_up_fee = round(amount * (fee_percent / 100.0), 2)
-
         # Transaktion erstellen (nutzt crud.create_transaction)
         # WICHTIG: crud.create_transaction macht bereits db.commit() am Ende!
+        # top_up_fee wird nun automatisch in crud.create_transaction berechnet, 
+        # falls sie hier 0.0 ist. Wir übergeben sie trotzdem, falls sie im Metadata
+        # (zukünftig) vorhanden wäre, oder lassen crud die Arbeit machen.
         tx_data = schemas.TransactionCreate(
             user_id=user_id,
             type="Aufladung",
             description=f"Online-Aufladung via Stripe: {amount}€ + {bonus}€ Bonus",
             amount=amount,
-            top_up_fee=top_up_fee
+            top_up_fee=None # Wird in crud.create_transaction berechnet
         )
         
         db_tx = crud.create_transaction(db, tx_data, booked_by_id=user_id, tenant_id=tenant_id)

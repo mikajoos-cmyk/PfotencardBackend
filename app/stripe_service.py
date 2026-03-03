@@ -9,6 +9,7 @@ from . import models
 import traceback
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
+# stripe.api_version = "2024-12-18.acacia" # Temporarily disabled to match frontend/automatic versioning
 
 # --- CONFIG ---
 PLAN_CONFIGS = {
@@ -58,7 +59,16 @@ def get_plan_config(plan_name: str, cycle: str):
         return PLAN_CONFIGS[plan][cycle]
     return None
 
-def get_price_id(plan_name: str, cycle: str):
+def get_price_id(plan_name: str, cycle: str, db: Session = None):
+    # Wenn DB vorhanden, versuchen wir es dynamisch
+    if db:
+        package = db.query(models.SubscriptionPackage).filter(
+            models.func.lower(models.SubscriptionPackage.plan_name) == plan_name.lower()
+        ).first()
+        if package and package.stripe_price_id_base:
+            return package.stripe_price_id_base
+
+    # Fallback auf statische Config
     conf = get_plan_config(plan_name, cycle)
     return conf["id"] if conf else None
 
@@ -217,10 +227,27 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant: raise HTTPException(404, "Tenant not found")
 
-    conf = get_plan_config(plan, cycle)
-    if not conf: raise HTTPException(400, "Invalid plan")
-    target_price_id = conf["id"]
-    target_amount = conf["amount"]
+    # 1. Ziel-Paket und IDs bestimmen
+    package = db.query(models.SubscriptionPackage).filter(
+        models.func.lower(models.SubscriptionPackage.plan_name) == plan.lower()
+    ).first()
+    
+    if package and package.stripe_price_id_base:
+        target_price_id = package.stripe_price_id_base
+        target_amount = package.price_monthly
+    else:
+        conf = get_plan_config(plan, cycle)
+        if not conf: raise HTTPException(400, "Invalid plan")
+        target_price_id = conf["id"]
+        target_amount = conf["amount"]
+
+    # Sammle alle Items für dieses Paket
+    subscription_items = [{"price": target_price_id}]
+    if package:
+        if package.stripe_price_id_users:
+            subscription_items.append({"price": package.stripe_price_id_users})
+        if package.stripe_price_id_fees:
+            subscription_items.append({"price": package.stripe_price_id_fees})
 
     if not tenant.stripe_customer_id:
         try:
@@ -364,9 +391,23 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 # Bei vorhandener Zahlungsmethode: Sofort abbuchen, sonst Payment Element
                 payment_behavior = 'allow_incomplete' if not has_payment_method else 'error_if_incomplete'
 
+                # Neue Items für das Upgrade/Trial-Ende
+                # Wir ersetzen alle bestehenden Items durch die neuen dynamischen Items
+                new_items = []
+                # Die bestehenden IDs finden, um sie zu ersetzen
+                existing_item_ids = [item['id'] for item in items_data]
+                
+                # Wir löschen die alten Items (indem wir deleted=True setzen)
+                for eid in existing_item_ids:
+                    new_items.append({"id": eid, "deleted": True})
+                
+                # Und fügen die neuen hinzu
+                for si in subscription_items:
+                    new_items.append({"price": si["price"]})
+
                 updated_sub_step1 = stripe.Subscription.modify(
                     safe_get(active_subscription, 'id'),
-                    items=[{'id': safe_get(current_item, 'id'), 'price': target_price_id}],
+                    items=new_items,
                     proration_behavior='always_invoice',
                     payment_behavior=payment_behavior,
                     expand=['latest_invoice.payment_intent']
@@ -439,6 +480,11 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 current_interval = get_nested(current_item, 'plan', 'interval')
                 current_cycle = "yearly" if current_interval == "year" else "monthly"
 
+                # Für Downgrades müssen wir ebenfalls alle Items in der nächsten Phase definieren
+                next_phase_items = []
+                for si in subscription_items:
+                    next_phase_items.append({'price': si['price'], 'quantity': 1})
+
                 stripe.SubscriptionSchedule.modify(
                     sched_id,
                     end_behavior='release',
@@ -446,12 +492,12 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         {
                             'start_date': current_phase_start,
                             'end_date': period_end_ts,
-                            'items': [{'price': get_nested(current_item, 'price', 'id'), 'quantity': 1}],
+                            'items': [{'price': get_nested(item, 'price', 'id'), 'quantity': 1} for item in items_data],
                             'metadata': safe_get(active_subscription, 'metadata') or {}
                         },
                         {
                             'start_date': period_end_ts,
-                            'items': [{'price': target_price_id, 'quantity': 1}],
+                            'items': next_phase_items,
                             'metadata': {"tenant_id": tenant.id, "plan_name": plan, "cycle": cycle}
                         }
                     ]
@@ -504,7 +550,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
 
         sub_data = {
             'customer': customer_id,
-            'items': [{"price": target_price_id}],
+            'items': subscription_items,
             'payment_behavior': payment_behavior,
             'payment_settings': {'save_default_payment_method': 'on_subscription'},
             'expand': ['latest_invoice.payment_intent', 'pending_setup_intent'],

@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     # Stripe Integration
     STRIPE_SECRET_KEY: str
     STRIPE_WEBHOOK_SECRET: str
+    STRIPE_METER_ID_USERS: str
+    STRIPE_METER_ID_FEES: str
     STRIPE_PRICE_ID_STARTER_MONTHLY: str
     STRIPE_PRICE_ID_PRO_MONTHLY: str
     STRIPE_PRICE_ID_ENTERPRISE_MONTHLY: str

@@ -73,6 +73,7 @@ class SubscriptionPackage(Base):
     
     # Spezifische Limits (z.B. maximale Kundenanzahl)
     max_customers = Column(Integer, nullable=True) 
+    included_customers = Column(Integer, default=0) # NEU: Inkludierte Kunden im Grundpreis
     
     # Gebühr für selbstständiges Guthaben-Aufladen (in Prozent)
     top_up_fee_percent = Column(Float, default=0.0)
@@ -85,6 +86,12 @@ class SubscriptionPackage(Base):
     
     # Zusatzkosten pro weiterem Kunden (über dem Limit)
     additional_cost_per_customer = Column(Float, default=0.0)
+
+    # --- NEU: Stripe Verknüpfungen ---
+    stripe_product_id = Column(String(255), nullable=True)
+    stripe_price_id_base = Column(String(255), nullable=True)
+    stripe_price_id_users = Column(String(255), nullable=True)
+    stripe_price_id_fees = Column(String(255), nullable=True)
 
 
 # --- 2. KONFIGURATION (Leistungen & Level) ---
@@ -270,6 +277,9 @@ class Transaction(Base):
     
     # NEU: Speichert den Bonus explizit ab
     bonus = Column(Float, default=0.0)
+
+    # NEU: Damit wir wissen, ob diese Aufladung schon an Stripe als Gebühr gemeldet wurde
+    reported_to_stripe = Column(Boolean, default=False)
 
     # NEU: Service-Gebühr bei selbstständiger Aufladung
     top_up_fee = Column(Float, default=0.0)

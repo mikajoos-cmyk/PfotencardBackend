@@ -109,28 +109,6 @@ def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
         
-    # Validierung der aktiven Module basierend auf dem Paket
-    if tenant.plan:
-        package = db.query(models.SubscriptionPackage).filter(
-            models.SubscriptionPackage.plan_name == tenant.plan
-        ).first()
-        
-        if package:
-            # Kopie der Config, um das Original in der DB nicht zu verändern
-            config = dict(tenant.config) if tenant.config else {}
-            active_modules = config.get("active_modules", [])
-            allowed_modules = package.allowed_modules or []
-            
-            # Nur Module erlauben, die im Paket enthalten sind
-            validated_modules = [m for m in active_modules if m in allowed_modules]
-            
-            # Falls gar keine Module aktiv sind, die Standard-Module des Pakets nehmen
-            if not validated_modules and not active_modules:
-                validated_modules = allowed_modules
-                
-            config["active_modules"] = validated_modules
-            tenant.config = config
-    
     levels = db.query(models.Level).options(
         joinedload(models.Level.requirements).joinedload(models.LevelRequirement.training_type)
     ).filter(models.Level.tenant_id == tenant_id).order_by(models.Level.rank_order).all()
@@ -780,6 +758,16 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
     new_balance = user.balance # Capture the new balance before commit
     db.add(user)
 
+    # Automatische Gebührenberechnung, falls nicht gesetzt
+    top_up_fee = transaction.top_up_fee
+    if transaction.type == "Aufladung" and (top_up_fee is None or top_up_fee == 0.0):
+        tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+        if tenant:
+            percent = tenant.top_up_fee_percent or 0.0
+            fixed = tenant.top_up_fee_fixed or 0.0
+            top_up_fee = round(transaction.amount * (percent / 100.0) + fixed, 2)
+            print(f"DEBUG: Calculated top_up_fee for tenant {tenant_id}: {top_up_fee} (based on {percent}% + {fixed}€)")
+
     # NEU: Rechnungsnummer generieren, wenn es eine Einnahme ist
     invoice_number = None
     if transaction.amount > 0:
@@ -794,7 +782,7 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
         amount=transaction.amount, # Betrag der Transaktion (ohne Bonus)
         balance_after=new_balance,
         bonus=bonus, # NEU: Hier wird der Bonus festgeschrieben!
-        top_up_fee=transaction.top_up_fee, # NEU: Gebühr speichern
+        top_up_fee=top_up_fee, # Gebühr speichern (ggf. automatisch berechnet)
         invoice_number=invoice_number # NEU
     )
     db.add(db_tx)
