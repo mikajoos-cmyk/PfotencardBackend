@@ -1634,6 +1634,77 @@ def bill_all_participants(db: Session, tenant_id: int, appointment_id: int, book
             
     return results
 
+def unbill_booking(db: Session, tenant_id: int, booking_id: int, auto_commit: bool = True):
+    booking = db.query(models.Booking).filter(
+        models.Booking.id == booking_id,
+        models.Booking.tenant_id == tenant_id
+    ).first()
+    
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+        
+    if not booking.is_billed:
+        return booking # Nichts zu tun
+
+    appt = booking.appointment
+    user = booking.user
+    
+    # 1. Transaktion finden und rückgängig machen
+    billing_description = f"Abrechnung: {appt.title} (Termin-ID: {appt.id})"
+    transaction = db.query(models.Transaction).filter(
+        models.Transaction.user_id == user.id,
+        models.Transaction.tenant_id == tenant_id,
+        models.Transaction.description == billing_description
+    ).first()
+
+    if transaction:
+        user.balance -= transaction.amount # amount ist negativ bei Abrechnung, also +Betrag
+        db.delete(transaction)
+    
+    # 2. Achievement (Fortschritt) löschen
+    achievement_query = db.query(models.Achievement).filter(
+        models.Achievement.user_id == user.id,
+        models.Achievement.tenant_id == tenant_id,
+        models.Achievement.date_achieved == appt.start_time
+    )
+    if appt.training_type_id:
+        achievement_query = achievement_query.filter(models.Achievement.training_type_id == appt.training_type_id)
+    if booking.dog_id:
+        achievement_query = achievement_query.filter(models.Achievement.dog_id == booking.dog_id)
+        
+    achievement = achievement_query.first()
+    if achievement:
+        db.delete(achievement)
+    
+    # 3. Status zurücksetzen
+    booking.is_billed = False
+    
+    if auto_commit:
+        db.commit()
+        db.refresh(user)
+    
+    return booking
+
+def unbill_all_participants(db: Session, tenant_id: int, appointment_id: int):
+    bookings = db.query(models.Booking).filter(
+        models.Booking.appointment_id == appointment_id,
+        models.Booking.status == 'confirmed',
+        models.Booking.tenant_id == tenant_id,
+        models.Booking.is_billed == True
+    ).all()
+    
+    results = []
+    for booking in bookings:
+        try:
+            with db.begin_nested():
+                unbill_booking(db, tenant_id, booking.id, auto_commit=False)
+            db.commit()
+            results.append({"booking_id": booking.id, "status": "success"})
+        except Exception as e:
+            results.append({"booking_id": booking.id, "status": "error", "detail": str(e)})
+            
+    return results
+
 def grant_progress_booking(db: Session, tenant_id: int, booking_id: int, auto_commit: bool = True):
     booking = db.query(models.Booking).filter(
         models.Booking.id == booking_id,
