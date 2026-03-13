@@ -1879,6 +1879,16 @@ def bill_all_appointment_participants(
         raise HTTPException(status_code=403, detail="Not authorized")
     return crud.bill_all_participants(db, tenant.id, appointment_id, booked_by_id=current_user.id)
 
+@app.post("/api/appointments/{appointment_id}/unbill-all")
+def unbill_all_appointment_participants(
+    appointment_id: int, db: Session = Depends(get_db),
+    tenant: models.Tenant = Depends(auth.verify_active_subscription),
+    current_user: schemas.User = Depends(auth.get_current_active_user)
+):
+    if current_user.role not in ['admin', 'mitarbeiter']:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return crud.unbill_all_participants(db, tenant.id, appointment_id)
+
 @app.post("/api/news/upload-image")
 async def upload_news_image(
     upload_file: UploadFile = File(...), db: Session = Depends(get_db),
