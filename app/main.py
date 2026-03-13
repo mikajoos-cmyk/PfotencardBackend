@@ -288,7 +288,7 @@ async def login_for_access_token(
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
-        data={"sub": user.email, "email": user.email, "tenant_id": tenant.id}, 
+        data={"sub": user.email.lower(), "email": user.email.lower(), "tenant_id": tenant.id}, 
         expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer", "user": user}
@@ -1110,8 +1110,8 @@ def register_tenant(tenant_data: schemas.TenantCreate, admin_data: schemas.UserC
     trial_end = datetime.now(timezone.utc) + timedelta(days=14)
     new_tenant = models.Tenant(
         name=tenant_data.name,
-        subdomain=tenant_data.subdomain,
-        support_email=tenant_data.support_email,
+        subdomain=tenant_data.subdomain.lower(),
+        support_email=tenant_data.support_email.lower(),
         plan="enterprise",
         config=tenant_data.config.model_dump(),
         subscription_ends_at=trial_end,

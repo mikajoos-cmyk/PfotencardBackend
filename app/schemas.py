@@ -532,6 +532,7 @@ class AppointmentSettings(BaseModel):
     max_participants: int = 10
     cancelation_period_hours: int = 0
     color_rules: List[Dict[str, Any]] = []
+    locations: List[Dict[str, Any]] = []
 
 class SettingsUpdate(BaseModel):
     school_name: str

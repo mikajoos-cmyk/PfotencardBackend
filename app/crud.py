@@ -90,7 +90,7 @@ def get_next_invoice_number(db: Session, tenant_id: int) -> str:
 # --- TENANT & CONFIGURATION ---
 
 def get_tenant_by_subdomain(db: Session, subdomain: str):
-    return db.query(models.Tenant).filter(models.Tenant.subdomain == subdomain).first()
+    return db.query(models.Tenant).filter(models.Tenant.subdomain == subdomain.lower()).first()
 
 def delete_tenant(db: Session, tenant_id: int):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
@@ -308,7 +308,7 @@ def get_user_by_auth_id(db: Session, auth_id: str, tenant_id: int):
 
 def get_user_by_email(db: Session, email: str, tenant_id: int):
     return db.query(models.User).filter(
-        models.User.email == email, 
+        models.User.email == email.lower(), 
         models.User.tenant_id == tenant_id
     ).first()
 
@@ -356,7 +356,7 @@ def create_user(db: Session, user: schemas.UserCreate, tenant_id: int, auth_id: 
     db_user = models.User(
         tenant_id=tenant_id,
         auth_id=auth_id,
-        email=user.email,
+        email=user.email.lower(),
         name=user.name,
         vorname=user.vorname,
         nachname=user.nachname,
@@ -936,15 +936,39 @@ def delete_document(db: Session, document_id: int, tenant_id: int):
 
 # --- APPOINTMENTS & BOOKINGS ---
 
+import uuid
+import requests
+
+def resolve_google_maps_short_link(url: str):
+    """
+    Löst einen Google Maps Kurzlink (maps.app.goo.gl) in den langen Link auf.
+    Dies ist wichtig, damit das Frontend die Koordinaten extrahieren kann.
+    """
+    if not url or "maps.app.goo.gl" not in url:
+        return url
+    
+    try:
+        # Wir folgen dem Redirect, um die finale URL zu erhalten
+        # timeout ist wichtig, damit das Backend nicht hängen bleibt
+        response = requests.head(url, allow_redirects=True, timeout=5)
+        return response.url
+    except Exception as e:
+        print(f"DEBUG: Error resolving maps link {url}: {e}")
+        return url
+
 def create_appointment(db: Session, appointment: schemas.AppointmentCreate, tenant_id: int):
     print(f"DEBUG: Creating appointment with trainer_id={appointment.trainer_id}, target_levels={appointment.target_level_ids}, training_type_id={appointment.training_type_id}")
+    
+    # NEU: Google Maps Kurzlinks auflösen
+    location = resolve_google_maps_short_link(appointment.location) if appointment.location else None
+
     db_appt = models.Appointment(
         tenant_id=tenant_id,
         title=appointment.title,
         description=appointment.description,
         start_time=appointment.start_time,
         end_time=appointment.end_time,
-        location=appointment.location,
+        location=location,
         max_participants=appointment.max_participants,
         trainer_id=appointment.trainer_id,
         training_type_id=appointment.training_type_id,
@@ -1086,6 +1110,8 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
 
     # Apply updates to THIS appointment
     for key, value in update_data.items():
+        if key == "location" and value:
+            value = resolve_google_maps_short_link(value)
         setattr(db_appt, key, value)
     
     # Calculate difference (Delta) - important for shifting entire series
@@ -1120,9 +1146,75 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
             other_appt.start_time = other_appt.start_time + delta
             other_appt.end_time = other_appt.start_time + new_duration
 
+            # --- NEU: Nachrücken für Block-Termine ---
+            if "max_participants" in update_data:
+                new_max = update_data["max_participants"]
+                current_confirmed_count = db.query(models.Booking).filter(
+                    models.Booking.appointment_id == other_appt.id,
+                    models.Booking.status == 'confirmed'
+                ).count()
+                
+                if current_confirmed_count < new_max:
+                    slots_to_fill = new_max - current_confirmed_count
+                    next_in_line = db.query(models.Booking).filter(
+                        models.Booking.appointment_id == other_appt.id,
+                        models.Booking.status == 'waitlist'
+                    ).order_by(models.Booking.created_at.asc()).limit(slots_to_fill).all()
+                    
+                    for booking in next_in_line:
+                        booking.status = 'confirmed'
+                        # Benachrichtigung senden (optional, da wir für den Haupttermin schon senden? Nein, besser für jeden, da es andere User sein könnten)
+                        notify_user(
+                            db=db,
+                            user_id=booking.user_id,
+                            type="booking",
+                            title="Platz bestätigt (Nachgerückt)",
+                            message=f"Gute Nachrichten! Du bist für '{other_appt.title}' nachgerückt, da die Teilnehmerzahl erhöht wurde.",
+                            url="/appointments",
+                            details={
+                                "Kurs": other_appt.title,
+                                "Datum": format_datetime_de(other_appt.start_time),
+                                "Hinweis": "Die maximale Teilnehmerzahl wurde erhöht und du hast nun einen Platz."
+                            }
+                        )
+
     db.add(db_appt)
     db.commit()
     db.refresh(db_appt)
+
+    # --- NEU: Nachrücken von der Warteliste, wenn max_participants erhöht wurde ---
+    if "max_participants" in update_data:
+        new_max = update_data["max_participants"]
+        # Zähle aktuelle confirmed Buchungen
+        current_confirmed_count = db.query(models.Booking).filter(
+            models.Booking.appointment_id == appointment_id,
+            models.Booking.status == 'confirmed'
+        ).count()
+        
+        if current_confirmed_count < new_max:
+            slots_to_fill = new_max - current_confirmed_count
+            next_in_line = db.query(models.Booking).filter(
+                models.Booking.appointment_id == appointment_id,
+                models.Booking.status == 'waitlist'
+            ).order_by(models.Booking.created_at.asc()).limit(slots_to_fill).all()
+            
+            for booking in next_in_line:
+                booking.status = 'confirmed'
+                # Benachrichtigung senden
+                notify_user(
+                    db=db,
+                    user_id=booking.user_id,
+                    type="booking",
+                    title="Platz bestätigt (Nachgerückt)",
+                    message=f"Gute Nachrichten! Du bist für '{db_appt.title}' nachgerückt, da die Teilnehmerzahl erhöht wurde.",
+                    url="/appointments",
+                    details={
+                        "Kurs": db_appt.title,
+                        "Datum": format_datetime_de(db_appt.start_time),
+                        "Hinweis": "Die maximale Teilnehmerzahl wurde erhöht und du hast nun einen Platz."
+                    }
+                )
+            db.commit()
 
     # --- NEU: Teilnehmer bei Änderungen benachrichtigen ---
     try:
