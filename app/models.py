@@ -351,7 +351,7 @@ class Appointment(Base):
     
     start_time = Column(DateTime(timezone=True), nullable=False)
     end_time = Column(DateTime(timezone=True), nullable=False)
-    location = Column(String(255), nullable=True)
+    location = Column(String(1024), nullable=True)
     
     max_participants = Column(Integer, default=10)
     
