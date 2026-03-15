@@ -3,7 +3,7 @@ import json
 import logging
 from typing import List, Dict, Any, Optional
 from jinja2 import Environment, FileSystemLoader
-from xhtml2pdf import pisa
+from weasyprint import HTML # <-- NEU: WeasyPrint Import
 import io
 
 logger = logging.getLogger("pfotencard")
@@ -78,12 +78,16 @@ class CertificateManager:
             return f"Error: {e}"
 
     def render_pdf(self, layout_id: str, data: Dict[str, Any]) -> io.BytesIO:
+        # 1. HTML rendern
         html_content = self.render_html(layout_id, data)
         result = io.BytesIO()
-        pisa_status = pisa.CreatePDF(io.BytesIO(html_content.encode("utf-8")), dest=result)
         
-        if pisa_status.err:
-            logger.error(f"Error creating PDF from HTML: {pisa_status.err}")
+        # 2. Mit WeasyPrint als PDF schreiben
+        try:
+            # base_url ist wichtig, falls du relative Pfade für Bilder verwendest
+            HTML(string=html_content, base_url=self.templates_dir).write_pdf(result)
+        except Exception as e:
+            logger.error(f"Error creating PDF with WeasyPrint: {e}")
         
         result.seek(0)
         return result

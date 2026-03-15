@@ -3,92 +3,96 @@
 <head>
     <meta charset="UTF-8">
     <style>
-        @page {
-            size: A4;
-            margin: 10mm;
-        }
-        body {
-            font-family: 'Helvetica', sans-serif;
+        @page { size: A4 portrait; margin: 0; }
+        * { box-sizing: border-box; }
+        html, body {
+            width: 210mm;
+            height: 297mm;
             margin: 0;
-            padding: 20mm;
-            border: 2px solid #333;
-            width: 170mm;
-            height: 257mm;
-            text-align: center;
-            background: #fff;
-        }
-        .header {
-            margin-bottom: 20mm;
-        }
-        .logo {
-            max-width: 100px;
-            max-height: 60px;
-        }
-        h1 {
-            font-size: 36px;
-            margin-bottom: 20mm;
+            padding: 0;
+            overflow: hidden;
+            font-family: 'Helvetica', 'Arial', sans-serif;
+            background-color: #fff;
             color: #333;
+            position: relative;
         }
-        .content {
-            font-size: 20px;
-            line-height: 1.8;
-            margin-bottom: 30mm;
+        .page-border {
+            position: absolute;
+            top: 10mm; left: 10mm; right: 10mm; bottom: 10mm;
+            border: 2px solid #333;
+            padding: 10mm;
+            text-align: center;
         }
-        .names {
-            font-weight: bold;
-            font-size: 24px;
-            text-decoration: underline;
+        .header { height: 35mm; margin-bottom: 10mm; }
+        .logo { max-height: 80px; max-width: 200px; }
+
+        .center-block {
+            position: absolute;
+            top: 50%; left: 10mm; right: 10mm;
+            transform: translateY(-55%);
+            text-align: center;
         }
+
+        h1 { font-size: 36px; margin: 0 0 15mm 0; color: #111; }
+        .content { font-size: 20px; line-height: 1.8; }
+        .names { font-weight: bold; font-size: 26px; text-decoration: underline; margin: 8px 0; display: block; color: #000; }
+
         .footer {
-            margin-top: 20mm;
-            display: flex;
-            justify-content: space-around;
+            position: absolute;
+            bottom: 20mm; left: 20mm; right: 20mm;
+            display: flex; justify-content: space-between; align-items: flex-end;
+            text-align: left;
         }
-        .signature-box {
-            border-top: 1px solid #333;
-            width: 60mm;
-            padding-top: 2mm;
-            font-size: 14px;
-        }
+        .footer-date { font-size: 16px; padding-bottom: 5mm; }
+        .signature-box { width: 60mm; text-align: center; }
+        .sig-img { max-width: 100%; max-height: 50px; margin-bottom: 5px; }
+        .sig-line { border-top: 1px solid #333; padding-top: 5px; font-size: 14px; }
+
         .seal {
-            width: 60px;
-            height: 60px;
-            margin: 20px auto;
+            position: absolute;
+            bottom: 35mm; left: 50%;
+            transform: translateX(-50%);
+            width: 80px; height: 80px;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        {% if images.logo %}
-        <img src="{{ images.logo }}" class="logo">
-        {% endif %}
-    </div>
-
-    <h1>{{ title }}</h1>
-
-    <div class="content">
-        Hiermit wird bescheinigt, dass<br>
-        <span class="names">{{ kundenname }}</span><br>
-        mit seinem Hund<br>
-        <span class="names">{{ hundename }}</span><br>
-        erfolgreich am Training für<br>
-        <span class="names">{{ kursname }}</span><br>
-        teilgenommen hat.
-    </div>
-
-    {% if images.seal %}
-    <img src="{{ images.seal }}" class="seal">
-    {% endif %}
-
-    <div class="footer">
-        <div>
-            Datum: {{ datum }}
-        </div>
-        <div class="signature-box">
-            {% if images.signature %}
-            <img src="{{ images.signature }}" style="max-height: 40px;"><br>
+    <div class="page-border">
+        <div class="header">
+            {% if images.logo %}
+            <img src="{{ images.logo }}" class="logo">
             {% endif %}
-            Unterschrift Kursleiter
+        </div>
+
+        <div class="center-block">
+            <h1>{{ title }}</h1>
+            <div class="content">
+                Hiermit wird bescheinigt, dass<br>
+                <span class="names">{{ kundenname }}</span>
+                mit seinem Hund<br>
+                <span class="names">{{ hundename }}</span>
+                erfolgreich am Training für<br>
+                <span class="names">{{ kursname }}</span>
+                teilgenommen hat.
+            </div>
+        </div>
+
+        {% if images.seal %}
+        <img src="{{ images.seal }}" class="seal">
+        {% endif %}
+
+        <div class="footer">
+            <div class="footer-date">
+                Datum: {{ datum }}
+            </div>
+            <div class="signature-box">
+                {% if images.signature %}
+                <img src="{{ images.signature }}" class="sig-img"><br>
+                {% else %}
+                <div style="height: 50px;"></div>
+                {% endif %}
+                <div class="sig-line">Unterschrift Kursleiter</div>
+            </div>
         </div>
     </div>
 </body>
