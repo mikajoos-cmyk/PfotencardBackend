@@ -10,10 +10,12 @@
     "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter", "sidebar_color", "footer_text"],
     "trigger_data": {
         "course_completed": {
-            "body_text": "an unserem Workshop"
+            "body_text": "an unserem Workshop",
+            "text_2": "mit Erfolg teilgenommen"
         },
         "level_achieved": {
-            "body_text": "das Level"
+            "body_text": "das Level",
+            "text_2": "erfolgreich erreicht"
         }
     }
 }

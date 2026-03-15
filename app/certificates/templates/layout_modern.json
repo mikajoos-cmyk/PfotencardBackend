@@ -8,10 +8,12 @@
     "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter", "sidebar_color", "footer_text"],
     "trigger_data": {
         "course_completed": {
-            "body_text": "Hiermit wird bescheinigt, dass {kundenname} mit ihrem Hund {hundename} erfolgreich am Training für {kursname} teilgenommen hat."
+            "body_text": "Hiermit wird bescheinigt, dass {kundenname} mit ihrem Hund {hundename} erfolgreich am Training für {kursname} teilgenommen hat.",
+            "text_2": ""
         },
         "level_achieved": {
-            "body_text": "Herzlichen Glückwunsch! {kundenname} und {hundename} haben erfolgreich das Level {kursname} erreicht."
+            "body_text": "Herzlichen Glückwunsch! {kundenname} und {hundename} haben erfolgreich das Level {kursname} erreicht.",
+            "text_2": ""
         }
     }
 }

@@ -48,7 +48,7 @@ class CertificateManager:
                                 placeholders=meta.get("placeholders", []),
                                 trigger_data=meta.get("trigger_data", {})
                             )
-                            logger.info(f"Loaded HTML certificate layout: {layout_id}")
+                            logger.info(f"Loaded HTML certificate layout: {layout_id} with trigger_data keys: {list(self.layouts[layout_id].trigger_data.keys())}")
                     except Exception as e:
                         logger.error(f"Error loading metadata for {layout_id}: {e}")
                 else:

@@ -23,7 +23,7 @@ def prepare_certificate_data(
     
     # --- 1. Hundeschule Daten ---
     school_name = preview_data.get("hundeschule_name")
-    school_location = preview_data.get("ort") or "Ascha"
+    school_location = preview_data.get("ort") or "Musterstadt"
     
     if not school_name:
         if tenant:
@@ -35,14 +35,14 @@ def prepare_certificate_data(
             school_name = "Deine Hundeschule"
 
     # --- 2. Kunden & Hunde Daten ---
-    user_name = preview_data.get("kundenname") or "Frau Andrea Lorenz"
+    user_name = preview_data.get("kundenname") or "Max Musterman"
     if user:
         if user.vorname and user.nachname:
             user_name = f"{user.vorname} {user.nachname}"
         else:
             user_name = user.name or user.email
 
-    dog_name = preview_data.get("hundename") or "Basco"
+    dog_name = preview_data.get("hundename") or "Bello"
     if dog:
         dog_name = dog.name
 
@@ -174,21 +174,37 @@ def prepare_certificate_data(
         if key != "body_text": # body_text wurde oben schon speziell behandelt
             result_data[key] = val
 
-    # Platzhalter im body_text ersetzen (Frontend nutzt {kundenname}, wir haben variable_values + result_data)
+    # Platzhalter in ALLEN Strings in result_data ersetzen (nicht nur body_text)
+    # (Frontend nutzt {kundenname}, wir haben variable_values + result_data)
     all_vars = {**variable_values, **result_data}
-    for key, val in all_vars.items():
-        placeholder = "{" + key + "}"
-        if placeholder in body_text:
-            # Wenn es einer der Hauptnamen ist, fügen wir das Styling hinzu
-            if key in ['kundenname', 'hundename', 'kursname']:
-                styled_val = f'<span class="names {key}">{val}</span>'
-                body_text = body_text.replace(placeholder, styled_val)
-            else:
-                body_text = body_text.replace(placeholder, str(val))
     
-    # Zeilenumbrüche in <br> umwandeln für HTML
-    body_text = body_text.replace("\n", "<br>")
+    # Zuerst body_text in result_data setzen, falls es ein lokales Override gab
     result_data["body_text"] = body_text
+
+    for key, val in result_data.items():
+        if isinstance(val, str) and "{" in val:
+            current_val = val
+            for v_key, v_val in all_vars.items():
+                placeholder = "{" + v_key + "}"
+                if placeholder in current_val:
+                    # Wenn es einer der Hauptnamen ist, fügen wir das Styling hinzu
+                    if v_key in ['kundenname', 'hundename', 'kursname']:
+                        styled_val = f'<span class="names {v_key}">{v_val}</span>'
+                        current_val = current_val.replace(placeholder, styled_val)
+                    else:
+                        current_val = current_val.replace(placeholder, str(v_val))
+            result_data[key] = current_val
+
+    # Zeilenumbrüche in <br> umwandeln für HTML (in allen Feldern möglich)
+    for key, val in result_data.items():
+        if isinstance(val, str):
+            result_data[key] = val.replace("\n", "<br>")
+
+    logger.debug(f"DEBUG: Certificate result_data keys: {list(result_data.keys())}")
+    if "text_2" in result_data:
+        logger.debug(f"DEBUG: text_2 found: {result_data['text_2']}")
+    else:
+        logger.debug("DEBUG: text_2 NOT found in result_data")
 
     return result_data
 

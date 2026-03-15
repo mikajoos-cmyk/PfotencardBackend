@@ -68,6 +68,9 @@
             <h1>{{ title }}</h1>
             <div class="content">
                 {{ body_text | safe }}
+                {% if text_2 %}
+                <br>{{ text_2 | safe }}
+                {% endif %}
             </div>
         </div>
 
