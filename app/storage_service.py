@@ -56,3 +56,34 @@ def delete_user_storage(tenant_id: int, user_id: int):
     Löscht alle Dokumente eines Users aus dem Storage.
     """
     delete_folder_from_storage(supabase, "documents", f"{tenant_id}/{user_id}")
+
+async def upload_file_to_storage(file, path: str, bucket: str = "documents"):
+    """
+    Lädt eine Datei (UploadFile) in den angegebenen Bucket hoch.
+    """
+    try:
+        content = await file.read()
+        supabase.storage.from_(bucket).upload(
+            path=path,
+            file=content,
+            file_options={"content-type": getattr(file, "content_type", "application/octet-stream"), "upsert": "true"}
+        )
+        return f"{settings.SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
+    except Exception as e:
+        logger.error(f"Upload Error for {path}: {e}")
+        raise e
+
+def upload_bytes_to_storage(content: bytes, path: str, bucket: str = "documents", content_type: str = "application/pdf"):
+    """
+    Lädt Bytes in den angegebenen Bucket hoch.
+    """
+    try:
+        supabase.storage.from_(bucket).upload(
+            path=path,
+            file=content,
+            file_options={"content-type": content_type, "upsert": "true"}
+        )
+        return f"{settings.SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
+    except Exception as e:
+        logger.error(f"Upload Error for {path}: {e}")
+        raise e

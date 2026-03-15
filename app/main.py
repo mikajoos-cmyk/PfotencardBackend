@@ -19,6 +19,8 @@ from app.billing_cron import report_stripe_usage
 
 from app import crud, models, schemas, auth, stripe_service, legal, notification_service, invoice_service
 from app.routers.superadmin import router as superadmin_router
+from app.routers.homework import router as homework_router
+from app.routers.certificates import router as certificates_router
 from app.storage_service import delete_file_from_storage, delete_folder_from_storage
 from app.database import engine, get_db, SessionLocal
 from app.config import settings
@@ -65,6 +67,8 @@ app.add_middleware(
 
 app.include_router(legal.router, prefix="/api/legal", tags=["legal"])
 app.include_router(superadmin_router)
+app.include_router(homework_router)
+app.include_router(certificates_router)
 
 import uuid
 

@@ -1,0 +1,9 @@
+{
+    "name": "Profi",
+    "image_slots": [
+        {"id": "logo", "label": "Logo"},
+        {"id": "signature", "label": "Unterschrift"},
+        {"id": "seal", "label": "Siegel (optional)"}
+    ],
+    "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter"]
+}

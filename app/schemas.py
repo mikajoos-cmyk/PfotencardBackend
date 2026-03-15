@@ -459,6 +459,7 @@ class Booking(BookingBase):
     user: Optional[User] = None
     dog: Optional[Dog] = None
     appointment: Optional[AppointmentShort] = None # NEU: Damit Termin-Details im UI sichtbar sind
+    warning: Optional[str] = None # NEU: Für Guthaben-Warnungen
     class Config: from_attributes = True
 
 class AppointmentCreate(AppointmentBase):
@@ -656,3 +657,102 @@ class ForgotPasswordRequest(BaseModel):
 
 class PasswordReset(BaseModel):
     password: str
+
+
+# --- HAUSAUFGABEN ---
+
+class ExerciseTemplateBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    video_url: Optional[str] = None
+    file_url: Optional[str] = None
+    file_name: Optional[str] = None
+    attachments: List[Dict[str, Any]] = []
+
+class ExerciseTemplateCreate(ExerciseTemplateBase):
+    pass
+
+class ExerciseTemplateUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    video_url: Optional[str] = None
+    file_url: Optional[str] = None
+    file_name: Optional[str] = None
+    attachments: Optional[List[Dict[str, Any]]] = None
+
+class ExerciseTemplate(ExerciseTemplateBase):
+    id: int
+    tenant_id: int
+    created_at: datetime
+    class Config: from_attributes = True
+
+class HomeworkAssignmentBase(BaseModel):
+    user_id: int
+    dog_id: Optional[int] = None
+    template_id: Optional[int] = None
+    title: str
+    description: Optional[str] = None
+    video_url: Optional[str] = None
+    file_url: Optional[str] = None
+    file_name: Optional[str] = None
+    attachments: List[Dict[str, Any]] = []
+
+class HomeworkAssignmentCreate(HomeworkAssignmentBase):
+    pass
+
+class HomeworkAssignmentUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    video_url: Optional[str] = None
+    file_url: Optional[str] = None
+    file_name: Optional[str] = None
+    attachments: Optional[List[Dict[str, Any]]] = None
+    is_completed: Optional[bool] = None
+    client_feedback: Optional[str] = None
+
+class HomeworkCompletionRequest(BaseModel):
+    client_feedback: Optional[str] = None
+
+class HomeworkAssignment(HomeworkAssignmentBase):
+    id: int
+    tenant_id: int
+    assigned_by_id: Optional[int] = None
+    is_completed: bool
+    completed_at: Optional[datetime] = None
+    client_feedback: Optional[str] = None
+    created_at: datetime
+    class Config: from_attributes = True
+
+
+# --- TEILNAHMEBESCHEINIGUNGEN ---
+
+class CertificateTemplateBase(BaseModel):
+    name: str
+    layout_id: str
+    images: Dict[str, str] = {} # Flexibler Speicher für Bilder {"logo": "url", ...}
+    title: str = "Teilnahmebescheinigung"
+    trigger_type: str
+    target_id: int
+
+class CertificateTemplateCreate(CertificateTemplateBase):
+    pass
+
+class CertificateTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    layout_id: Optional[str] = None
+    images: Optional[Dict[str, str]] = None
+    title: Optional[str] = None
+    trigger_type: Optional[str] = None
+    target_id: Optional[int] = None
+
+class CertificateTemplateResponse(CertificateTemplateBase):
+    id: int
+    tenant_id: int
+    created_at: datetime
+    class Config: from_attributes = True
+
+class CertificateLayoutMetadata(BaseModel):
+    id: str
+    name: str
+    image_slots: List[Dict[str, str]]
+    placeholders: List[str]

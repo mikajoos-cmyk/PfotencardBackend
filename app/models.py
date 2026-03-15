@@ -58,6 +58,9 @@ class Tenant(Base):
     bookings = relationship("Booking", back_populates="tenant", cascade="all, delete-orphan")
     news_posts = relationship("NewsPost", back_populates="tenant", cascade="all, delete-orphan")
     chat_messages = relationship("ChatMessage", back_populates="tenant", cascade="all, delete-orphan")
+    exercise_templates = relationship("ExerciseTemplate", back_populates="tenant", cascade="all, delete-orphan")
+    homework_assignments = relationship("HomeworkAssignment", back_populates="tenant", cascade="all, delete-orphan")
+    certificate_templates = relationship("CertificateTemplate", back_populates="tenant", cascade="all, delete-orphan")
 
 
 # --- 1b. ABOS & PAKETE ---
@@ -230,10 +233,11 @@ class User(Base):
                                      back_populates="booked_by")
                                      
     achievements = relationship("Achievement", back_populates="user", cascade="all, delete-orphan")
-    achievements = relationship("Achievement", back_populates="user", cascade="all, delete-orphan")
     documents = relationship("Document", back_populates="user", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="user", cascade="all, delete-orphan")
     push_subscriptions = relationship("PushSubscription", back_populates="user", cascade="all, delete-orphan")
+    homework_assignments = relationship("HomeworkAssignment", foreign_keys='[HomeworkAssignment.user_id]', back_populates="user", cascade="all, delete-orphan")
+    assigned_homeworks = relationship("HomeworkAssignment", foreign_keys='[HomeworkAssignment.assigned_by_id]', back_populates="assigned_by")
 
 
 class Dog(Base):
@@ -259,6 +263,7 @@ class Dog(Base):
     current_level = relationship("Level", back_populates="dogs")
     achievements = relationship("Achievement", back_populates="dog", cascade="all, delete-orphan")
     bookings = relationship("Booking", back_populates="dog", cascade="all, delete-orphan")
+    homework_assignments = relationship("HomeworkAssignment", back_populates="dog", cascade="all, delete-orphan")
 
 
 class Transaction(Base):
@@ -516,3 +521,85 @@ class SystemSequence(Base):
     
     id = Column(String(50), primary_key=True) # z.B. "invoice_{tenant_id}"
     current_value = Column(Integer, default=1000)
+
+
+# --- 6. HAUSAUFGABEN & TRAININGSPLAN ---
+
+class ExerciseTemplate(Base):
+    __tablename__ = 'exercise_templates'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
+    
+    title = Column(String(255), nullable=False)
+    description = Column(String, nullable=True)
+    video_url = Column(String(512), nullable=True) # YouTube-Links
+    file_url = Column(String(512), nullable=True)  # PDF/PPT/Bilder (Veraltet, nutze attachments)
+    file_name = Column(String(255), nullable=True) # (Veraltet, nutze attachments)
+    attachments = Column(JSONB, default=[])        # Liste von Anhängen: [{"url": "...", "name": "...", "type": "..."}]
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    tenant = relationship("Tenant", back_populates="exercise_templates")
+    assignments = relationship("HomeworkAssignment", back_populates="template", cascade="all, delete-orphan")
+
+
+class HomeworkAssignment(Base):
+    __tablename__ = 'homework_assignments'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
+    
+    # Zuweisung an User (Kunde) ODER Hund
+    user_id = Column(Integer, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
+    dog_id = Column(Integer, ForeignKey('dogs.id', ondelete="CASCADE"), nullable=True)
+    
+    assigned_by_id = Column(Integer, ForeignKey('users.id', ondelete="SET NULL"), nullable=True)
+    template_id = Column(Integer, ForeignKey('exercise_templates.id', ondelete="SET NULL"), nullable=True)
+    
+    # Kopierte/Individuelle Daten
+    title = Column(String(255), nullable=False)
+    description = Column(String, nullable=True)
+    video_url = Column(String(512), nullable=True)
+    file_url = Column(String(512), nullable=True)  # (Veraltet, nutze attachments)
+    file_name = Column(String(255), nullable=True) # (Veraltet, nutze attachments)
+    attachments = Column(JSONB, default=[])        # Liste von Anhängen: [{"url": "...", "name": "...", "type": "..."}]
+    
+    # Status
+    is_completed = Column(Boolean, default=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    client_feedback = Column(String, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    tenant = relationship("Tenant", back_populates="homework_assignments")
+    user = relationship("User", foreign_keys=[user_id], back_populates="homework_assignments")
+    assigned_by = relationship("User", foreign_keys=[assigned_by_id], back_populates="assigned_homeworks")
+    dog = relationship("Dog", back_populates="homework_assignments")
+    template = relationship("ExerciseTemplate", back_populates="assignments")
+
+
+# --- 7. TEILNAHMEBESCHEINIGUNGEN ---
+
+class CertificateTemplate(Base):
+    __tablename__ = 'certificate_templates'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
+    
+    name = Column(String(255), nullable=False) # Interner Name für den Trainer (z.B. "Welpenabschluss")
+    layout_id = Column(String(50), nullable=False, default="layout_modern") 
+    
+    # Bilder (URLs vom storage_service)
+    images = Column(JSONB, default={}) # NEU: Flexibler Speicher für Bilder {"logo": "url", ...}
+    
+    # Texte
+    title = Column(String(255), default="Teilnahmebescheinigung")
+    
+    # Automatisierungs-Trigger
+    trigger_type = Column(String(50), nullable=False) # 'level_achieved' oder 'course_completed'
+    target_id = Column(Integer, nullable=False) # ID des Levels oder der Leistung (TrainingType)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    tenant = relationship("Tenant", back_populates="certificate_templates")

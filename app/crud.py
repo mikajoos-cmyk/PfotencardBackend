@@ -104,6 +104,99 @@ def delete_tenant(db: Session, tenant_id: int):
     db.commit()
     return {"ok": True}
 
+
+# --- HAUSAUFGABEN (ExerciseTemplate) ---
+
+def create_exercise_template(db: Session, tenant_id: int, template_in: schemas.ExerciseTemplateCreate):
+    db_template = models.ExerciseTemplate(
+        tenant_id=tenant_id,
+        **template_in.model_dump()
+    )
+    db.add(db_template)
+    db.commit()
+    db.refresh(db_template)
+    return db_template
+
+def get_exercise_templates(db: Session, tenant_id: int):
+    return db.query(models.ExerciseTemplate).filter(models.ExerciseTemplate.tenant_id == tenant_id).all()
+
+def get_exercise_template(db: Session, template_id: int):
+    return db.query(models.ExerciseTemplate).filter(models.ExerciseTemplate.id == template_id).first()
+
+def update_exercise_template(db: Session, template_id: int, template_in: schemas.ExerciseTemplateUpdate):
+    db_template = get_exercise_template(db, template_id)
+    if not db_template:
+        return None
+    
+    update_data = template_in.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_template, key, value)
+    
+    db.commit()
+    db.refresh(db_template)
+    return db_template
+
+def delete_exercise_template(db: Session, template_id: int):
+    db_template = get_exercise_template(db, template_id)
+    if not db_template:
+        return False
+    db.delete(db_template)
+    db.commit()
+    return True
+
+
+# --- HAUSAUFGABEN (HomeworkAssignment) ---
+
+def create_homework_assignment(db: Session, tenant_id: int, assigned_by_id: int, assignment_in: schemas.HomeworkAssignmentCreate):
+    db_assignment = models.HomeworkAssignment(
+        tenant_id=tenant_id,
+        assigned_by_id=assigned_by_id,
+        **assignment_in.model_dump()
+    )
+    db.add(db_assignment)
+    db.commit()
+    db.refresh(db_assignment)
+    
+    # Benachrichtigung an User (Kunde)
+    user = db.query(models.User).filter(models.User.id == db_assignment.user_id).first()
+    if user:
+        notify_user(
+            db, 
+            user, 
+            f"Neue Hausaufgabe: {db_assignment.title}", 
+            "news", # Nutze 'news' als Typ für allgemeine Info
+            {"type": "homework", "id": db_assignment.id}
+        )
+        
+    return db_assignment
+
+def get_user_homework(db: Session, user_id: int):
+    return db.query(models.HomeworkAssignment).filter(models.HomeworkAssignment.user_id == user_id).order_by(models.HomeworkAssignment.created_at.desc()).all()
+
+def get_homework_assignment(db: Session, assignment_id: int):
+    return db.query(models.HomeworkAssignment).filter(models.HomeworkAssignment.id == assignment_id).first()
+
+def complete_homework_assignment(db: Session, assignment_id: int, completion_in: schemas.HomeworkCompletionRequest):
+    db_assignment = get_homework_assignment(db, assignment_id)
+    if not db_assignment:
+        return None
+    
+    db_assignment.is_completed = True
+    db_assignment.completed_at = func.now()
+    db_assignment.client_feedback = completion_in.client_feedback
+    
+    db.commit()
+    db.refresh(db_assignment)
+    return db_assignment
+
+def delete_homework_assignment(db: Session, assignment_id: int):
+    db_assignment = get_homework_assignment(db, assignment_id)
+    if not db_assignment:
+        return False
+    db.delete(db_assignment)
+    db.commit()
+    return True
+
 def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant:
@@ -722,6 +815,14 @@ def perform_level_up(db: Session, user_id: int, tenant_id: int, dog_id: Optional
         db.add(user)
     db.commit()
     db.refresh(user)
+    
+    # --- TEILNAHMEBESCHEINIGUNGEN TRIGGER ---
+    try:
+        from . import certificate_service
+        certificate_service.trigger_certificate_generation(db, tenant_id, "level_achieved", next_level.id, user_id, dog_id)
+    except Exception as e:
+        print(f"Error triggering level certificate: {e}")
+
     return user
 
 # --- TRANSACTIONS & ACHIEVEMENTS ---
@@ -858,6 +959,13 @@ def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_
     #     user = get_user(db, user_id, tenant_id)
     #     if check_level_up_eligibility(db, user, dog_id=dog_id):
     #         perform_level_up(db, user_id, tenant_id, dog_id=dog_id)
+
+    # --- TEILNAHMEBESCHEINIGUNGEN TRIGGER ---
+    try:
+        from . import certificate_service
+        certificate_service.trigger_certificate_generation(db, tenant_id, "course_completed", training_type_id, user_id, dog_id)
+    except Exception as e:
+        print(f"Error triggering course certificate: {e}")
 
     return ach
 
@@ -1294,6 +1402,35 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
     appt = get_appointment(db, appointment_id, tenant_id)
     if not appt:
         raise HTTPException(404, "Appointment not found")
+
+    # --- Guthaben-Check ---
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    warning = None
+    if user:
+        # 1. Preis des aktuellen Termins ermitteln
+        current_price = appt.price if appt.price is not None else (appt.training_type.default_price if appt.training_type else 0.0)
+        
+        # 2. Summe aller ZUKÜNFTIGEN, bereits gebuchten (bestätigten) Termine
+        from sqlalchemy import func
+        future_bookings_sum = db.query(func.sum(func.coalesce(models.Appointment.price, models.TrainingType.default_price))).select_from(models.Booking).join(
+            models.Appointment, models.Booking.appointment_id == models.Appointment.id
+        ).outerjoin(
+            models.TrainingType, models.Appointment.training_type_id == models.TrainingType.id
+        ).filter(
+            models.Booking.user_id == user_id,
+            models.Booking.status == 'confirmed',
+            models.Booking.is_billed == False,
+            models.Appointment.start_time >= func.now(),
+            models.Booking.appointment_id != appointment_id # Den aktuellen noch nicht mitzählen falls er schon existiert
+        ).scalar() or 0.0
+        
+        total_future_cost = current_price + future_bookings_sum
+        
+        if user.balance < current_price:
+            warning = f"Dein Guthaben ({user.balance:.2f}€) reicht nicht für diesen Termin ({current_price:.2f}€) aus."
+        elif user.balance < total_future_cost:
+            warning = f"Dein Guthaben ({user.balance:.2f}€) reicht zwar für diesen Termin, aber nicht für alle deine zukünftigen Buchungen (Gesamt: {total_future_cost:.2f}€) aus."
+    # ----------------------
         
     booking_query = db.query(models.Booking).filter(
         models.Booking.appointment_id == appointment_id,
@@ -1378,6 +1515,9 @@ def create_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
                     print(f"HTTP Error booking block appt {block_appt.id}: {e.detail}")
             except Exception as e:
                 print(f"Error booking block appointment {block_appt.id}: {e}")
+    
+    # NEU: Warnung mitsenden
+    booking_to_process.warning = warning
     
     return booking_to_process
 
@@ -2366,3 +2506,43 @@ def update_app_status(db: Session, tenant_id: int, status_update: schemas.AppSta
         )
         
     return db_status
+
+
+# --- TEILNAHMEBESCHEINIGUNGEN ---
+
+def create_certificate_template(db: Session, tenant_id: int, template_in: schemas.CertificateTemplateCreate):
+    db_template = models.CertificateTemplate(
+        tenant_id=tenant_id,
+        **template_in.model_dump()
+    )
+    db.add(db_template)
+    db.commit()
+    db.refresh(db_template)
+    return db_template
+
+def get_certificate_templates(db: Session, tenant_id: int):
+    return db.query(models.CertificateTemplate).filter(models.CertificateTemplate.tenant_id == tenant_id).all()
+
+def get_certificate_template(db: Session, template_id: int):
+    return db.query(models.CertificateTemplate).filter(models.CertificateTemplate.id == template_id).first()
+
+def update_certificate_template(db: Session, template_id: int, template_in: schemas.CertificateTemplateUpdate):
+    db_template = get_certificate_template(db, template_id)
+    if not db_template:
+        return None
+    
+    update_data = template_in.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_template, key, value)
+    
+    db.commit()
+    db.refresh(db_template)
+    return db_template
+
+def delete_certificate_template(db: Session, template_id: int):
+    db_template = get_certificate_template(db, template_id)
+    if not db_template:
+        return False
+    db.delete(db_template)
+    db.commit()
+    return True

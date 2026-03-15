@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @page {
+            size: A4;
+            margin: 10mm;
+        }
+        body {
+            font-family: 'Helvetica', sans-serif;
+            margin: 0;
+            padding: 20mm;
+            border: 2px solid #333;
+            width: 170mm;
+            height: 257mm;
+            text-align: center;
+            background: #fff;
+        }
+        .header {
+            margin-bottom: 20mm;
+        }
+        .logo {
+            max-width: 100px;
+            max-height: 60px;
+        }
+        h1 {
+            font-size: 36px;
+            margin-bottom: 20mm;
+            color: #333;
+        }
+        .content {
+            font-size: 20px;
+            line-height: 1.8;
+            margin-bottom: 30mm;
+        }
+        .names {
+            font-weight: bold;
+            font-size: 24px;
+            text-decoration: underline;
+        }
+        .footer {
+            margin-top: 20mm;
+            display: flex;
+            justify-content: space-around;
+        }
+        .signature-box {
+            border-top: 1px solid #333;
+            width: 60mm;
+            padding-top: 2mm;
+            font-size: 14px;
+        }
+        .seal {
+            width: 60px;
+            height: 60px;
+            margin: 20px auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        {% if images.logo %}
+        <img src="{{ images.logo }}" class="logo">
+        {% endif %}
+    </div>
+
+    <h1>{{ title }}</h1>
+
+    <div class="content">
+        Hiermit wird bescheinigt, dass<br>
+        <span class="names">{{ kundenname }}</span><br>
+        mit seinem Hund<br>
+        <span class="names">{{ hundename }}</span><br>
+        erfolgreich am Training für<br>
+        <span class="names">{{ kursname }}</span><br>
+        teilgenommen hat.
+    </div>
+
+    {% if images.seal %}
+    <img src="{{ images.seal }}" class="seal">
+    {% endif %}
+
+    <div class="footer">
+        <div>
+            Datum: {{ datum }}
+        </div>
+        <div class="signature-box">
+            {% if images.signature %}
+            <img src="{{ images.signature }}" style="max-height: 40px;"><br>
+            {% endif %}
+            Unterschrift Kursleiter
+        </div>
+    </div>
+</body>
+</html>
