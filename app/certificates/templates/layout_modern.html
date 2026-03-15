@@ -67,13 +67,7 @@
         <div class="center-block">
             <h1>{{ title }}</h1>
             <div class="content">
-                Hiermit wird bescheinigt, dass<br>
-                <span class="names">{{ kundenname }}</span>
-                mit seinem Hund<br>
-                <span class="names">{{ hundename }}</span>
-                erfolgreich am Training für<br>
-                <span class="names">{{ kursname }}</span>
-                teilgenommen hat.
+                {{ body_text | safe }}
             </div>
         </div>
 

@@ -731,6 +731,7 @@ class CertificateTemplateBase(BaseModel):
     layout_id: str
     images: Dict[str, str] = {} # Flexibler Speicher für Bilder {"logo": "url", ...}
     title: str = "Teilnahmebescheinigung"
+    body_text: Optional[str] = None
     trigger_type: str
     target_id: int
     preview_data: Optional[Dict[str, str]] = None # NEU: Testdaten für die Vorschau
@@ -743,8 +744,10 @@ class CertificateTemplateUpdate(BaseModel):
     layout_id: Optional[str] = None
     images: Optional[Dict[str, str]] = None
     title: Optional[str] = None
+    body_text: Optional[str] = None
     trigger_type: Optional[str] = None
     target_id: Optional[int] = None
+    preview_data: Optional[Dict[str, str]] = None
 
 class CertificateTemplateResponse(CertificateTemplateBase):
     id: int
@@ -757,3 +760,4 @@ class CertificateLayoutMetadata(BaseModel):
     name: str
     image_slots: List[Dict[str, Any]]
     placeholders: List[str]
+    trigger_data: Dict[str, Dict[str, Any]] = {}

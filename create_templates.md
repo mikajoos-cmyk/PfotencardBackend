@@ -55,10 +55,19 @@ Vermeide komplexe CSS-Grids oder stark verschachtelte Flexboxen für das grobe L
 Texte werden vom Backend via Jinja2 übergeben. Sie müssen in doppelten geschweiften Klammern stehen.
 
 * **Standard-Variablen, die immer zur Verfügung stehen:**
-  `{{ title }}`, `{{ kundenname }}`, `{{ hundename }}`, `{{ kursname }}`, `{{ hundeschule_name }}`, `{{ ort }}`, `{{ datum }}`, `{{ kursleiter }}`, `{{ footer_text }}`, `{{ sidebar_color }}`.
+  `{{ title }}`, `{{ body_text }}`, `{{ kundenname }}`, `{{ hundename }}`, `{{ kursname }}`, `{{ hundeschule_name }}`, `{{ ort }}`, `{{ datum }}`, `{{ kursleiter }}`, `{{ footer_text }}`, `{{ sidebar_color }}`.
 * *Tipp für CSS-Farben:* Variablen können auch im `<style>`-Block für Farben genutzt werden! (z. B. `background-color: {{ sidebar_color | default('#8b9370') }};`)
 
-#### Regel 4: Bilder und Unterschriften (Sicherheits-Check)
+#### Regel 4: Dynamische Texte & Trigger-Daten (Inhalt)
+
+Zertifikatstexte und andere trigger-spezifische Einstellungen werden zentral in der `.json`-Datei des Layouts unter `trigger_data` definiert. Das Backend lädt automatisch die passenden Werte, je nachdem ob es sich um einen Kursabschluss (`course_completed`) oder einen Level-Aufstieg (`level_achieved`) handelt.
+
+*   **Unterstützte Platzhalter im Text:** `{kundenname}`, `{hundename}`, `{kursname}`, `{hundeschule_name}`, `{ort}`, `{datum}`, `{kursleiter}`.
+*   **Erweiterbarkeit:** Du kannst im JSON beliebig viele neue Variablen pro Trigger definieren. Diese stehen dann im HTML-Template sofort zur Verfügung.
+*   **Besonderheit:** Die Namen (`kundenname`, `hundename`, `kursname`) werden automatisch mit den CSS-Klassen `names` und dem jeweiligen Variablennamen umschlossen, damit das Styling des Layouts erhalten bleibt.
+*   **HTML-Nutzung:** Nutze im HTML immer den `safe`-Filter für den Body-Text: `{{ body_text | safe }}`. Andere Variablen nutzt du einfach via `{{ variablenname }}`.
+
+#### Regel 5: Bilder und Unterschriften (Sicherheits-Check)
 
 Bilder (Logos, Unterschriften, Siegel) sind optional. Das HTML **muss** abfangen, wenn ein Bild nicht hochgeladen wurde, da sonst ein unschönes "Bild fehlt"-Icon (Broken Image) auftaucht.
 
@@ -128,15 +137,27 @@ Damit dein React-Frontend (der Modal-Builder) weiß, welche Upload-Felder und Pl
     "placeholders": [
         "hundename", "kundenname", "datum", "hundeschule_name", 
         "kursname", "ort", "kursleiter", "sidebar_color"
-    ]
+    ],
+    "trigger_data": {
+        "course_completed": {
+            "body_text": "Hiermit wird bescheinigt, dass...",
+            "sidebar_color": "#8b9370"
+        },
+        "level_achieved": {
+            "body_text": "Herzlichen Glückwunsch! {kundenname} hat das Level...",
+            "sidebar_color": "#ff0000"
+        }
+    }
 }
-
 ```
 
 *   **`image_slots`**: Definiert die IDs, die im HTML als `images.ID` aufgerufen werden.
     *   `allow_variables`: (Boolean) Wenn `false`, wird im Frontend nur das Upload-Feld angezeigt (keine Variablen-Verknüpfung möglich).
     *   `default_ref`: (String) Name einer Variable (z.B. `kursleiter`), die standardmäßig für diesen Slot vorausgewählt wird, wenn ein neues Zertifikat erstellt wird.
 *   **`placeholders`**: Definiert, welche Testdaten-Eingabefelder das Frontend links in der Sidebar anzeigen soll.
+*   **`trigger_data`**: (Dict) Enthält trigger-spezifische Einstellungen für `course_completed` und `level_achieved`. 
+    *   Werte wie `body_text` oder `sidebar_color` werden automatisch geladen, sobald der Trigger im Backend oder in der Vorschau aktiv ist.
+    *   Du kannst hier beliebig eigene Felder hinzufügen, die dann im HTML via `{{ feldname }}` verfügbar sind.
 
 ---
 

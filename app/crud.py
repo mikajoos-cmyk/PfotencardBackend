@@ -932,7 +932,7 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
     return db_tx
 
 
-def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None, date_achieved: Optional[datetime] = None, dog_id: Optional[int] = None, issuer_id: Optional[int] = None):
+def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None, date_achieved: Optional[datetime] = None, dog_id: Optional[int] = None, issuer_id: Optional[int] = None, appointment_id: Optional[int] = None):
     ach = models.Achievement(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -974,9 +974,9 @@ def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_
 
     # --- TEILNAHMEBESCHEINIGUNGEN TRIGGER ---
     try:
-        print(f"DEBUG: Triggering course certificate for tenant {tenant_id}, tt {training_type_id}, user {user_id}, dog {dog_id}, issuer {issuer_id}")
+        print(f"DEBUG: Triggering course certificate for tenant {tenant_id}, tt {training_type_id}, user {user_id}, dog {dog_id}, issuer {issuer_id}, appt {appointment_id}")
         from . import certificate_service
-        res = certificate_service.trigger_certificate_generation(db, tenant_id, "course_completed", training_type_id, user_id, dog_id, issuer_id=issuer_id)
+        res = certificate_service.trigger_certificate_generation(db, tenant_id, "course_completed", training_type_id, user_id, dog_id, issuer_id=issuer_id, appointment_id=appointment_id)
         print(f"DEBUG: Course certificate trigger result: {res}")
     except Exception as e:
         print(f"Error triggering course certificate: {e}")
@@ -1838,16 +1838,16 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
         if not existing_achievement:
             # transaction.id ist None falls price == 0
             t_id = transaction.id if price > 0 else None
-            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=t_id, date_achieved=appt.start_time, dog_id=booking.dog_id, issuer_id=booked_by_id)
+            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=t_id, date_achieved=appt.start_time, dog_id=booking.dog_id, issuer_id=booked_by_id, appointment_id=appt.id)
             db.flush() 
     else:
         # --- TEILNAHMEBESCHEINIGUNGEN TRIGGER (auch wenn auto_progress aus ist!) ---
         # Wenn auto_progress an ist, triggert create_achievement bereits. 
         # Wenn es aus ist, triggern wir hier direkt für die Leistung.
         try:
-            print(f"DEBUG: Triggering course certificate for billed booking (tenant {tenant_id}, tt {training_type.id}, user {user.id}, dog {booking.dog_id}, issuer {booked_by_id})")
+            print(f"DEBUG: Triggering course certificate for billed booking (tenant {tenant_id}, tt {training_type.id}, user {user.id}, dog {booking.dog_id}, issuer {booked_by_id}, appt {appt.id})")
             from . import certificate_service
-            res = certificate_service.trigger_certificate_generation(db, tenant_id, "course_completed", training_type.id, user.id, booking.dog_id, issuer_id=booked_by_id)
+            res = certificate_service.trigger_certificate_generation(db, tenant_id, "course_completed", training_type.id, user.id, booking.dog_id, issuer_id=booked_by_id, appointment_id=appt.id)
             print(f"DEBUG: Course certificate (billed booking) trigger result: {res}")
         except Exception as e:
             print(f"Error triggering course certificate for billed booking: {e}")

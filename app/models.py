@@ -595,6 +595,7 @@ class CertificateTemplate(Base):
     
     # Texte
     title = Column(String(255), default="Teilnahmebescheinigung")
+    body_text = Column(String, nullable=True)
     
     # NEU: Testdaten für die Vorschau
     preview_data = Column(JSONB, nullable=True)

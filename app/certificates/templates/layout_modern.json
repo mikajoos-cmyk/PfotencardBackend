@@ -5,5 +5,13 @@
         {"id": "signature", "label": "Unterschrift", "allow_variables": true, "default_ref": "kursleiter"},
         {"id": "seal", "label": "Siegel (optional)", "allow_variables": false}
     ],
-    "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter", "sidebar_color", "footer_text"]
+    "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter", "sidebar_color", "footer_text"],
+    "trigger_data": {
+        "course_completed": {
+            "body_text": "Hiermit wird bescheinigt, dass {kundenname} mit ihrem Hund {hundename} erfolgreich am Training für {kursname} teilgenommen hat."
+        },
+        "level_achieved": {
+            "body_text": "Herzlichen Glückwunsch! {kundenname} und {hundename} haben erfolgreich das Level {kursname} erreicht."
+        }
+    }
 }

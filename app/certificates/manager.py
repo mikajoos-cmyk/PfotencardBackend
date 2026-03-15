@@ -9,11 +9,12 @@ import io
 logger = logging.getLogger("pfotencard")
 
 class CertificateLayoutMetadata:
-    def __init__(self, id: str, name: str, image_slots: List[Dict[str, Any]], placeholders: List[str]):
+    def __init__(self, id: str, name: str, image_slots: List[Dict[str, Any]], placeholders: List[str], trigger_data: Dict[str, Dict[str, Any]] = None):
         self.id = id
         self.name = name
         self.image_slots = image_slots
         self.placeholders = placeholders
+        self.trigger_data = trigger_data or {}
 
 class CertificateManager:
     def __init__(self, templates_dir: str = None):
@@ -44,7 +45,8 @@ class CertificateManager:
                                 id=layout_id,
                                 name=meta.get("name", layout_id),
                                 image_slots=meta.get("image_slots", []),
-                                placeholders=meta.get("placeholders", [])
+                                placeholders=meta.get("placeholders", []),
+                                trigger_data=meta.get("trigger_data", {})
                             )
                             logger.info(f"Loaded HTML certificate layout: {layout_id}")
                     except Exception as e:
@@ -55,7 +57,8 @@ class CertificateManager:
                         id=layout_id,
                         name=layout_id.capitalize(),
                         image_slots=[],
-                        placeholders=["hundename", "kundenname", "datum", "hundeschule_name"]
+                        placeholders=["hundename", "kundenname", "datum", "hundeschule_name"],
+                        trigger_data={}
                     )
                     logger.info(f"Loaded HTML certificate layout (no JSON): {layout_id}")
 

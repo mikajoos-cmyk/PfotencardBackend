@@ -11,7 +11,8 @@ def prepare_certificate_data(
     dog: models.Dog = None,
     user: models.User = None,
     issuer: models.User = None,
-    preview_data: dict = None
+    preview_data: dict = None,
+    appointment: models.Appointment = None
 ) -> dict:
     """
     Bereitet die Daten für ein Zertifikat vor, egal ob für reale Erstellung oder Vorschau.
@@ -53,9 +54,12 @@ def prepare_certificate_data(
             if level:
                 course_name = level.name
         elif template.trigger_type == 'course_completed':
-            tt = db.query(models.TrainingType).filter(models.TrainingType.id == template.target_id).first()
-            if tt:
-                course_name = tt.name
+            if appointment:
+                course_name = appointment.title
+            else:
+                tt = db.query(models.TrainingType).filter(models.TrainingType.id == template.target_id).first()
+                if tt:
+                    course_name = tt.name
 
     # --- 4. Datum & Footer ---
     datum = preview_data.get("datum") or datetime.now().strftime("%d. %B %Y")
@@ -136,7 +140,21 @@ def prepare_certificate_data(
         elif template.layout_id != "layout_professional" and not final_images.get("signature"):
             final_images["signature"] = sig_url
 
-    return {
+    # Layout-Metadaten laden, um Trigger-Defaults zu erhalten
+    from .certificates.manager import manager
+    layout_meta = manager.get_layout_metadata(template.layout_id or "layout_modern")
+    
+    # Trigger-spezifische Daten aus dem Layout laden
+    trigger_defaults = {}
+    if layout_meta and template.trigger_type in layout_meta.trigger_data:
+        trigger_defaults = layout_meta.trigger_data[template.trigger_type]
+
+    # Priorität für body_text: Preview-Daten > Datenbank > Layout-Trigger-Standard
+    default_text = trigger_defaults.get("body_text", "")
+    body_text = preview_data.get("body_text") or template.body_text or default_text
+    
+    # Restliche Variablen vorbereiten
+    result_data = {
         "title": template.title,
         "kundenname": user_name,
         "hundename": dog_name,
@@ -150,7 +168,31 @@ def prepare_certificate_data(
         "images": final_images
     }
 
-def generate_certificate_pdf(template: models.CertificateTemplate, db=None, dog: models.Dog = None, user: models.User = None, issuer: models.User = None) -> io.BytesIO:
+    # Trigger-spezifische Overrides aus dem Layout hinzufügen/überschreiben
+    # (Dies ermöglicht beliebige neue Variablen im HTML, die im JSON definiert sind)
+    for key, val in trigger_defaults.items():
+        if key != "body_text": # body_text wurde oben schon speziell behandelt
+            result_data[key] = val
+
+    # Platzhalter im body_text ersetzen (Frontend nutzt {kundenname}, wir haben variable_values + result_data)
+    all_vars = {**variable_values, **result_data}
+    for key, val in all_vars.items():
+        placeholder = "{" + key + "}"
+        if placeholder in body_text:
+            # Wenn es einer der Hauptnamen ist, fügen wir das Styling hinzu
+            if key in ['kundenname', 'hundename', 'kursname']:
+                styled_val = f'<span class="names {key}">{val}</span>'
+                body_text = body_text.replace(placeholder, styled_val)
+            else:
+                body_text = body_text.replace(placeholder, str(val))
+    
+    # Zeilenumbrüche in <br> umwandeln für HTML
+    body_text = body_text.replace("\n", "<br>")
+    result_data["body_text"] = body_text
+
+    return result_data
+
+def generate_certificate_pdf(template: models.CertificateTemplate, db=None, dog: models.Dog = None, user: models.User = None, issuer: models.User = None, appointment: models.Appointment = None) -> io.BytesIO:
     """
     Generiert ein Teilnahmebescheinigungs-PDF basierend auf einer Vorlage.
     """
@@ -165,18 +207,18 @@ def generate_certificate_pdf(template: models.CertificateTemplate, db=None, dog:
         layout_id = 'layout_modern'
 
     # Daten vorbereiten
-    render_data = prepare_certificate_data(template, db, dog, user, issuer)
+    render_data = prepare_certificate_data(template, db, dog, user, issuer, appointment=appointment)
     
     # PDF mit WeasyPrint (via manager) rendern
     buffer = manager.render_pdf(layout_id, render_data)
 
     return buffer
 
-def trigger_certificate_generation(db, tenant_id: int, trigger_type: str, target_id: int, user_id: int, dog_id: int = None, issuer_id: int = None):
+def trigger_certificate_generation(db, tenant_id: int, trigger_type: str, target_id: int, user_id: int, dog_id: int = None, issuer_id: int = None, appointment_id: int = None):
     """
     Sucht nach einer passenden Vorlage und generiert das Zertifikat für einen User/Hund.
     """
-    logger.info(f"DEBUG: Entering trigger_certificate_generation: tenant_id={tenant_id}, trigger_type={trigger_type}, target_id={target_id}, user_id={user_id}, dog_id={dog_id}, issuer_id={issuer_id}")
+    logger.info(f"DEBUG: Entering trigger_certificate_generation: tenant_id={tenant_id}, trigger_type={trigger_type}, target_id={target_id}, user_id={user_id}, dog_id={dog_id}, issuer_id={issuer_id}, appointment_id={appointment_id}")
     template = db.query(models.CertificateTemplate).filter(
         models.CertificateTemplate.tenant_id == tenant_id,
         models.CertificateTemplate.trigger_type == trigger_type,
@@ -201,11 +243,15 @@ def trigger_certificate_generation(db, tenant_id: int, trigger_type: str, target
     if issuer_id:
         issuer = db.query(models.User).filter(models.User.id == issuer_id).first()
 
+    appointment = None
+    if appointment_id:
+        appointment = db.query(models.Appointment).filter(models.Appointment.id == appointment_id).first()
+
     logger.info(f"DEBUG: Generiere Zertifikat '{template.name}' für User {user.name} ({user_id}) and Hund {dog.name if dog else 'N/A'} ({dog_id})")
 
     # PDF generieren
     try:
-        pdf_buffer = generate_certificate_pdf(template, db, dog, user, issuer)
+        pdf_buffer = generate_certificate_pdf(template, db, dog, user, issuer, appointment=appointment)
         pdf_content = pdf_buffer.getvalue()
         logger.info(f"DEBUG: PDF generated, size: {len(pdf_content)} bytes")
     except Exception as e:

@@ -23,7 +23,8 @@ def get_layouts(
             id=layout.id,
             name=layout.name,
             image_slots=layout.image_slots,
-            placeholders=layout.placeholders
+            placeholders=layout.placeholders,
+            trigger_data=layout.trigger_data
         ) for layout in layouts
     ]
 
@@ -41,6 +42,7 @@ def preview_html_certificate(
     template = models.CertificateTemplate(
         name=template_in.name,
         title=template_in.title,
+        body_text=template_in.body_text,
         layout_id=template_in.layout_id,
         images=template_in.images,
         trigger_type=template_in.trigger_type,
@@ -65,6 +67,7 @@ def preview_sample_certificate(
     template = models.CertificateTemplate(
         name=template_in.name,
         title=template_in.title,
+        body_text=template_in.body_text,
         layout_id=template_in.layout_id,
         images=template_in.images,
         trigger_type=template_in.trigger_type,
