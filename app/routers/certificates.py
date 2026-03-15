@@ -11,26 +11,32 @@ logger = logging.getLogger("pfotencard")
 
 router = APIRouter(prefix="/api/certificates", tags=["certificates"])
 
-def get_preview_data(template: models.CertificateTemplate, db: Session = None):
-    # Vorbereitete Daten für das Layout
-    school_name = "Deine Hundeschule"
-    if template.tenant:
-        school_name = template.tenant.name
+def get_preview_data(template: models.CertificateTemplate, preview_data: dict = None):
+    preview_data = preview_data or {}
     
-    user_name = "Frau Andrea Lorenz"
-    dog_name = "Basco"
+    # Vorbereitete Daten für das Layout (Prio 1: Testdaten, Prio 2: Fallback)
+    school_name = preview_data.get("hundeschule_name")
+    if not school_name:
+        school_name = template.tenant.name if template.tenant else "Deine Hundeschule"
+    
+    user_name = preview_data.get("kundenname") or "Frau Andrea Lorenz"
+    dog_name = preview_data.get("hundename") or "Basco"
+    ort = preview_data.get("ort") or "Musterstadt"
+    kursleiter = preview_data.get("kursleiter") or "Max Mustermann"
+    kursname = preview_data.get("kursname") or (template.name if template.name else "Musterkurs")
     
     from datetime import datetime
+    datum = preview_data.get("datum") or datetime.now().strftime("%d. %B %Y")
     
     return {
         "title": template.title,
         "kundenname": user_name,
         "hundename": dog_name,
-        "datum": datetime.now().strftime("%d. %B %Y"),
+        "datum": datum,
         "hundeschule_name": school_name,
-        "kursname": template.name,
-        "ort": "Ascha",
-        "kursleiter": "Christian Huber",
+        "kursname": kursname,
+        "ort": ort,
+        "kursleiter": kursleiter,
         "images": template.images or {}
     }
 
@@ -66,10 +72,11 @@ def preview_html_certificate(
         layout_id=template_in.layout_id,
         images=template_in.images,
         trigger_type=template_in.trigger_type,
-        target_id=template_in.target_id
+        target_id=template_in.target_id,
+        tenant=current_user.tenant
     )
     
-    data = get_preview_data(template)
+    data = get_preview_data(template, template_in.preview_data)
     html_content = manager.render_html(template.layout_id, data)
     
     return HTMLResponse(content=html_content)
@@ -82,18 +89,19 @@ def preview_sample_certificate(
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Nicht berechtigt")
     
-    # Dummy Template Objekt erstellen (nicht speichern)
+    # Dummy Template Objekt erstellen
     template = models.CertificateTemplate(
         name=template_in.name,
         title=template_in.title,
         layout_id=template_in.layout_id,
         images=template_in.images,
         trigger_type=template_in.trigger_type,
-        target_id=template_in.target_id
+        target_id=template_in.target_id,
+        tenant=current_user.tenant
     )
     
     from ..certificates.manager import manager
-    data = get_preview_data(template)
+    data = get_preview_data(template, template_in.preview_data)
     pdf_buffer = manager.render_pdf(template.layout_id, data)
     
     return StreamingResponse(

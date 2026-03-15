@@ -733,6 +733,7 @@ class CertificateTemplateBase(BaseModel):
     title: str = "Teilnahmebescheinigung"
     trigger_type: str
     target_id: int
+    preview_data: Optional[Dict[str, str]] = None # NEU: Testdaten für die Vorschau
 
 class CertificateTemplateCreate(CertificateTemplateBase):
     pass
