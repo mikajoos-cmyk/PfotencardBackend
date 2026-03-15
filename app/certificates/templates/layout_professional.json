@@ -1,9 +1,11 @@
 {
-    "name": "Profi",
+    "name": "Workshop",
     "image_slots": [
-        {"id": "logo", "label": "Logo"},
-        {"id": "signature", "label": "Unterschrift"},
-        {"id": "seal", "label": "Siegel (optional)"}
+        {"id": "sidebar_logo", "label": "Sidebar Logo (Weiß, png)"},
+        {"id": "signature_1", "label": "Unterschrift Links"},
+        {"id": "signature_2", "label": "Unterschrift Rechts"},
+        {"id": "logo_1", "label": "Logo Unten Links"},
+        {"id": "logo_2", "label": "Logo Unten Rechts"}
     ],
-    "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter"]
+    "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter", "sidebar_color", "footer_text"]
 }

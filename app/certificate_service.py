@@ -39,16 +39,35 @@ def generate_certificate_pdf(template: models.CertificateTemplate, dog: models.D
     
     dog_name = dog.name if dog else "Basco"
     
+    # Kursleiter bestimmen (Aktueller Mitarbeiter)
+    kursleiter_name = "Trainer"
+    saved_signatures = {}
+    if user and user.tenant and user.tenant.config:
+        saved_signatures = user.tenant.config.get("signatures", {})
+    elif template.tenant and template.tenant.config:
+        saved_signatures = template.tenant.config.get("signatures", {})
+
+    # Bilder klonen und Unterschrift einsetzen
+    images = template.images.copy() if template.images else {}
+    if kursleiter_name in saved_signatures:
+        sig_url = saved_signatures[kursleiter_name]
+        if template.layout_id == "layout_workshop" and not images.get("signature_2"):
+            images["signature_2"] = sig_url
+        elif template.layout_id != "layout_workshop" and not images.get("signature"):
+            images["signature"] = sig_url
+
     render_data = {
         "title": template.title,
         "kundenname": user_name,
         "hundename": dog_name,
         "datum": datetime.now().strftime("%d. %B %Y"),
         "hundeschule_name": school_name,
-        "kursname": template.name, # Standardmäßig der Name der Vorlage
+        "kursname": template.name,
         "ort": "Ascha",
-        "kursleiter": "Christian Huber",
-        "images": template.images or {}
+        "kursleiter": kursleiter_name,
+        "sidebar_color": "#8b9370",
+        "footer_text": "www.deine-hundeschule.de",
+        "images": images  # Geupdatetes Image Dictionary nutzen!
     }
     
     from .certificates.manager import manager

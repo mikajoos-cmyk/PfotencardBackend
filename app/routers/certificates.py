@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse, HTMLResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from typing import List, Dict, Any
 import io
 import logging
@@ -28,6 +29,22 @@ def get_preview_data(template: models.CertificateTemplate, preview_data: dict = 
     from datetime import datetime
     datum = preview_data.get("datum") or datetime.now().strftime("%d. %B %Y")
     
+    sidebar_color = preview_data.get("sidebar_color") or "#8b9370"
+    footer_text = preview_data.get("footer_text") or "www.deine-hundeschule.de"
+    
+    images = template.images.copy() if template.images else {}
+
+    # NEU: Unterschrift automatisch laden, falls vorhanden
+    if template.tenant and template.tenant.config:
+        saved_signatures = template.tenant.config.get("signatures", {})
+        if kursleiter in saved_signatures:
+            sig_url = saved_signatures[kursleiter]
+            # In den richtigen Slot packen, je nach Layout
+            if template.layout_id == "layout_workshop" and not images.get("signature_2"):
+                images["signature_2"] = sig_url
+            elif template.layout_id != "layout_workshop" and not images.get("signature"):
+                images["signature"] = sig_url
+    
     return {
         "title": template.title,
         "kundenname": user_name,
@@ -37,7 +54,9 @@ def get_preview_data(template: models.CertificateTemplate, preview_data: dict = 
         "kursname": kursname,
         "ort": ort,
         "kursleiter": kursleiter,
-        "images": template.images or {}
+        "sidebar_color": sidebar_color,
+        "footer_text": footer_text,
+        "images": images
     }
 
 @router.get("/layouts", response_model=List[schemas.CertificateLayoutMetadata])
@@ -158,3 +177,34 @@ def delete_template(
         
     crud.delete_certificate_template(db, template_id)
     return {"ok": True}
+
+@router.get("/employees")
+def get_employees(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_active_user)):
+    """Holt alle Mitarbeiter dieses Mandanten für die Unterschriften-Zuordnung"""
+    users = db.query(models.User).filter(models.User.tenant_id == current_user.tenant_id).all()
+    # Erstelle den vollen Namen, falle zurück auf Email, falls kein Name gesetzt ist
+    result = []
+    for u in users:
+        name = f"{u.vorname or ''} {u.nachname or ''}".strip()
+        if not name:
+            name = u.name or u.email
+        result.append({"id": u.id, "name": name})
+    return result
+
+@router.get("/signatures")
+def get_signatures(current_user: models.User = Depends(auth.get_current_active_user)):
+    """Holt die gespeicherten Unterschriften-URLs aus der Tenant Config"""
+    if current_user.tenant and current_user.tenant.config:
+        return current_user.tenant.config.get("signatures", {})
+    return {}
+
+@router.put("/signatures")
+def save_signatures(signatures: dict, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_active_user)):
+    """Speichert die Unterschriften-URLs in der Tenant Config"""
+    if current_user.tenant.config is None:
+        current_user.tenant.config = {}
+    
+    current_user.tenant.config["signatures"] = signatures
+    flag_modified(current_user.tenant, "config") # Zwingt die DB, das JSON Update zu erkennen
+    db.commit()
+    return {"status": "ok", "signatures": signatures}

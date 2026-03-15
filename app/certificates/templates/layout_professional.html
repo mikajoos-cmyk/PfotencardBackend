@@ -20,9 +20,22 @@
         .sidebar {
             position: absolute;
             top: 0; left: 0;
-            width: 60mm; height: 297mm;
-            background-color: #2F5233;
+            width: 50mm; height: 297mm;
+            background-color: {{ sidebar_color | default('#8b9370') }};
             overflow: hidden;
+        }
+
+        .sidebar-logo {
+            position: absolute;
+            top: 20mm; left: 0;
+            width: 50mm;
+            text-align: center;
+        }
+
+        .sidebar-logo img {
+            max-width: 40mm;
+            max-height: 40mm;
+            object-fit: contain;
         }
 
         .sidebar-text {
@@ -30,87 +43,212 @@
             top: 50%; left: 50%;
             transform: translate(-50%, -50%) rotate(-90deg);
             color: white;
-            font-size: 65px;
-            font-weight: bold;
-            letter-spacing: 20px;
-            text-transform: uppercase;
-            opacity: 0.15;
-            white-space: nowrap; /* Wichtig: Verhindert Umbrüche */
+            font-size: 55px;
+            font-weight: 300;
+            letter-spacing: 2px;
+            white-space: nowrap;
+            opacity: 0.3;
         }
 
         .main-content {
             position: absolute;
-            top: 0; left: 60mm;
-            width: 150mm; height: 297mm;
+            top: 0; left: 50mm;
+            width: 160mm; height: 297mm;
+            padding: 20mm;
         }
 
-        .content-center {
+        .title {
+            text-align: right;
+            font-size: 38px;
+            color: #777;
+            font-weight: 300;
+            margin-bottom: 25mm;
+            letter-spacing: 1px;
+        }
+
+        .center-block {
             position: absolute;
-            top: 50%; left: 0;
-            width: 100%;
-            transform: translateY(-55%);
-            padding: 0 20mm;
+            top: 70mm; left: 20mm; right: 20mm;
             text-align: center;
         }
 
-        .logo { max-width: 120px; max-height: 80px; margin: 0 auto 20mm auto; display: block; }
-        h1 { font-size: 32px; color: #2F5233; text-transform: uppercase; letter-spacing: 2px; margin: 0 0 15mm 0; line-height: 1.2; }
-        .text-block { font-size: 18px; line-height: 1.6; }
-        .names { font-size: 26px; font-weight: bold; margin: 12px 0; color: #000; }
+        .kundenname {
+            font-size: 36px;
+            font-weight: 300;
+            color: #333;
+            margin-bottom: 8mm;
+        }
 
-        .footer {
+        .text-muted {
+            font-size: 18px;
+            color: #555;
+            margin-bottom: 8mm;
+        }
+
+        .hundename {
+            font-size: 32px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .left-block {
             position: absolute;
-            bottom: 20mm; left: 20mm; right: 20mm;
-            display: flex; justify-content: space-between; align-items: flex-end;
+            top: 140mm; left: 30mm; right: 20mm;
             text-align: left;
         }
-        .footer-left { width: 50%; font-size: 14px; color: #666; padding-bottom: 5mm; }
-        .footer-right { width: 45%; text-align: center; }
-        .sig-img { max-width: 100%; max-height: 50px; margin-bottom: 5px; }
-        .sig-line { border-top: 1px solid #333; padding-top: 5px; font-size: 12px; }
-        .seal { position: absolute; right: 20mm; bottom: 45mm; width: 80px; height: 80px; opacity: 0.85; }
+
+        .left-block p {
+            margin: 5mm 0;
+            font-size: 22px;
+            font-weight: 300;
+            color: #444;
+        }
+
+        .kursname {
+            font-size: 26px;
+            font-weight: bold;
+            color: #333;
+            margin: 8mm 0;
+            line-height: 1.3;
+        }
+
+        .date-block {
+            position: absolute;
+            top: 210mm; left: 30mm; right: 20mm;
+            font-size: 16px;
+            color: #444;
+            text-align: left;
+        }
+
+        .signature-area {
+            position: absolute;
+            bottom: 45mm; left: 30mm; right: 20mm;
+            height: 25mm;
+        }
+
+        .sig-box-left {
+            position: absolute;
+            left: 0; bottom: 0;
+            width: 60mm;
+            text-align: center;
+        }
+
+        .sig-box-right {
+            position: absolute;
+            right: 0; bottom: 0;
+            width: 60mm;
+            text-align: center;
+        }
+
+        .sig-img {
+            max-width: 100%;
+            height: 20mm;
+            margin-bottom: 2mm;
+            object-fit: contain;
+            object-position: center bottom;
+        }
+
+        .sig-line {
+            border-top: 1px solid #333;
+            padding-top: 2mm;
+            font-size: 11px;
+            color: #333;
+        }
+
+        .logo-area {
+            position: absolute;
+            bottom: 15mm; left: 30mm; right: 20mm;
+            height: 20mm;
+        }
+
+        .logo-left {
+            position: absolute;
+            left: 0; bottom: 0;
+            max-width: 60mm;
+            max-height: 20mm;
+            object-fit: contain;
+            object-position: left center;
+        }
+
+        .logo-right {
+            position: absolute;
+            right: 0; bottom: 0;
+            max-width: 60mm;
+            max-height: 20mm;
+            object-fit: contain;
+            object-position: right center;
+        }
+
+        .footer-line {
+            position: absolute;
+            bottom: 5mm; left: 30mm; right: 20mm;
+            text-align: center;
+            font-size: 9px;
+            color: #333;
+        }
     </style>
 </head>
 <body>
     <div class="sidebar">
-        <div class="sidebar-text">ZERTIFIKAT</div>
+        <div class="sidebar-logo">
+            {% if images.sidebar_logo %}
+            <img src="{{ images.sidebar_logo }}" alt="Logo">
+            {% endif %}
+        </div>
+        <div class="sidebar-text">{{ hundeschule_name }}</div>
     </div>
 
     <div class="main-content">
-        <div class="content-center">
-            {% if images.logo %}
-            <img src="{{ images.logo }}" class="logo" alt="Logo">
-            {% endif %}
+        <div class="title">{{ title }}</div>
 
-            <h1>{{ title }}</h1>
-
-            <div class="text-block">
-                Herzlichen Glückwunsch!<br><br>
-                <div class="names">{{ kundenname }}</div>
-                hat mit dem Hund<br>
-                <div class="names">{{ hundename }}</div>
-                erfolgreich am Kurs<br>
-                <div class="names">{{ kursname }}</div>
-                teilgenommen.
-            </div>
+        <div class="center-block">
+            <div class="kundenname">{{ kundenname }}</div>
+            <div class="text-muted">hat mit dem Hund</div>
+            <div class="hundename">{{ hundename }}</div>
         </div>
 
-        {% if images.seal %}
-        <img src="{{ images.seal }}" class="seal" alt="Siegel">
-        {% endif %}
+        <div class="left-block">
+            <p>an unserem Kurs / Workshop</p>
+            <div class="kursname">{{ kursname }}</div>
+            <p>der {{ hundeschule_name }}</p>
+            <p>mit Erfolg teilgenommen.</p>
+        </div>
 
-        <div class="footer">
-            <div class="footer-left">
-                Ausgestellt in {{ ort }},<br>den {{ datum }}
-            </div>
-            <div class="footer-right">
-                {% if images.signature %}
-                <img src="{{ images.signature }}" class="sig-img" alt="Unterschrift"><br>
+        <div class="date-block">
+            Ausgestellt in {{ ort }}, den {{ datum }}
+        </div>
+
+        <div class="signature-area">
+            <div class="sig-box-left">
+                {% if images.signature_1 %}
+                <img src="{{ images.signature_1 }}" class="sig-img" alt="Unterschrift 1">
                 {% else %}
-                <div style="height: 50px;"></div>
+                <div style="height: 20mm;"></div>
+                {% endif %}
+                <div class="sig-line">Veranstalter | {{ hundeschule_name }}</div>
+            </div>
+
+            <div class="sig-box-right">
+                {% if images.signature_2 %}
+                <img src="{{ images.signature_2 }}" class="sig-img" alt="Unterschrift Kursleiter">
+                {% else %}
+                <div style="height: 20mm;"></div>
                 {% endif %}
                 <div class="sig-line">Kursleiter: {{ kursleiter }}</div>
             </div>
+        </div>
+
+        <div class="logo-area">
+            {% if images.logo_1 %}
+            <img src="{{ images.logo_1 }}" class="logo-left" alt="Logo Unten Links">
+            {% endif %}
+            {% if images.logo_2 %}
+            <img src="{{ images.logo_2 }}" class="logo-right" alt="Logo Unten Rechts">
+            {% endif %}
+        </div>
+
+        <div class="footer-line">
+            {{ footer_text }}
         </div>
     </div>
 </body>
