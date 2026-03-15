@@ -8,6 +8,7 @@ from fastapi import HTTPException
 import secrets
 import uuid
 from typing import List, Optional
+import traceback
 
 # Notification Service importieren
 from .notification_service import notify_user
@@ -763,7 +764,7 @@ def are_non_exam_requirements_met(db: Session, user: models.User, current_level:
     # print(f"DEBUG REQS: ALL non-exam requirements MET")
     return True
 
-def perform_level_up(db: Session, user_id: int, tenant_id: int, dog_id: Optional[int] = None):
+def perform_level_up(db: Session, user_id: int, tenant_id: int, dog_id: Optional[int] = None, issuer_id: Optional[int] = None):
     user = get_user(db, user_id, tenant_id)
     if not user: raise HTTPException(404, "User not found")
     
@@ -818,10 +819,16 @@ def perform_level_up(db: Session, user_id: int, tenant_id: int, dog_id: Optional
     
     # --- TEILNAHMEBESCHEINIGUNGEN TRIGGER ---
     try:
+        print(f"DEBUG: Triggering level certificate for tenant {tenant_id}, level {next_level.id}, user {user_id}, dog {dog_id}, issuer {issuer_id}")
         from . import certificate_service
-        certificate_service.trigger_certificate_generation(db, tenant_id, "level_achieved", next_level.id, user_id, dog_id)
+        res = certificate_service.trigger_certificate_generation(db, tenant_id, "level_achieved", next_level.id, user_id, dog_id, issuer_id=issuer_id)
+        if res:
+            db.commit()
+        print(f"DEBUG: Level certificate trigger result: {res}")
     except Exception as e:
         print(f"Error triggering level certificate: {e}")
+        import traceback
+        traceback.print_exc()
 
     return user
 
@@ -896,7 +903,12 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
         ).first()
         
         if tt:
-            create_achievement(db, user.id, tenant_id, tt.id, db_tx.id, dog_id=transaction.dog_id)
+            print(f"DEBUG: Creating achievement for transaction {db_tx.id}, tt {tt.id}")
+            create_achievement(db, user.id, tenant_id, tt.id, db_tx.id, dog_id=transaction.dog_id, issuer_id=booked_by_id)
+        else:
+            print(f"DEBUG: No training type found for ID {transaction.training_type_id}")
+    else:
+        print("DEBUG: No training_type_id in transaction, no achievement created.")
 
     # User über Aufladung informieren
     if transaction.type == "Aufladung":
@@ -920,7 +932,7 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
     return db_tx
 
 
-def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None, date_achieved: Optional[datetime] = None, dog_id: Optional[int] = None):
+def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_id: int, transaction_id: Optional[int] = None, date_achieved: Optional[datetime] = None, dog_id: Optional[int] = None, issuer_id: Optional[int] = None):
     ach = models.Achievement(
         tenant_id=tenant_id,
         user_id=user_id,
@@ -962,10 +974,14 @@ def create_achievement(db: Session, user_id: int, tenant_id: int, training_type_
 
     # --- TEILNAHMEBESCHEINIGUNGEN TRIGGER ---
     try:
+        print(f"DEBUG: Triggering course certificate for tenant {tenant_id}, tt {training_type_id}, user {user_id}, dog {dog_id}, issuer {issuer_id}")
         from . import certificate_service
-        certificate_service.trigger_certificate_generation(db, tenant_id, "course_completed", training_type_id, user_id, dog_id)
+        res = certificate_service.trigger_certificate_generation(db, tenant_id, "course_completed", training_type_id, user_id, dog_id, issuer_id=issuer_id)
+        print(f"DEBUG: Course certificate trigger result: {res}")
     except Exception as e:
         print(f"Error triggering course certificate: {e}")
+        import traceback
+        traceback.print_exc()
 
     return ach
 
@@ -997,7 +1013,7 @@ def create_document(db: Session, user_id: int, tenant_id: int, file_name: str, f
         file_path=file_path
     )
     db.add(doc)
-    db.commit()
+    db.flush()
     db.refresh(doc)
     
     # --- NEU: User benachrichtigen ---
@@ -1822,8 +1838,21 @@ def bill_booking(db: Session, tenant_id: int, booking_id: int, booked_by_id: Opt
         if not existing_achievement:
             # transaction.id ist None falls price == 0
             t_id = transaction.id if price > 0 else None
-            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=t_id, date_achieved=appt.start_time, dog_id=booking.dog_id)
+            create_achievement(db, user.id, tenant_id, training_type.id, transaction_id=t_id, date_achieved=appt.start_time, dog_id=booking.dog_id, issuer_id=booked_by_id)
             db.flush() 
+    else:
+        # --- TEILNAHMEBESCHEINIGUNGEN TRIGGER (auch wenn auto_progress aus ist!) ---
+        # Wenn auto_progress an ist, triggert create_achievement bereits. 
+        # Wenn es aus ist, triggern wir hier direkt für die Leistung.
+        try:
+            print(f"DEBUG: Triggering course certificate for billed booking (tenant {tenant_id}, tt {training_type.id}, user {user.id}, dog {booking.dog_id}, issuer {booked_by_id})")
+            from . import certificate_service
+            res = certificate_service.trigger_certificate_generation(db, tenant_id, "course_completed", training_type.id, user.id, booking.dog_id, issuer_id=booked_by_id)
+            print(f"DEBUG: Course certificate (billed booking) trigger result: {res}")
+        except Exception as e:
+            print(f"Error triggering course certificate for billed booking: {e}")
+            import traceback
+            traceback.print_exc()
     
     booking.is_billed = True # NEU: Als abgerechnet markieren
     

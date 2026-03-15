@@ -151,7 +151,7 @@ def send_push(db: Session, subscription: models.PushSubscription, title: str, me
             print(f"DEBUG [Push]: Abo ist abgelaufen (410). Lösche Subscription ID {subscription.id} aus DB.")
             try:
                 db.delete(subscription)
-                db.commit()
+                db.flush()
             except Exception as db_err:
                 print(f"DEBUG [Push]: DB Fehler beim Löschen: {db_err}")
                 db.rollback()

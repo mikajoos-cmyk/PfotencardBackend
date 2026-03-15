@@ -596,6 +596,9 @@ class CertificateTemplate(Base):
     # Texte
     title = Column(String(255), default="Teilnahmebescheinigung")
     
+    # NEU: Testdaten für die Vorschau
+    preview_data = Column(JSONB, nullable=True)
+    
     # Automatisierungs-Trigger
     trigger_type = Column(String(50), nullable=False) # 'level_achieved' oder 'course_completed'
     target_id = Column(Integer, nullable=False) # ID des Levels oder der Leistung (TrainingType)

@@ -1543,7 +1543,7 @@ def perform_level_up_endpoint(
     if current_user.role not in ['admin', 'mitarbeiter']:
         raise HTTPException(status_code=403, detail="Not authorized")
     resolved_id = auth.resolve_user_id(db, user_id, tenant.id)
-    crud.perform_level_up(db, resolved_id, tenant.id, dog_id=dog_id)
+    crud.perform_level_up(db, resolved_id, tenant.id, dog_id=dog_id, issuer_id=current_user.id)
     return crud.get_user(db, resolved_id, tenant.id)
 
 @app.post("/api/users/{user_id}/dogs", response_model=schemas.Dog)
@@ -1691,7 +1691,10 @@ async def upload_document(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-    return crud.create_document(db, resolved_id, tenant.id, upload_file.filename, upload_file.content_type, file_path_in_bucket)
+    doc = crud.create_document(db, resolved_id, tenant.id, upload_file.filename, upload_file.content_type, file_path_in_bucket)
+    db.commit()
+    db.refresh(doc)
+    return doc
 
 @app.get("/api/documents/{document_id}")
 def read_document(

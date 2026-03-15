@@ -5,59 +5,12 @@ from sqlalchemy.orm.attributes import flag_modified
 from typing import List, Dict, Any
 import io
 import logging
-from .. import crud, models, schemas, auth
+from .. import crud, models, schemas, auth, certificate_service
 from ..database import get_db
 
 logger = logging.getLogger("pfotencard")
 
 router = APIRouter(prefix="/api/certificates", tags=["certificates"])
-
-def get_preview_data(template: models.CertificateTemplate, preview_data: dict = None):
-    preview_data = preview_data or {}
-    
-    # Vorbereitete Daten für das Layout (Prio 1: Testdaten, Prio 2: Fallback)
-    school_name = preview_data.get("hundeschule_name")
-    if not school_name:
-        school_name = template.tenant.name if template.tenant else "Deine Hundeschule"
-    
-    user_name = preview_data.get("kundenname") or "Frau Andrea Lorenz"
-    dog_name = preview_data.get("hundename") or "Basco"
-    ort = preview_data.get("ort") or "Musterstadt"
-    kursleiter = preview_data.get("kursleiter") or "Max Mustermann"
-    kursname = preview_data.get("kursname") or (template.name if template.name else "Musterkurs")
-    
-    from datetime import datetime
-    datum = preview_data.get("datum") or datetime.now().strftime("%d. %B %Y")
-    
-    sidebar_color = preview_data.get("sidebar_color") or "#8b9370"
-    footer_text = preview_data.get("footer_text") or "www.deine-hundeschule.de"
-    
-    images = template.images.copy() if template.images else {}
-
-    # NEU: Unterschrift automatisch laden, falls vorhanden
-    if template.tenant and template.tenant.config:
-        saved_signatures = template.tenant.config.get("signatures", {})
-        if kursleiter in saved_signatures:
-            sig_url = saved_signatures[kursleiter]
-            # In den richtigen Slot packen, je nach Layout
-            if template.layout_id == "layout_workshop" and not images.get("signature_2"):
-                images["signature_2"] = sig_url
-            elif template.layout_id != "layout_workshop" and not images.get("signature"):
-                images["signature"] = sig_url
-    
-    return {
-        "title": template.title,
-        "kundenname": user_name,
-        "hundename": dog_name,
-        "datum": datum,
-        "hundeschule_name": school_name,
-        "kursname": kursname,
-        "ort": ort,
-        "kursleiter": kursleiter,
-        "sidebar_color": sidebar_color,
-        "footer_text": footer_text,
-        "images": images
-    }
 
 @router.get("/layouts", response_model=List[schemas.CertificateLayoutMetadata])
 def get_layouts(
@@ -95,7 +48,7 @@ def preview_html_certificate(
         tenant=current_user.tenant
     )
     
-    data = get_preview_data(template, template_in.preview_data)
+    data = certificate_service.prepare_certificate_data(template, preview_data=template_in.preview_data)
     html_content = manager.render_html(template.layout_id, data)
     
     return HTMLResponse(content=html_content)
@@ -120,7 +73,7 @@ def preview_sample_certificate(
     )
     
     from ..certificates.manager import manager
-    data = get_preview_data(template, template_in.preview_data)
+    data = certificate_service.prepare_certificate_data(template, preview_data=template_in.preview_data)
     pdf_buffer = manager.render_pdf(template.layout_id, data)
     
     return StreamingResponse(
@@ -181,7 +134,11 @@ def delete_template(
 @router.get("/employees")
 def get_employees(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_active_user)):
     """Holt alle Mitarbeiter dieses Mandanten für die Unterschriften-Zuordnung"""
-    users = db.query(models.User).filter(models.User.tenant_id == current_user.tenant_id).all()
+    STAFF_ROLES = ['admin', 'mitarbeiter', 'staff', 'trainer']
+    users = db.query(models.User).filter(
+        models.User.tenant_id == current_user.tenant_id,
+        models.User.role.in_(STAFF_ROLES)
+    ).all()
     # Erstelle den vollen Namen, falle zurück auf Email, falls kein Name gesetzt ist
     result = []
     for u in users:
