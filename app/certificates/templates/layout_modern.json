@@ -1,9 +1,9 @@
 {
     "name": "Modern",
     "image_slots": [
-        {"id": "logo", "label": "Logo"},
-        {"id": "signature", "label": "Unterschrift"},
-        {"id": "seal", "label": "Siegel (optional)"}
+        {"id": "logo", "label": "Logo", "allow_variables": true, "default_ref": "hundeschule_name"},
+        {"id": "signature", "label": "Unterschrift", "allow_variables": true, "default_ref": "kursleiter"},
+        {"id": "seal", "label": "Siegel (optional)", "allow_variables": false}
     ],
-    "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname"]
+    "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter", "sidebar_color", "footer_text"]
 }

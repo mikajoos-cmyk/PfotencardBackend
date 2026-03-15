@@ -755,5 +755,5 @@ class CertificateTemplateResponse(CertificateTemplateBase):
 class CertificateLayoutMetadata(BaseModel):
     id: str
     name: str
-    image_slots: List[Dict[str, str]]
+    image_slots: List[Dict[str, Any]]
     placeholders: List[str]

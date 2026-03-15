@@ -9,7 +9,7 @@ import io
 logger = logging.getLogger("pfotencard")
 
 class CertificateLayoutMetadata:
-    def __init__(self, id: str, name: str, image_slots: List[Dict[str, str]], placeholders: List[str]):
+    def __init__(self, id: str, name: str, image_slots: List[Dict[str, Any]], placeholders: List[str]):
         self.id = id
         self.name = name
         self.image_slots = image_slots

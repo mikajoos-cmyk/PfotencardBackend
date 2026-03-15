@@ -1,11 +1,11 @@
 {
     "name": "Workshop",
     "image_slots": [
-        {"id": "sidebar_logo", "label": "Sidebar Logo (Weiß, png)"},
-        {"id": "signature_1", "label": "Unterschrift Links"},
-        {"id": "signature_2", "label": "Unterschrift Rechts"},
-        {"id": "logo_1", "label": "Logo Unten Links"},
-        {"id": "logo_2", "label": "Logo Unten Rechts"}
+        {"id": "sidebar_logo", "label": "Sidebar Logo (Weiß, png)", "allow_variables": true, "default_ref": "hundeschule_name"},
+        {"id": "signature_1", "label": "Unterschrift Links", "allow_variables": true},
+        {"id": "signature_2", "label": "Unterschrift Rechts", "allow_variables": true, "default_ref": "kursleiter"},
+        {"id": "logo_1", "label": "Logo Unten Links", "allow_variables": false},
+        {"id": "logo_2", "label": "Logo Unten Rechts", "allow_variables": false}
     ],
     "placeholders": ["hundename", "kundenname", "datum", "hundeschule_name", "kursname", "ort", "kursleiter", "sidebar_color", "footer_text"]
 }

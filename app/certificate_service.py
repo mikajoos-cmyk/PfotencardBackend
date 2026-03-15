@@ -89,15 +89,52 @@ def prepare_certificate_data(
              # Im reinen Vorschau-Modus (ohne User/Issuer) nimm die erste verfügbare Unterschrift
              kursleiter_name = list(saved_signatures.keys())[0]
 
-    # Bilder klonen und Unterschrift einsetzen
-    images = template.images.copy() if template.images else {}
+    # Bilder klonen und dynamische Referenzen auflösen
+    variable_values = {
+        "kundenname": user_name,
+        "hundename": dog_name,
+        "datum": datum,
+        "hundeschule_name": school_name,
+        "kursname": course_name,
+        "ort": school_location,
+        "kursleiter": kursleiter_name,
+        "footer_text": footer_text,
+        "sidebar_color": sidebar_color
+    }
+
+    final_images = {}
+    branding = tenant.config.get("branding", {}) if tenant and tenant.config else {}
+    if template.images:
+        for slot_id, value in template.images.items():
+            if isinstance(value, str) and value.startswith("ref:"):
+                var_name = value[4:]
+                
+                # Spezialfall: Hundeschule Logo aus Branding laden
+                if var_name == "hundeschule_name":
+                    logo_url = branding.get("logo_url")
+                    if logo_url:
+                        final_images[slot_id] = logo_url
+                        continue
+
+                var_value = variable_values.get(var_name)
+                if var_value and var_value in saved_signatures:
+                    final_images[slot_id] = saved_signatures[var_value]
+                else:
+                    # Fallback für Kursleiter-Signaturen: Falls var_value der Name ist, 
+                    # aber nicht in signatures, schau ob es eine generische Signatur gibt.
+                    logger.debug(f"Variable {var_name}={var_value} not found in signatures.")
+            else:
+                final_images[slot_id] = value
+
+    # ABWÄRTSKOMPATIBILITÄT: Alte Automatik-Logik für Unterschriften beibehalten
+    # (falls noch keine Referenz manuell im Template gesetzt wurde)
     if kursleiter_name in saved_signatures:
         sig_url = saved_signatures[kursleiter_name]
         # In den richtigen Slot packen, je nach Layout (Logik aus Router kopiert)
-        if template.layout_id == "layout_workshop" and not images.get("signature_2"):
-            images["signature_2"] = sig_url
-        elif template.layout_id != "layout_workshop" and not images.get("signature"):
-            images["signature"] = sig_url
+        if template.layout_id == "layout_professional" and not final_images.get("signature_2"):
+            final_images["signature_2"] = sig_url
+        elif template.layout_id != "layout_professional" and not final_images.get("signature"):
+            final_images["signature"] = sig_url
 
     return {
         "title": template.title,
@@ -110,7 +147,7 @@ def prepare_certificate_data(
         "kursleiter": kursleiter_name,
         "sidebar_color": sidebar_color,
         "footer_text": footer_text,
-        "images": images
+        "images": final_images
     }
 
 def generate_certificate_pdf(template: models.CertificateTemplate, db=None, dog: models.Dog = None, user: models.User = None, issuer: models.User = None) -> io.BytesIO:
