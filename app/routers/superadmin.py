@@ -106,50 +106,62 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
     try:
         product = stripe.Product.create(
             name=f"PfotenCard {package.plan_name.capitalize()}",
-            description=f"Software-Paket für Hundeschulen"
+            description=f"{'Zusatzmodul' if package.package_type == 'addon' else 'Basis-Paket'}"
         )
         
-        # 2. Fixpreis (Grundgebühr) anlegen
-        price_base = stripe.Price.create(
+        # 2a. Monatlicher Fixpreis (Grundgebühr)
+        price_base_monthly = stripe.Price.create(
             product=product.id,
             unit_amount=int(package.price_monthly * 100), # Stripe rechnet in Cent!
             currency="eur",
             recurring={"interval": "month"}
         )
-        
-        # 3. Nutzungsbasierter Preis (Zusätzliche Kunden)
-        # Wenn kein Preis angegeben ist, nehmen wir 0
-        price_users = stripe.Price.create(
+
+        # 2b. Jährlicher Fixpreis (Grundgebühr)
+        price_base_yearly = stripe.Price.create(
             product=product.id,
-            unit_amount=int(package.additional_cost_per_customer * 100),
+            unit_amount=int(package.price_yearly * 100),
             currency="eur",
-            recurring={
-                "interval": "month", 
-                "usage_type": "metered",
-                "meter": settings.STRIPE_METER_ID_USERS
-            },
+            recurring={"interval": "year"}
         )
         
-        # 4. Nutzungsbasierter Preis (Transaktionsgebühren) -> Immer 1 Cent!
-        # Dieser Preis wird für variable Gebühren genutzt, indem man die Cent-Anzahl als Usage meldet.
-        price_fees = stripe.Price.create(
-            product=product.id,
-            unit_amount=1, 
-            currency="eur",
-            recurring={
-                "interval": "month", 
-                "usage_type": "metered",
-                "meter": settings.STRIPE_METER_ID_FEES
-            },
-        )
+        # 3. Nutzungsbasierte Preise NUR für Basis-Pakete erstellen
+        price_users_id = None
+        price_fees_id = None
+        
+        if package.package_type == 'base':
+            price_users = stripe.Price.create(
+                product=product.id,
+                unit_amount=int(package.additional_cost_per_customer * 100),
+                currency="eur",
+                recurring={
+                    "interval": "month", 
+                    "usage_type": "metered",
+                    "meter": settings.STRIPE_METER_ID_USERS
+                },
+            )
+            price_users_id = price_users.id
+            
+            price_fees = stripe.Price.create(
+                product=product.id,
+                unit_amount=1, 
+                currency="eur",
+                recurring={
+                    "interval": "month", 
+                    "usage_type": "metered",
+                    "meter": settings.STRIPE_METER_ID_FEES
+                },
+            )
+            price_fees_id = price_fees.id
         
         # 5. Alles in der Datenbank speichern
         db_package = models.SubscriptionPackage(
-            **package.dict(exclude={"stripe_product_id", "stripe_price_id_base", "stripe_price_id_users", "stripe_price_id_fees"}),
+            **package.dict(exclude={"stripe_product_id", "stripe_price_id_base_monthly", "stripe_price_id_base_yearly", "stripe_price_id_users", "stripe_price_id_fees"}),
             stripe_product_id=product.id,
-            stripe_price_id_base=price_base.id,
-            stripe_price_id_users=price_users.id,
-            stripe_price_id_fees=price_fees.id
+            stripe_price_id_base_monthly=price_base_monthly.id,
+            stripe_price_id_base_yearly=price_base_yearly.id,
+            stripe_price_id_users=price_users_id,
+            stripe_price_id_fees=price_fees_id
         )
         db.add(db_package)
         db.commit()
@@ -167,21 +179,34 @@ def update_package(package_id: int, package: schemas.SubscriptionPackageCreate, 
         raise HTTPException(status_code=404, detail="Package not found")
     
     try:
-        # Prüfen ob Preis geändert wurde -> Neuen Stripe Price anlegen
+        # Prüfen ob monatlicher Preis geändert wurde -> Neuen Stripe Price anlegen
         if db_package.price_monthly != package.price_monthly:
-            if db_package.stripe_price_id_base:
-                stripe.Price.modify(db_package.stripe_price_id_base, active=False)
+            if db_package.stripe_price_id_base_monthly:
+                stripe.Price.modify(db_package.stripe_price_id_base_monthly, active=False)
             
-            new_price_base = stripe.Price.create(
+            new_price_base_monthly = stripe.Price.create(
                 product=db_package.stripe_product_id,
                 unit_amount=int(package.price_monthly * 100),
                 currency="eur",
                 recurring={"interval": "month"}
             )
-            db_package.stripe_price_id_base = new_price_base.id
+            db_package.stripe_price_id_base_monthly = new_price_base_monthly.id
 
-        # Prüfen ob zusätzliche Kosten pro Kunde geändert wurden
-        if db_package.additional_cost_per_customer != package.additional_cost_per_customer:
+        # Prüfen ob jährlicher Preis geändert wurde
+        if db_package.price_yearly != package.price_yearly:
+            if db_package.stripe_price_id_base_yearly:
+                stripe.Price.modify(db_package.stripe_price_id_base_yearly, active=False)
+            
+            new_price_base_yearly = stripe.Price.create(
+                product=db_package.stripe_product_id,
+                unit_amount=int(package.price_yearly * 100),
+                currency="eur",
+                recurring={"interval": "year"}
+            )
+            db_package.stripe_price_id_base_yearly = new_price_base_yearly.id
+
+        # Prüfen ob zusätzliche Kosten pro Kunde geändert wurden (Nur für Basis-Pakete)
+        if package.package_type == 'base' and db_package.additional_cost_per_customer != package.additional_cost_per_customer:
             if db_package.stripe_price_id_users:
                 stripe.Price.modify(db_package.stripe_price_id_users, active=False)
             
