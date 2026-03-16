@@ -134,9 +134,12 @@ class TenantStatus(BaseModel):
 # --- 1b. ABOS & PAKETE ---
 class SubscriptionPackageBase(BaseModel):
     plan_name: str
+    package_type: str = "base" # 'base' oder 'addon'
     price_monthly: float = 0.0
+    price_yearly: float = 0.0
     allowed_modules: List[str] = ["news", "documents"]
     max_customers: Optional[int] = None
+    included_customers: int = 0
     top_up_fee_percent: float = 0.0
     top_up_fee_fixed: float = 0.0
     features: Dict[str, bool] = {}
@@ -144,7 +147,8 @@ class SubscriptionPackageBase(BaseModel):
     
     # Stripe IDs (optional bei Create, werden vom System gesetzt)
     stripe_product_id: Optional[str] = None
-    stripe_price_id_base: Optional[str] = None
+    stripe_price_id_base_monthly: Optional[str] = None
+    stripe_price_id_base_yearly: Optional[str] = None
     stripe_price_id_users: Optional[str] = None
     stripe_price_id_fees: Optional[str] = None
 
@@ -187,6 +191,8 @@ class BillingDetails(BaseModel):
 class SubscriptionUpdate(BaseModel):
     subdomain: str
     plan: str
+    cycle: str = "monthly"
+    addons: List[str] = []
     billing_details: Optional[BillingDetails] = None
     trial_allowed: bool = True
 

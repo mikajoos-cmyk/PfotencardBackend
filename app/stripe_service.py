@@ -11,22 +11,6 @@ import traceback
 stripe.api_key = settings.STRIPE_SECRET_KEY
 # stripe.api_version = "2024-12-18.acacia" # Temporarily disabled to match frontend/automatic versioning
 
-# --- CONFIG ---
-PLAN_CONFIGS = {
-    "starter": {
-        "monthly": {"id": settings.STRIPE_PRICE_ID_STARTER_MONTHLY, "amount": 29.00},
-        "yearly":  {"id": settings.STRIPE_PRICE_ID_STARTER_YEARLY, "amount": 290.00}
-    },
-    "pro": {
-        "monthly": {"id": settings.STRIPE_PRICE_ID_PRO_MONTHLY, "amount": 79.00},
-        "yearly":  {"id": settings.STRIPE_PRICE_ID_PRO_YEARLY, "amount": 790.00}
-    },
-    "enterprise": { 
-        "monthly": {"id": settings.STRIPE_PRICE_ID_ENTERPRISE_MONTHLY, "amount": 199.00},
-        "yearly":  {"id": settings.STRIPE_PRICE_ID_ENTERPRISE_YEARLY, "amount": 1990.00}
-    }
-}
-
 # --- HELPERS ---
 
 def safe_get(obj, key, default=None):
@@ -50,27 +34,19 @@ def get_nested(obj, *keys):
         if current is None: return None
     return current
 
-def get_plan_config(plan_name: str, cycle: str):
-    if not plan_name or not cycle: return None
-    plan = plan_name.lower()
-    if plan == 'verband': plan = 'enterprise'
-    cycle = cycle.lower()
-    if plan in PLAN_CONFIGS and cycle in PLAN_CONFIGS[plan]:
-        return PLAN_CONFIGS[plan][cycle]
-    return None
-
 def get_price_id(plan_name: str, cycle: str, db: Session = None):
     # Wenn DB vorhanden, versuchen wir es dynamisch
     if db:
         package = db.query(models.SubscriptionPackage).filter(
-            models.func.lower(models.SubscriptionPackage.plan_name) == plan_name.lower()
+            models.func.lower(models.SubscriptionPackage.plan_name) == plan_name.lower(),
+            models.SubscriptionPackage.package_type == 'base'
         ).first()
-        if package and package.stripe_price_id_base:
-            return package.stripe_price_id_base
+        if package:
+            if cycle == 'yearly':
+                return package.stripe_price_id_base_yearly
+            return package.stripe_price_id_base_monthly
 
-    # Fallback auf statische Config
-    conf = get_plan_config(plan_name, cycle)
-    return conf["id"] if conf else None
+    return None
 
 
 def extract_client_secret(obj):
@@ -219,35 +195,53 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
 
 # --- CHECKOUT & UPDATE ---
 
-def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str, billing_details=None, trial_allowed=True):
+def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, user_email: str, selected_addons: list = None, billing_details=None, trial_allowed=True):
     from sqlalchemy.orm.attributes import flag_modified
 
-    print(f"DEBUG: Starting Checkout/Update for Tenant {tenant_id} -> {plan} ({cycle})")
+    print(f"DEBUG: Starting Checkout/Update for Tenant {tenant_id} -> {plan} ({cycle}) with addons {selected_addons}")
 
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant: raise HTTPException(404, "Tenant not found")
 
     # 1. Ziel-Paket und IDs bestimmen
     package = db.query(models.SubscriptionPackage).filter(
-        models.func.lower(models.SubscriptionPackage.plan_name) == plan.lower()
+        models.func.lower(models.SubscriptionPackage.plan_name) == plan.lower(),
+        models.SubscriptionPackage.package_type == 'base'
     ).first()
     
-    if package and package.stripe_price_id_base:
-        target_price_id = package.stripe_price_id_base
-        target_amount = package.price_monthly
-    else:
-        conf = get_plan_config(plan, cycle)
-        if not conf: raise HTTPException(400, "Invalid plan")
-        target_price_id = conf["id"]
-        target_amount = conf["amount"]
+    if not package:
+        raise HTTPException(400, f"Basis-Paket '{plan}' nicht gefunden")
+
+    target_price_id = package.stripe_price_id_base_yearly if cycle == 'yearly' else package.stripe_price_id_base_monthly
+    if not target_price_id:
+        raise HTTPException(400, f"Kein Stripe-Preis für Zyklus '{cycle}' im Paket '{plan}' gefunden")
 
     # Sammle alle Items für dieses Paket
     subscription_items = [{"price": target_price_id}]
-    if package:
-        if package.stripe_price_id_users:
-            subscription_items.append({"price": package.stripe_price_id_users})
-        if package.stripe_price_id_fees:
-            subscription_items.append({"price": package.stripe_price_id_fees})
+    
+    # Usage-based prices des Basis-Pakets
+    if package.stripe_price_id_users:
+        subscription_items.append({"price": package.stripe_price_id_users})
+    if package.stripe_price_id_fees:
+        subscription_items.append({"price": package.stripe_price_id_fees})
+
+    # 2. Add-ons dynamisch laden
+    if selected_addons:
+        addons = db.query(models.SubscriptionPackage).filter(
+            models.SubscriptionPackage.plan_name.in_(selected_addons),
+            models.SubscriptionPackage.package_type == 'addon'
+        ).all()
+        
+        for addon in addons:
+            addon_price_id = addon.stripe_price_id_base_yearly if cycle == 'yearly' else addon.stripe_price_id_base_monthly
+            if addon_price_id:
+                subscription_items.append({"price": addon_price_id})
+            
+            # Falls Addons auch metered billing haben (unwahrscheinlich aber möglich):
+            if addon.stripe_price_id_users:
+                subscription_items.append({"price": addon.stripe_price_id_users})
+            if addon.stripe_price_id_fees:
+                subscription_items.append({"price": addon.stripe_price_id_fees})
 
     if not tenant.stripe_customer_id:
         try:

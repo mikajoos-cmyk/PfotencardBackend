@@ -898,7 +898,6 @@ async def handle_invoice_payment_succeeded(invoice):
 @app.post("/api/stripe/create-subscription")
 def create_subscription(
     data: schemas.SubscriptionUpdate,
-    cycle: str = "monthly",
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant),
     current_user: schemas.User = Depends(auth.get_current_active_user)
@@ -909,7 +908,7 @@ def create_subscription(
         raise HTTPException(status_code=403, detail="Not authorized")
         
     return stripe_service.create_checkout_session(
-        db, tenant.id, data.plan, cycle, current_user.email, data.billing_details, data.trial_allowed
+        db, tenant.id, data.plan, data.cycle, current_user.email, data.addons, data.billing_details, data.trial_allowed
     )
 
 @app.post("/api/stripe/cancel")
