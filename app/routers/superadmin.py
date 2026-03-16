@@ -125,31 +125,34 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
             recurring={"interval": "year"}
         )
         
-        # 3. Nutzungsbasierter Preis (Zusätzliche Kunden)
-        # Wenn kein Preis angegeben ist, nehmen wir 0
-        price_users = stripe.Price.create(
-            product=product.id,
-            unit_amount=int(package.additional_cost_per_customer * 100),
-            currency="eur",
-            recurring={
-                "interval": "month", 
-                "usage_type": "metered",
-                "meter": settings.STRIPE_METER_ID_USERS
-            },
-        )
+        # 3. Nutzungsbasierte Preise NUR für Basis-Pakete erstellen
+        price_users_id = None
+        price_fees_id = None
         
-        # 4. Nutzungsbasierter Preis (Transaktionsgebühren) -> Immer 1 Cent!
-        # Dieser Preis wird für variable Gebühren genutzt, indem man die Cent-Anzahl als Usage meldet.
-        price_fees = stripe.Price.create(
-            product=product.id,
-            unit_amount=1, 
-            currency="eur",
-            recurring={
-                "interval": "month", 
-                "usage_type": "metered",
-                "meter": settings.STRIPE_METER_ID_FEES
-            },
-        )
+        if package.package_type == 'base':
+            price_users = stripe.Price.create(
+                product=product.id,
+                unit_amount=int(package.additional_cost_per_customer * 100),
+                currency="eur",
+                recurring={
+                    "interval": "month", 
+                    "usage_type": "metered",
+                    "meter": settings.STRIPE_METER_ID_USERS
+                },
+            )
+            price_users_id = price_users.id
+            
+            price_fees = stripe.Price.create(
+                product=product.id,
+                unit_amount=1, 
+                currency="eur",
+                recurring={
+                    "interval": "month", 
+                    "usage_type": "metered",
+                    "meter": settings.STRIPE_METER_ID_FEES
+                },
+            )
+            price_fees_id = price_fees.id
         
         # 5. Alles in der Datenbank speichern
         db_package = models.SubscriptionPackage(
@@ -157,8 +160,8 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
             stripe_product_id=product.id,
             stripe_price_id_base_monthly=price_base_monthly.id,
             stripe_price_id_base_yearly=price_base_yearly.id,
-            stripe_price_id_users=price_users.id,
-            stripe_price_id_fees=price_fees.id
+            stripe_price_id_users=price_users_id,
+            stripe_price_id_fees=price_fees_id
         )
         db.add(db_package)
         db.commit()
@@ -202,8 +205,8 @@ def update_package(package_id: int, package: schemas.SubscriptionPackageCreate, 
             )
             db_package.stripe_price_id_base_yearly = new_price_base_yearly.id
 
-        # Prüfen ob zusätzliche Kosten pro Kunde geändert wurden
-        if db_package.additional_cost_per_customer != package.additional_cost_per_customer:
+        # Prüfen ob zusätzliche Kosten pro Kunde geändert wurden (Nur für Basis-Pakete)
+        if package.package_type == 'base' and db_package.additional_cost_per_customer != package.additional_cost_per_customer:
             if db_package.stripe_price_id_users:
                 stripe.Price.modify(db_package.stripe_price_id_users, active=False)
             
