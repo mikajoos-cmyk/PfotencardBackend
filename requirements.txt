@@ -1,3 +1,4 @@
+# Standard-Abhängigkeiten
 fastapi==0.111.1
 uvicorn[standard]==0.30.3
 sqlalchemy==2.0.31
@@ -15,6 +16,9 @@ pywebpush==1.14.0
 resend==0.8.0
 reportlab==4.2.2
 weasyprint
-requests>=2.31.0
+# Fix for Vercel DependencyWarning
+urllib3<2.0.0
+requests==2.31.0
+charset-normalizer==3.4.6
 tzdata
 apscheduler==3.10.4
