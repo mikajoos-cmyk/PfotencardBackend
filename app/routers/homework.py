@@ -82,8 +82,12 @@ def get_user_homework(
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
     # Zugriffserlaubnis prüfen: Admin/Mitarbeiter des Tenants oder der User selbst
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User nicht gefunden")
+        
     if current_user.role in ['admin', 'mitarbeiter']:
-        if current_user.tenant_id != db.query(models.User).filter(models.User.id == user_id).first().tenant_id:
+        if current_user.tenant_id != target_user.tenant_id:
             raise HTTPException(status_code=403, detail="Nicht berechtigt")
     elif current_user.id != user_id:
         raise HTTPException(status_code=403, detail="Nicht berechtigt")

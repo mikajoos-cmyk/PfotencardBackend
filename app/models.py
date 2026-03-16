@@ -69,7 +69,12 @@ class SubscriptionPackage(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     plan_name = Column(String(50), unique=True, nullable=False) # z.B. "starter", "pro", "premium"
+    
+    # Paket-Typ zur Unterscheidung
+    package_type = Column(String(20), default="base") # 'base' oder 'addon'
+    
     price_monthly = Column(Float, default=0.0)
+    price_yearly = Column(Float, default=0.0) # Jährlicher Preis
     
     # JSON-Feld, das definiert, welche Module aktiv sind (Mapping für das Frontend)
     allowed_modules = Column(JSONB, default=["news", "documents"]) 
@@ -92,7 +97,8 @@ class SubscriptionPackage(Base):
 
     # --- NEU: Stripe Verknüpfungen ---
     stripe_product_id = Column(String(255), nullable=True)
-    stripe_price_id_base = Column(String(255), nullable=True)
+    stripe_price_id_base_monthly = Column(String(255), nullable=True) # Umbenannt von stripe_price_id_base
+    stripe_price_id_base_yearly = Column(String(255), nullable=True)  # NEU
     stripe_price_id_users = Column(String(255), nullable=True)
     stripe_price_id_fees = Column(String(255), nullable=True)
 
