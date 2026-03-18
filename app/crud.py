@@ -872,9 +872,8 @@ def create_transaction(db: Session, transaction: schemas.TransactionCreate, book
         tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
         if tenant:
             percent = tenant.top_up_fee_percent or 0.0
-            fixed = tenant.top_up_fee_fixed or 0.0
-            top_up_fee = round(transaction.amount * (percent / 100.0) + fixed, 2)
-            print(f"DEBUG: Calculated top_up_fee for tenant {tenant_id}: {top_up_fee} (based on {percent}% + {fixed}€)")
+            top_up_fee = round(transaction.amount * (percent / 100.0), 2)
+            print(f"DEBUG: Calculated top_up_fee for tenant {tenant_id}: {top_up_fee} (based on {percent}%)")
 
     # NEU: Rechnungsnummer generieren, wenn es eine Einnahme ist
     invoice_number = None

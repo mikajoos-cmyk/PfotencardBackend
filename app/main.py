@@ -352,7 +352,6 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         models.SubscriptionPackage.plan_name == tenant.plan
     ).first()
 
-    max_customers = package.max_customers if package else None
     additional_cost_per_customer = package.additional_cost_per_customer if package else 0.0
     
     # Priorität für top_up_fee_percent: 
@@ -364,13 +363,6 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         top_up_fee_percent = package.top_up_fee_percent
     elif tenant.top_up_fee_percent is not None:
         top_up_fee_percent = tenant.top_up_fee_percent
-
-    # Gleiches für fixed fee
-    top_up_fee_fixed = 0.0
-    if package and package.top_up_fee_fixed > 0:
-        top_up_fee_fixed = package.top_up_fee_fixed
-    elif tenant.top_up_fee_fixed is not None:
-        top_up_fee_fixed = tenant.top_up_fee_fixed
 
     # NEU: Summe der Top-up Gebühren im aktuellen Abrechnungszeitraum berechnen
     current_billing_period_fees = 0.0
@@ -437,10 +429,8 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
 
         # NEU: Usage Daten
         "customer_count": customer_count,
-        "max_customers": max_customers,
         "additional_cost_per_customer": additional_cost_per_customer,
         "top_up_fee_percent": top_up_fee_percent,
-        "top_up_fee_fixed": top_up_fee_fixed,
         "current_billing_period_fees": current_billing_period_fees
     }
 
@@ -720,6 +710,10 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
             invoice = event['data']['object']
             await handle_invoice_payment_succeeded(invoice)
 
+        elif event['type'] == 'invoice.payment_failed':
+            invoice = event['data']['object']
+            await handle_invoice_payment_failed(invoice)
+
         # NEU: Handler für erfolgreiche Top-up Zahlungen
         elif event['type'] == 'payment_intent.succeeded':
             intent = event['data']['object']
@@ -857,7 +851,7 @@ async def handle_invoice_payment_succeeded(invoice):
                     
                     if max_end > 0:
                         print(f"DEBUG: Datum aus Items extrahiert: {max_end}")
-                        # Wir patchen das Objekt, damit stripe_service es versteht
+                        # Wir patchen das Objekt, damit stripe_service it versteht
                         subscription['current_period_end'] = max_end
                         current_end = max_end
 
@@ -891,6 +885,25 @@ async def handle_invoice_payment_succeeded(invoice):
             traceback.print_exc()
     else:
         print("DEBUG: Keine Subscription ID gefunden (evtl. Einmalzahlung). Skipping.")
+
+
+async def handle_invoice_payment_failed(invoice):
+    """
+    Wird aufgerufen, wenn eine Zahlung fehlgeschlagen ist.
+    Hier könnte man eine E-Mail senden oder den Status in der DB anpassen.
+    """
+    subscription_id = get_subscription_id_safe(invoice)
+    if subscription_id:
+        db = SessionLocal()
+        try:
+            tenant = db.query(models.Tenant).filter(models.Tenant.stripe_subscription_id == subscription_id).first()
+            if tenant:
+                tenant.stripe_subscription_status = 'past_due'
+                db.commit()
+                print(f"Webhook: Invoice payment failed for tenant {tenant.name}. Status set to past_due.")
+                # Hier könnte man noch eine E-Mail-Benachrichtigung triggern
+        finally:
+            db.close()
 
 
 # --- STRIPE INTEGRATION ---

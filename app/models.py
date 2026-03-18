@@ -45,7 +45,6 @@ class Tenant(Base):
 
     # --- NEU: Gebühren & Limits (Kopiert vom Paket für Persistenz) ---
     top_up_fee_percent = Column(Float, default=0.0) # Gebühr bei selbstständiger Aufladung (Prozent)
-    top_up_fee_fixed = Column(Float, default=0.0)   # Gebühr bei selbstständiger Aufladung (Fixbetrag)
     # -----------------------------------------------------------------
 
     # Beziehungen (Ein Tenant hat viele...)
@@ -80,14 +79,10 @@ class SubscriptionPackage(Base):
     allowed_modules = Column(JSONB, default=["news", "documents"]) 
     
     # Spezifische Limits (z.B. maximale Kundenanzahl)
-    max_customers = Column(Integer, nullable=True) 
     included_customers = Column(Integer, default=0) # NEU: Inkludierte Kunden im Grundpreis
     
     # Gebühr für selbstständiges Guthaben-Aufladen (in Prozent)
     top_up_fee_percent = Column(Float, default=0.0)
-    
-    # Gebühr für selbstständiges Guthaben-Aufladen (Fixbetrag in Euro)
-    top_up_fee_fixed = Column(Float, default=0.0)
     
     # Granulare Feature-Einstellungen (z.B. {"white_label": true, "waitlist": false})
     features = Column(JSONB, default={})

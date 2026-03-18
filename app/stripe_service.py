@@ -154,7 +154,6 @@ def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscrip
         ).first()
         if package:
             tenant.top_up_fee_percent = package.top_up_fee_percent
-            tenant.top_up_fee_fixed = getattr(package, 'top_up_fee_fixed', 0.0)
         # -----------------------------------------------
 
         # --- FIX: Cycle aus Metadata statt raten ---
@@ -204,20 +203,36 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
     if not tenant: raise HTTPException(404, "Tenant not found")
 
     # 1. Ziel-Paket und IDs bestimmen
+    # Wir prüfen zuerst, ob der übergebene 'plan' ein Add-on ist.
+    # Wenn ja, fügen wir es den selected_addons hinzu und nutzen den aktuellen Tenant-Plan als Basis.
+    check_package = db.query(models.SubscriptionPackage).filter(
+        models.func.lower(models.SubscriptionPackage.plan_name) == plan.lower()
+    ).first()
+
+    target_plan_name = plan
+    if check_package and check_package.package_type == 'addon':
+        print(f"DEBUG: '{plan}' ist ein Add-on. Nutze aktuellen Plan '{tenant.plan}' als Basis.")
+        if not selected_addons:
+            selected_addons = []
+        if plan not in selected_addons:
+            selected_addons.append(plan)
+        target_plan_name = tenant.plan or 'starter'
+    
     package = db.query(models.SubscriptionPackage).filter(
-        models.func.lower(models.SubscriptionPackage.plan_name) == plan.lower(),
+        models.func.lower(models.SubscriptionPackage.plan_name) == target_plan_name.lower(),
         models.SubscriptionPackage.package_type == 'base'
     ).first()
     
     if not package:
-        raise HTTPException(400, f"Basis-Paket '{plan}' nicht gefunden")
+        raise HTTPException(400, f"Basis-Paket '{target_plan_name}' nicht gefunden")
 
     target_price_id = package.stripe_price_id_base_yearly if cycle == 'yearly' else package.stripe_price_id_base_monthly
     if not target_price_id:
-        raise HTTPException(400, f"Kein Stripe-Preis für Zyklus '{cycle}' im Paket '{plan}' gefunden")
+        raise HTTPException(400, f"Kein Stripe-Preis für Zyklus '{cycle}' im Paket '{target_plan_name}' gefunden")
 
     # Sammle alle Items für dieses Paket
     subscription_items = [{"price": target_price_id}]
+    target_amount = float((package.price_yearly if cycle == 'yearly' else package.price_monthly) or 0)
     
     # Usage-based prices des Basis-Pakets
     if package.stripe_price_id_users:
@@ -236,6 +251,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             addon_price_id = addon.stripe_price_id_base_yearly if cycle == 'yearly' else addon.stripe_price_id_base_monthly
             if addon_price_id:
                 subscription_items.append({"price": addon_price_id})
+                target_amount += float((addon.price_yearly if cycle == 'yearly' else addon.price_monthly) or 0)
             
             # Falls Addons auch metered billing haben (unwahrscheinlich aber möglich):
             if addon.stripe_price_id_users:
@@ -361,6 +377,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                 return {"status": "updated", "message": "Plan already active"}
 
             is_upgrade = target_amount > current_stripe_price
+            print(f"DEBUG: target_amount={target_amount}, current_stripe_price={current_stripe_price}, is_upgrade={is_upgrade}")
             is_trial = safe_get(active_subscription, 'status') == 'trialing'
 
             # A) UPGRADE (Sofort)

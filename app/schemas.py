@@ -92,7 +92,6 @@ class Tenant(TenantBase):
     avv_accepted_at: Optional[datetime] = None
     avv_accepted_version: Optional[str] = None
     top_up_fee_percent: float = 0.0
-    top_up_fee_fixed: float = 0.0
 
     class Config:
         from_attributes = True
@@ -125,10 +124,8 @@ class TenantStatus(BaseModel):
     
     # NEU: Usage & Limits
     customer_count: int = 0
-    max_customers: Optional[int] = None
     additional_cost_per_customer: float = 0.0
     top_up_fee_percent: float = 0.0
-    top_up_fee_fixed: float = 0.0
     current_billing_period_fees: float = 0.0
 
 # --- 1b. ABOS & PAKETE ---
@@ -138,10 +135,8 @@ class SubscriptionPackageBase(BaseModel):
     price_monthly: float = 0.0
     price_yearly: float = 0.0
     allowed_modules: List[str] = ["news", "documents"]
-    max_customers: Optional[int] = None
     included_customers: int = 0
     top_up_fee_percent: float = 0.0
-    top_up_fee_fixed: float = 0.0
     features: Dict[str, bool] = {}
     additional_cost_per_customer: float = 0.0
     
