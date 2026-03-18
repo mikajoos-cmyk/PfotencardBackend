@@ -73,7 +73,7 @@ class TenantBase(BaseModel):
     name: str
     subdomain: str
     support_email: Optional[str] = None
-    plan: str = "starter"
+    plan: Optional[str] = "starter"
     is_active: bool = True
     config: TenantConfig = TenantConfig()
 

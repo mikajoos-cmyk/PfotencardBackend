@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
+import httpx
 
 from app import models, schemas, auth, database, crud, stripe_service
 import stripe
@@ -12,6 +13,39 @@ router = APIRouter(
     prefix="/api/superadmin",
     tags=["superadmin"]
 )
+
+@router.get("/validate-vat/{vat_id}")
+async def validate_vat(vat_id: str):
+    """
+    Validiert eine europäische USt-IdNr. über eine öffentliche VIES API.
+    Ersetzt die Supabase Edge Function aus CreatorStay.
+    """
+    vat_id = vat_id.replace(" ", "").upper()
+    if len(vat_id) < 4:
+        raise HTTPException(status_code=400, detail="Ungültiges Format")
+        
+    country_code = vat_id[:2]
+    vat_number = vat_id[2:]
+    
+    try:
+        # Nutzung einer kostenlosen VIES REST API (oder der offiziellen SOAP API)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"https://vat.erply.com/v1/check?vat_number={vat_number}&country_code={country_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                is_valid = data.get("valid", False)
+                return {
+                    "valid": is_valid,
+                    "company_name": data.get("name", ""),
+                    "address": data.get("address", "")
+                }
+            else:
+                # Fallback, falls die API down ist
+                return {"valid": False, "error": "Prüfung derzeit nicht möglich"}
+                
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/login", response_model=schemas.Token)
 async def login_superadmin(
@@ -70,6 +104,22 @@ def get_stats(db: Session = Depends(database.get_db)):
 @router.get("/tenants", response_model=List[schemas.Tenant], dependencies=[Depends(auth.get_current_superadmin)])
 def get_tenants(db: Session = Depends(database.get_db)):
     return db.query(models.Tenant).all()
+
+@router.get("/billing/payment-methods")
+def get_payment_methods(request: Request, db: Session = Depends(database.get_db)):
+    """
+    Liefert die gespeicherten Zahlungsmethoden (Kreditkarten) für den Tenant,
+    der über den Header "x-tenant-subdomain" identifiziert wird.
+    """
+    subdomain = request.headers.get("x-tenant-subdomain")
+    if not subdomain:
+        raise HTTPException(status_code=400, detail="Subdomain missing")
+
+    tenant = db.query(models.Tenant).filter(models.Tenant.subdomain == subdomain).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    return stripe_service.get_saved_payment_methods(db, tenant.id)
 
 @router.get("/users", response_model=List[schemas.User], dependencies=[Depends(auth.get_current_superadmin)])
 def get_users(tenant_id: Optional[int] = None, db: Session = Depends(database.get_db)):
@@ -130,6 +180,9 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
         price_fees_id = None
         
         if package.package_type == 'base':
+            # NEU: Hole die Meter-IDs dynamisch aus Stripe!
+            meter_users_id, meter_fees_id = stripe_service.get_or_create_meters()
+            
             price_users = stripe.Price.create(
                 product=product.id,
                 unit_amount=int(package.additional_cost_per_customer * 100),
@@ -137,7 +190,7 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
                 recurring={
                     "interval": "month", 
                     "usage_type": "metered",
-                    "meter": settings.STRIPE_METER_ID_USERS
+                    "meter": meter_users_id  # <--- HIER: Dynamische ID statt settings!
                 },
             )
             price_users_id = price_users.id
@@ -149,7 +202,7 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
                 recurring={
                     "interval": "month", 
                     "usage_type": "metered",
-                    "meter": settings.STRIPE_METER_ID_FEES
+                    "meter": meter_fees_id   # <--- HIER: Dynamische ID statt settings!
                 },
             )
             price_fees_id = price_fees.id
@@ -210,6 +263,9 @@ def update_package(package_id: int, package: schemas.SubscriptionPackageCreate, 
             if db_package.stripe_price_id_users:
                 stripe.Price.modify(db_package.stripe_price_id_users, active=False)
             
+            # NEU: Hole die Meter-IDs dynamisch aus Stripe!
+            meter_users_id, _ = stripe_service.get_or_create_meters()
+            
             new_price_users = stripe.Price.create(
                 product=db_package.stripe_product_id,
                 unit_amount=int(package.additional_cost_per_customer * 100),
@@ -217,7 +273,7 @@ def update_package(package_id: int, package: schemas.SubscriptionPackageCreate, 
                 recurring={
                     "interval": "month", 
                     "usage_type": "metered",
-                    "meter": settings.STRIPE_METER_ID_USERS
+                    "meter": meter_users_id
                 },
             )
             db_package.stripe_price_id_users = new_price_users.id

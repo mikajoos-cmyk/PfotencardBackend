@@ -13,6 +13,77 @@ stripe.api_key = settings.STRIPE_SECRET_KEY
 
 # --- HELPERS ---
 
+def create_or_update_stripe_customer_with_billing(db: Session, tenant: models.Tenant, billing_details, user_email: str = None):
+    """
+    Diese Funktion portiert deine Logik aus CreatorStay:
+    Sie aktualisiert den Stripe Customer mit Adresse und Steuer-ID.
+    """
+    if not tenant.stripe_customer_id:
+        # 1. Neuen Customer erstellen
+        customer_name = billing_details.company_name if billing_details and billing_details.company_name else (billing_details.name if billing_details else tenant.name)
+        customer = stripe.Customer.create(
+            email=user_email or (tenant.users[0].email if tenant.users else None),
+            name=customer_name,
+            address={
+                "line1": billing_details.address_line1 if billing_details else None,
+                "city": billing_details.city if billing_details else None,
+                "postal_code": billing_details.postal_code if billing_details else None,
+                "country": billing_details.country if billing_details else "DE",
+            },
+            metadata={"tenant_id": tenant.id}
+        )
+        tenant.stripe_customer_id = customer.id
+        db.commit()
+    else:
+        # 2. Bestehenden Customer updaten
+        if billing_details:
+            customer_name = billing_details.company_name if billing_details.company_name else billing_details.name
+            stripe.Customer.modify(
+                tenant.stripe_customer_id,
+                name=customer_name,
+                address={
+                    "line1": billing_details.address_line1,
+                    "city": billing_details.city,
+                    "postal_code": billing_details.postal_code,
+                    "country": billing_details.country,
+                }
+            )
+
+    # 3. VAT ID (Steuernummer) an Stripe übergeben
+    if billing_details and billing_details.vat_id:
+        try:
+            # Zuerst alte Tax-IDs löschen (falls sich die VAT geändert hat)
+            existing_tax_ids = stripe.Customer.list_tax_ids(tenant.stripe_customer_id)
+            for tax_id_obj in existing_tax_ids.data:
+                stripe.Customer.delete_tax_id(tenant.stripe_customer_id, tax_id_obj.id)
+            
+            # Neue Tax-ID hinzufügen (eu_vat)
+            stripe.Customer.create_tax_id(
+                tenant.stripe_customer_id,
+                type="eu_vat",
+                value=billing_details.vat_id,
+            )
+        except stripe.error.StripeError as e:
+            print(f"Fehler beim Speichern der VAT ID in Stripe: {e}")
+
+    # 4. In Tenant Config spiegeln
+    if billing_details:
+        current_config = dict(tenant.config) if tenant.config else {}
+        inv_settings = current_config.get("invoice_settings", {})
+        inv_settings["company_name"] = billing_details.company_name
+        inv_settings["account_holder"] = billing_details.name
+        inv_settings["address_line1"] = billing_details.address_line1
+        inv_settings["address_line2"] = f"{billing_details.postal_code} {billing_details.city}"
+        if billing_details.vat_id:
+            inv_settings["vat_id"] = billing_details.vat_id
+
+        current_config["invoice_settings"] = inv_settings
+        tenant.config = current_config
+        flag_modified(tenant, "config")
+        db.commit()
+
+    return tenant.stripe_customer_id
+
 def safe_get(obj, key, default=None):
     """Universeller Getter für Objekte, Dicts und Stripe-Responses."""
     try:
@@ -72,6 +143,52 @@ def extract_client_secret(obj):
     except Exception as e:
         print(f"Error extracting client secret: {e}")
     return None
+
+def get_or_create_meters():
+    """
+    Sucht in Stripe nach den benötigten Billing V2 Meters.
+    Falls sie nicht existieren, werden sie vollautomatisch angelegt.
+    Gibt die IDs der beiden Meters (Users, Fees) zurück.
+    """
+    try:
+        # Hole alle aktiven Meters aus Stripe
+        existing_meters = stripe.billing.Meter.list(limit=100)
+        
+        users_meter_id = None
+        fees_meter_id = None
+        
+        # Prüfen, ob unsere Event-Namen schon existieren
+        for meter in existing_meters.data:
+            if meter.event_name == "pfotencard_extra_users":
+                users_meter_id = meter.id
+            elif meter.event_name == "pfotencard_tx_fees":
+                fees_meter_id = meter.id
+                
+        # Wenn "Zusatzkunden" Meter fehlt -> Automatisch anlegen
+        if not users_meter_id:
+            print("Erstelle Stripe Meter für Zusatzkunden...")
+            users_meter = stripe.billing.Meter.create(
+                display_name="Pfotencard Zusatzkunden",
+                event_name="pfotencard_extra_users",
+                default_aggregation={"formula": "max"} # Nimmt den höchsten Wert des Monats
+            )
+            users_meter_id = users_meter.id
+            
+        # Wenn "Gebühren" Meter fehlt -> Automatisch anlegen
+        if not fees_meter_id:
+            print("Erstelle Stripe Meter für Transaktionsgebühren...")
+            fees_meter = stripe.billing.Meter.create(
+                display_name="Pfotencard Transaktionsgebühren",
+                event_name="pfotencard_tx_fees",
+                default_aggregation={"formula": "sum"} # Summiert alle gemeldeten Cents des Monats
+            )
+            fees_meter_id = fees_meter.id
+            
+        return users_meter_id, fees_meter_id
+        
+    except Exception as e:
+        print(f"Fehler beim Abrufen/Erstellen der Stripe Meters: {e}")
+        raise HTTPException(status_code=500, detail="Konnte Stripe Meters nicht initialisieren.")
 
 # --- CORE SYNC ---
 
@@ -259,51 +376,8 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             if addon.stripe_price_id_fees:
                 subscription_items.append({"price": addon.stripe_price_id_fees})
 
-    if not tenant.stripe_customer_id:
-        try:
-            c = stripe.Customer.create(email=user_email, name=tenant.name, metadata={"tenant_id": tenant.id})
-            tenant.stripe_customer_id = c.id
-            db.commit()
-        except Exception as e:
-            raise HTTPException(400, f"Stripe Error: {e}")
-
-    customer_id = tenant.stripe_customer_id
-
-    if billing_details:
-        try:
-            customer_name = billing_details.company_name if billing_details.company_name else billing_details.name
-            stripe.Customer.modify(
-                customer_id,
-                name=customer_name,
-                address={
-                    "line1": billing_details.address_line1,
-                    "postal_code": billing_details.postal_code,
-                    "city": billing_details.city,
-                    "country": billing_details.country,
-                }
-            )
-
-            if billing_details.vat_id:
-                existing_tax_ids = stripe.Customer.list_tax_ids(customer_id)
-                for tax_id_obj in existing_tax_ids.data:
-                    stripe.Customer.delete_tax_id(customer_id, tax_id_obj.id)
-                stripe.Customer.create_tax_id(customer_id, type="eu_vat", value=billing_details.vat_id)
-
-            current_config = dict(tenant.config) if tenant.config else {}
-            inv_settings = current_config.get("invoice_settings", {})
-            inv_settings["company_name"] = billing_details.company_name
-            inv_settings["account_holder"] = billing_details.name
-            inv_settings["address_line1"] = billing_details.address_line1
-            inv_settings["address_line2"] = f"{billing_details.postal_code} {billing_details.city}"
-            if billing_details.vat_id:
-                inv_settings["vat_id"] = billing_details.vat_id
-
-            current_config["invoice_settings"] = inv_settings
-            tenant.config = current_config
-            flag_modified(tenant, "config")
-            db.commit()
-        except Exception as e:
-            raise HTTPException(400, f"Fehler bei Rechnungsdaten: {str(e)}")
+    # 2. Stripe Customer sicherstellen & mit Billing Details synchronisieren
+    customer_id = create_or_update_stripe_customer_with_billing(db, tenant, billing_details, user_email)
 
     active_subscription = None
     if tenant.stripe_subscription_id:
@@ -607,6 +681,37 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             raise HTTPException(400, f"Create failed: {str(e)}")
 
 # ... (Restliche Funktionen) ...
+
+def get_saved_payment_methods(db: Session, tenant_id: int):
+    """
+    Gibt die gespeicherten Zahlungsmethoden (Kreditkarten) des Stripe-Customers
+    für den angegebenen Tenant zurück. Falls kein Customer existiert, wird eine
+    leere Liste zurückgegeben.
+    """
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant or not tenant.stripe_customer_id:
+        return []
+    try:
+        payment_methods = stripe.PaymentMethod.list(
+            customer=tenant.stripe_customer_id,
+            type="card"
+        )
+        methods = []
+        for pm in payment_methods.data:
+            methods.append({
+                "id": pm.id,
+                "type": pm.type,
+                "card": {
+                    "brand": safe_get(pm, 'card', {}).get('brand') if hasattr(pm, 'card') else None,
+                    "last4": safe_get(pm, 'card', {}).get('last4') if hasattr(pm, 'card') else None,
+                    "expMonth": safe_get(pm, 'card', {}).get('exp_month') if hasattr(pm, 'card') else None,
+                    "expYear": safe_get(pm, 'card', {}).get('exp_year') if hasattr(pm, 'card') else None,
+                }
+            })
+        return methods
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Zahlungsmethoden: {e}")
+        return []
 
 def cancel_subscription(db: Session, tenant_id: int):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
