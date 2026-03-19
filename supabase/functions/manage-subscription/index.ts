@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3'
-import Stripe from 'https://esm.sh/stripe@14.14.0?target=deno'
+import Stripe from 'https://esm.sh/stripe@17.0.0?target=deno'
 import { corsHeaders } from '../_shared/cors.ts'
 
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') || '', {
@@ -131,6 +131,7 @@ Deno.serve(async (req) => {
         const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
           items: lineItems.map(item => ({ price: item.price })),
           proration_behavior: 'always_invoice',
+          automatic_tax: { enabled: true },
           payment_settings: { save_default_payment_method: 'on_subscription' },
           metadata: { plan_name: plan, cycle: cycle, tenant_id: tenant.id.toString() }
         })
@@ -142,6 +143,7 @@ Deno.serve(async (req) => {
           customer: customerId,
           items: lineItems,
           payment_behavior: 'default_incomplete',
+          automatic_tax: { enabled: true },
           payment_settings: { save_default_payment_method: 'on_subscription' },
           expand: ['latest_invoice.payment_intent'],
           metadata: { plan_name: plan, cycle: cycle, tenant_id: tenant.id.toString() }

@@ -1,5 +1,5 @@
 import { createAuthClient, createAdminClient } from '../_shared/supabase-client.ts'
-import Stripe from 'https://esm.sh/stripe@14.14.0'
+import Stripe from 'https://esm.sh/stripe@17.0.0?target=deno'
 import { corsHeaders } from '../_shared/cors.ts'
 
 import { getCountryCode } from '../_shared/country-mapping.ts'
@@ -161,6 +161,7 @@ Deno.serve(async (req) => {
           items: newItems,
           proration_behavior: 'always_invoice',
           payment_behavior: 'allow_incomplete',
+          automatic_tax: { enabled: true },
           metadata: metadata,
           cancel_at_period_end: false,
           expand: ['latest_invoice.payment_intent']
@@ -191,6 +192,7 @@ Deno.serve(async (req) => {
 
         await stripe.subscriptionSchedules.update(schedId, {
           end_behavior: 'release',
+          default_settings: { automatic_tax: { enabled: true } },
           phases: [
             {
               start_date: scheduleObj.phases[0].start_date,
@@ -229,6 +231,7 @@ Deno.serve(async (req) => {
         items: subscriptionItems,
         payment_behavior: 'allow_incomplete',
         payment_settings: { save_default_payment_method: 'on_subscription' },
+        automatic_tax: { enabled: true },
         expand: ['latest_invoice.payment_intent', 'pending_setup_intent'],
         metadata: metadata
       }

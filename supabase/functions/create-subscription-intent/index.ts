@@ -1,7 +1,7 @@
 /**
  * Create/Update Stripe Subscription Intent for Pfotencard
  */
-import Stripe from "https://esm.sh/stripe@14.14.0?target=deno";
+import Stripe from "https://esm.sh/stripe@17.0.0?target=deno";
 import { createAuthClient, createAdminClient } from "../_shared/supabase-client.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { getCountryCode } from "../_shared/country-mapping.ts";
@@ -10,12 +10,6 @@ const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY") ?? "", {
     apiVersion: "2023-10-16",
     httpClient: Stripe.createFetchHttpClient(),
 });
-
-const PRICE_IDS: Record<string, string> = {
-    starter: "price_1Qu98fK7M6uS7n6T7u8X3Y1Z", // Beispiel IDs, sollten aus der DB kommen oder angepasst werden
-    pro: "price_1Qu98fK7M6uS7n6T7u8X3Y2A",
-    enterprise: "price_1Qu98fK7M6uS7n6T7u8X3Y3B",
-};
 
 // Helfer: Umsatzsteuer-ID sicher prüfen
 async function syncTaxId(stripeClient: Stripe, customerId: string, vatId: string) {
@@ -132,7 +126,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             await supabaseAdmin.from('tenants').update({ stripe_customer_id: customerId }).eq('id', tenant.id);
         }
 
-        // Get Price ID from DB or Map
+        // Get Price ID from DB
         let targetPriceId = "";
         const { data: pkg } = await supabaseAdmin
             .from('subscription_packages')
@@ -153,17 +147,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
             if (targetPriceId) {
                 console.log(`[SUBSCRIPTION_INTENT] Using price ID from DB: ${targetPriceId}`);
-            } else {
-                targetPriceId = PRICE_IDS[plan];
-                console.log(`[SUBSCRIPTION_INTENT] Package in DB has no Stripe Price ID, using fallback: ${targetPriceId}`);
             }
         } else {
-            targetPriceId = PRICE_IDS[plan];
-            console.log(`[SUBSCRIPTION_INTENT] WARNING: Plan '${plan}' not found in DB, using fallback price ID: ${targetPriceId}`);
+            console.log(`[SUBSCRIPTION_INTENT] Plan '${plan}' not found in DB`);
         }
 
         if (!targetPriceId && action !== 'cancel_downgrade') {
-            return new Response(JSON.stringify({ error: `Ungültiger Plan: ${plan}` }), { status: 400, headers: corsHeaders });
+            return new Response(JSON.stringify({ error: `Kein gültiger Stripe-Preis für Plan '${plan}' und Zyklus '${billingCycle}' in der Datenbank gefunden.` }), { status: 400, headers: corsHeaders });
         }
 
         // ==========================================
@@ -228,6 +218,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                     items: [{ id: activeSub.items.data[0].id, price: targetPriceId }],
                     default_payment_method: defaultPaymentMethod,
                     proration_behavior: 'always_invoice',
+                    automatic_tax: { enabled: true },
                     metadata: { tenant_id: tenant.id, plan }
                 };
                 if (promoCodeId) {
