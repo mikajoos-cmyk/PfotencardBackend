@@ -193,116 +193,18 @@ def get_or_create_meters():
 # --- CORE SYNC ---
 
 def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscription):
-    """Synchronisiert DB mit Stripe."""
+    """
+    Synchronisiert DB mit Stripe (HINWEIS: Jetzt deaktiviert zugunsten des Webhooks).
+    Alle Abo-relevanten Änderungen in der 'tenants' Tabelle erfolgen jetzt primär
+    über die Supabase Edge Function (Webhook).
+    """
     try:
         sub_id = safe_get(subscription, 'id')
         status = safe_get(subscription, 'status')
-        metadata = safe_get(subscription, 'metadata') or {}
-
-        # --- Abgebrochene oder abgelaufene Abos direkt sperren ---
-        if status in ['canceled', 'incomplete_expired', 'unpaid']:
-            ended_at = safe_get(subscription, 'ended_at') or safe_get(subscription, 'canceled_at')
-
-            tenant.stripe_subscription_id = sub_id
-            tenant.stripe_subscription_status = status
-            tenant.plan = 'starter'
-            tenant.cancel_at_period_end = False
-
-            if ended_at:
-                tenant.subscription_ends_at = datetime.fromtimestamp(ended_at, tz=timezone.utc)
-            else:
-                tenant.subscription_ends_at = datetime.now(timezone.utc)
-
-            tenant.next_payment_amount = 0.0
-            tenant.next_payment_date = None
-            tenant.upcoming_plan = None
-
-            db.add(tenant)
-            db.commit()
-            db.refresh(tenant)
-            print(f"✅ Tenant synced (CANCELED/EXPIRED). Reverted to starter.")
-            return
-
-        # 1. ENDDATUM
-        current_period_end = safe_get(subscription, 'current_period_end')
-        if not current_period_end:
-            items_data = get_nested(subscription, 'items', 'data')
-            if items_data and len(items_data) > 0:
-                current_period_end = safe_get(items_data[0], 'current_period_end')
-
-        trial_end = safe_get(subscription, 'trial_end')
-        cancel_at = safe_get(subscription, 'cancel_at')
-
-        tenant.stripe_subscription_id = sub_id
-        tenant.stripe_subscription_status = status
-
-        stripe_cancel_flag = safe_get(subscription, 'cancel_at_period_end')
-        if stripe_cancel_flag or (cancel_at is not None):
-            tenant.cancel_at_period_end = True
-            final_end_date = cancel_at if cancel_at else current_period_end
-            if final_end_date:
-                tenant.subscription_ends_at = datetime.fromtimestamp(final_end_date, tz=timezone.utc)
-        else:
-            tenant.cancel_at_period_end = False
-            if status == 'trialing' and trial_end:
-                tenant.subscription_ends_at = datetime.fromtimestamp(trial_end, tz=timezone.utc)
-            elif status == 'active' and current_period_end:
-                tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
-
-        # 2. PLAN & UPCOMING (Jetzt aus den Metadaten!)
-        if status in ['active', 'trialing']:
-            if safe_get(metadata, 'plan_name'):
-                tenant.plan = safe_get(metadata, 'plan_name')
-
-            upcoming_plan = safe_get(metadata, 'upcoming_plan')
-            if upcoming_plan:
-                tenant.upcoming_plan = upcoming_plan
-            else:
-                tenant.upcoming_plan = None
-
-            tenant.is_active = True
-
-        # 3. PREIS VORSCHAU (Ziel-Plan Preis)
-        target_plan_name = tenant.upcoming_plan if tenant.upcoming_plan else tenant.plan
-
-        # --- NEU: Gebühren vom Paket synchronisieren ---
-        package = db.query(models.SubscriptionPackage).filter(
-            models.SubscriptionPackage.plan_name == target_plan_name
-        ).first()
-        if package:
-            tenant.top_up_fee_percent = package.top_up_fee_percent
-        # -----------------------------------------------
-
-        # --- FIX: Cycle aus Metadata statt raten ---
-        target_cycle = safe_get(metadata, 'upcoming_cycle') if tenant.upcoming_plan else safe_get(metadata, 'cycle')
-
-        # Fallback, falls Metadaten fehlen (z.B. bei alten Abos)
-        if not target_cycle:
-            target_cycle = "monthly"
-            try:
-                items_data = get_nested(subscription, 'items', 'data')
-                if items_data:
-                    interval = get_nested(items_data[0], 'plan', 'interval')
-                    if interval == 'year': target_cycle = "yearly"
-            except:
-                pass
-
-        if not tenant.cancel_at_period_end and status not in ['canceled', 'incomplete_expired', 'unpaid', 'incomplete']:
-            price_conf = get_plan_config(target_plan_name, target_cycle)
-            if price_conf:
-                tenant.next_payment_amount = price_conf["amount"]
-            else:
-                tenant.next_payment_amount = 0.0
-            tenant.next_payment_date = tenant.subscription_ends_at
-        else:
-            tenant.next_payment_amount = 0.0
-            tenant.next_payment_date = None
-            tenant.upcoming_plan = None
-
-        db.add(tenant)
-        db.commit()
-        db.refresh(tenant)
-        print(f"✅ Tenant synced. Plan: {tenant.plan}, Next: {tenant.next_payment_amount}€")
+        print(f"ℹ️ Manual sync called for tenant {tenant.id} (Status: {status}). updates are handled by Webhook.")
+        return
+    except Exception as e:
+        print(f"Error in update_tenant_from_subscription placeholder: {e}")
 
     except Exception as e:
         print(f"❌ Error syncing tenant DB: {e}")
@@ -389,7 +291,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             sub_status = safe_get(active_subscription, 'status')
 
             if sub_status in ['canceled', 'incomplete_expired']:
-                update_tenant_from_subscription(db, tenant, active_subscription)
+                # update_tenant_from_subscription(db, tenant, active_subscription)
                 active_subscription = None
 
             elif sub_status in ['incomplete', 'unpaid'] and get_nested(active_subscription, 'items', 'data', 0, 'price',
@@ -444,9 +346,9 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         stripe.SubscriptionSchedule.release(sched_id)
                     except:
                         pass
-                    tenant.upcoming_plan = None
-                    tenant.next_payment_amount = target_amount
-                    db.commit()
+                    # tenant.upcoming_plan = None
+                    # tenant.next_payment_amount = target_amount
+                    # db.commit()
                     return {"status": "updated", "message": "Wechsel abgebrochen, Plan beibehalten."}
                 return {"status": "updated", "message": "Plan already active"}
 
@@ -505,12 +407,12 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     cancel_at_period_end=False
                 )
 
-                tenant.upcoming_plan = None
-                tenant.plan = plan
-                update_tenant_from_subscription(db, tenant, updated_sub_step1)
-
-                tenant.next_payment_amount = target_amount
-                db.commit()
+                # Subscription updates are handled by Supabase Webhook
+                # tenant.upcoming_plan = None
+                # tenant.plan = plan
+                # update_tenant_from_subscription(db, tenant, updated_sub_step1)
+                # tenant.next_payment_amount = target_amount
+                # db.commit()
 
                 inv = safe_get(updated_sub_step1, 'latest_invoice')
                 amount_due = safe_get(inv, 'amount_due', 0) / 100.0
@@ -594,11 +496,9 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                               "upcoming_plan": plan, "upcoming_cycle": cycle}
                 )
 
-                tenant.upcoming_plan = plan
-                # FIX: Wir synchronisieren den Tenant aus der aktualisierten Subscription,
-                # um sicherzustellen, dass alle Metadaten korrekt verarbeitet werden.
-                update_tenant_from_subscription(db, tenant, updated_sub)
-                db.commit()
+                # tenant.upcoming_plan = plan
+                # update_tenant_from_subscription(db, tenant, updated_sub)
+                # db.commit()
 
                 return {"subscriptionId": sub_id, "status": "success", "message": "Downgrade vorgemerkt."}
 
@@ -726,9 +626,9 @@ def cancel_subscription(db: Session, tenant_id: int):
             pass
 
         sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=True)
-        tenant.upcoming_plan = None
-        tenant.next_payment_amount = 0.0
-        update_tenant_from_subscription(db, tenant, sub)
+        # tenant.upcoming_plan = None
+        # tenant.next_payment_amount = 0.0
+        # update_tenant_from_subscription(db, tenant, sub)
         return {"message": "Cancelled"}
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -750,7 +650,7 @@ def reactivate_subscription(db: Session, tenant_id: int):
             raise HTTPException(400, "Subscription already canceled")
         # Reaktivieren
         sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=False)
-        update_tenant_from_subscription(db, tenant, sub)
+        # update_tenant_from_subscription(db, tenant, sub)
         return {"message": "Reactivated"}
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -778,21 +678,52 @@ def get_invoices(db: Session, tenant_id: int, limit: int = 100):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant or not tenant.stripe_customer_id: return []
     try:
-        # Load all invoices (Stripe limit is 100 per call, if we need more we would need pagination, but 100 is better than 12)
-        invoices = stripe.Invoice.list(customer=tenant.stripe_customer_id, limit=limit)
+        # Load invoices using pagination to get ALL invoices if they exceed 100
+        # Stripe limit is 100 per call
+        all_invoices = []
+        last_id = None
+        
+        while True:
+            params = {
+                "customer": tenant.stripe_customer_id,
+                "limit": 100
+            }
+            if last_id:
+                params["starting_after"] = last_id
+                
+            invoices = stripe.Invoice.list(**params)
+            all_invoices.extend(invoices.data)
+            
+            if not invoices.has_more:
+                break
+            last_id = invoices.data[-1].id
+
         results = []
-        for i in invoices.data:
-            results.append({
-                "id": i.id,
-                "number": i.number,
-                "created": datetime.fromtimestamp(i.created, tz=timezone.utc),
-                "amount": i.total / 100.0,
-                "status": i.status,
-                "pdf_url": i.invoice_pdf,
-                "hosted_url": i.hosted_invoice_url 
-            })
+        for i in all_invoices:
+            try:
+                # Ensure we have a valid timestamp
+                created_ts = i.created
+                if created_ts is None:
+                    print(f"Warning: Invoice {i.id} has no creation date")
+                    continue
+                
+                results.append({
+                    "id": i.id,
+                    "number": i.number,
+                    "created": datetime.fromtimestamp(created_ts, tz=timezone.utc),
+                    "amount": (i.total or 0) / 100.0,
+                    "status": i.status,
+                    "pdf_url": i.invoice_pdf,
+                    "hosted_url": i.hosted_invoice_url 
+                })
+            except Exception as row_error:
+                print(f"Error processing invoice row {getattr(i, 'id', 'unknown')}: {row_error}")
+                continue
+
         return results
-    except: return []
+    except Exception as e:
+        print(f"Error fetching invoices for tenant {tenant_id}: {e}")
+        return []
 
 def create_topup_intent(db: Session, user_id: int, tenant_id: int, amount: float, bonus: float):
     """

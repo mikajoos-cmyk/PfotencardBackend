@@ -77,6 +77,13 @@ class TenantBase(BaseModel):
     is_active: bool = True
     config: TenantConfig = TenantConfig()
 
+    # Adressdaten (flach in DB, für Checkout etc.)
+    street: Optional[str] = None
+    city: Optional[str] = None
+    postcode: Optional[str] = None
+    country: Optional[str] = None
+    vat_id: Optional[str] = None
+
 class TenantCreate(TenantBase):
     pass
 
@@ -124,6 +131,7 @@ class TenantStatus(BaseModel):
     
     # NEU: Usage & Limits
     customer_count: int = 0
+    max_customers: int = 0
     additional_cost_per_customer: float = 0.0
     top_up_fee_percent: float = 0.0
     current_billing_period_fees: float = 0.0

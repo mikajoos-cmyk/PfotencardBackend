@@ -49,6 +49,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         const body = await req.json();
         const { plan, action, paymentMethodId, vatId: frontendVatId, address, billingCycle, promoCodeId } = body;
+        
+        console.log(`[SUBSCRIPTION_INTENT] Action: ${action}, Plan: ${plan}, Cycle: ${billingCycle}`);
+        if (address) console.log(`[SUBSCRIPTION_INTENT] Address updated: ${address.city}, ${address.countryCode || address.country}`);
 
         // Fetch tenant details
         // In Pfotencard, we use the 'x-tenant-subdomain' header or search by user
@@ -74,6 +77,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         if (!tenantId) {
             return new Response(JSON.stringify({ error: "Tenant-ID konnte nicht ermittelt werden. Bitte x-tenant-subdomain Header mitsenden." }), { status: 400, headers: corsHeaders });
+        }
+
+        // ==========================================
+        // ACTION: SAVE_BILLING_DETAILS (Only save, no stripe action)
+        // ==========================================
+        if (action === 'save_billing_details') {
+            if (address) {
+                const normalizedCountry = getCountryCode(address.country || address.countryCode);
+                const updateData: any = {
+                    street: address.street,
+                    city: address.city,
+                    postcode: address.postcode,
+                    country: address.countryCode || normalizedCountry,
+                };
+                if (frontendVatId !== undefined) {
+                    updateData.vat_id = frontendVatId;
+                }
+                await supabaseAdmin.from('tenants').update(updateData).eq('id', tenantId);
+                return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+            }
+            return new Response(JSON.stringify({ error: "Address data missing" }), { status: 400, headers: corsHeaders });
         }
 
         const { data: tenant, error: tenantError } = await supabaseAdmin
@@ -118,9 +142,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
             .single();
         
         if (pkg) {
+            console.log(`[SUBSCRIPTION_INTENT] Package found in DB: ${JSON.stringify(pkg)}`);
             targetPriceId = billingCycle === 'yearly' ? pkg.stripe_price_id_base_yearly : pkg.stripe_price_id_base_monthly;
+            
+            // Fallback auf die alte Spalte, falls vorhanden und die neuen leer sind
+            if (!targetPriceId && pkg.stripe_price_id_base) {
+                targetPriceId = pkg.stripe_price_id_base;
+                console.log(`[SUBSCRIPTION_INTENT] Using legacy stripe_price_id_base: ${targetPriceId}`);
+            }
+
+            if (targetPriceId) {
+                console.log(`[SUBSCRIPTION_INTENT] Using price ID from DB: ${targetPriceId}`);
+            } else {
+                targetPriceId = PRICE_IDS[plan];
+                console.log(`[SUBSCRIPTION_INTENT] Package in DB has no Stripe Price ID, using fallback: ${targetPriceId}`);
+            }
         } else {
             targetPriceId = PRICE_IDS[plan];
+            console.log(`[SUBSCRIPTION_INTENT] WARNING: Plan '${plan}' not found in DB, using fallback price ID: ${targetPriceId}`);
         }
 
         if (!targetPriceId && action !== 'cancel_downgrade') {
@@ -162,7 +201,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                     street: address.street,
                     city: address.city,
                     postcode: address.postcode,
-                    country: address.country || normalizedCountry,
+                    country: address.countryCode || normalizedCountry,
                 };
                 
                 // Falls vatId mitgekommen ist, auch im Tenant speichern
@@ -189,6 +228,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                     items: [{ id: activeSub.items.data[0].id, price: targetPriceId }],
                     default_payment_method: defaultPaymentMethod,
                     proration_behavior: 'always_invoice',
+                    metadata: { tenant_id: tenant.id, plan }
                 };
                 if (promoCodeId) {
                     updateParams.discounts = [{ promotion_code: promoCodeId }];
@@ -202,6 +242,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                     items: [{ price: targetPriceId }],
                     default_payment_method: defaultPaymentMethod,
                     automatic_tax: { enabled: true },
+                    payment_settings: { save_default_payment_method: 'on_subscription' },
                     metadata: { tenant_id: tenant.id, plan }
                 };
                 if (promoCodeId) {
@@ -218,6 +259,22 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // ==========================================
         // ACTION: CREATE INTENT (Vorbereitung Checkout)
         // ==========================================
+        
+        // Speichere die Adresse auch beim Erstellen des Intents, damit sie beim nächsten Mal da ist
+        if (address) {
+            const normalizedCountry = getCountryCode(address.country || address.countryCode);
+            const updateData: any = {
+                street: address.street,
+                city: address.city,
+                postcode: address.postcode,
+                country: address.countryCode || normalizedCountry,
+            };
+            if (frontendVatId !== undefined) {
+                updateData.vat_id = frontendVatId;
+            }
+            await supabaseAdmin.from('tenants').update(updateData).eq('id', tenant.id);
+        }
+
         // Wir erstellen einen SetupIntent, damit der Nutzer seine Zahlungsmethode sicher hinterlegen kann
         const setupIntent = await stripe.setupIntents.create({
             customer: customerId,
@@ -225,9 +282,101 @@ Deno.serve(async (req: Request): Promise<Response> => {
             metadata: { tenant_id: tenant.id, plan }
         });
 
+        // VORSCHAU DER RECHNUNG ERSTELLEN
+        let preview: any = null;
+        try {
+            // Aktuelle Adresse/VAT an Stripe senden für korrekte Steuern
+            if (address || frontendVatId) {
+                const normalizedCountry = getCountryCode(address?.country || address?.countryCode || tenant.country);
+                const updateParams: Stripe.CustomerUpdateParams = {};
+                
+                if (address) {
+                    updateParams.address = {
+                        line1: address.street,
+                        city: address.city,
+                        postal_code: address.postcode,
+                        country: normalizedCountry,
+                    };
+                }
+                
+                if (frontendVatId) {
+                    await syncTaxId(stripe, customerId, frontendVatId);
+                }
+                
+                if (Object.keys(updateParams).length > 0) {
+                    await stripe.customers.update(customerId, updateParams);
+                }
+            }
+
+            const allSubs = await stripe.subscriptions.list({ customer: customerId, status: 'active', limit: 1 });
+            const activeSub = allSubs.data[0];
+
+            const previewParams: any = {
+                customer: customerId,
+                automatic_tax: { enabled: true },
+            };
+
+            if (activeSub) {
+                previewParams.subscription = activeSub.id;
+                previewParams.subscription_items = [
+                    { id: activeSub.items.data[0].id, price: targetPriceId }
+                ];
+            } else {
+                previewParams.subscription_items = [
+                    { price: targetPriceId }
+                ];
+            }
+
+            if (promoCodeId) {
+                // Stripe retrieveUpcoming erwartet 'discounts' oder 'coupon' oder 'promotion_code'
+                // Wenn promoCodeId ein Promotion Code ID ist (z.B. promo_...), müssen wir ihn anders handhaben
+                if (promoCodeId.startsWith('promo_')) {
+                   // Leider unterstützt retrieveUpcoming direkt keine Promotion Code IDs in manchen Versionen,
+                   // oft nutzt man 'coupon' von dem Promo Code.
+                   const promo = await stripe.promotionCodes.retrieve(promoCodeId);
+                   previewParams.coupon = promo.coupon.id;
+                   console.log(`[SUBSCRIPTION_INTENT] Applied Promotion Code: ${promoCodeId} -> Coupon: ${promo.coupon.id}`);
+                } else {
+                   previewParams.coupon = promoCodeId;
+                   console.log(`[SUBSCRIPTION_INTENT] Applied Coupon: ${promoCodeId}`);
+                }
+            }
+
+            console.log(`[SUBSCRIPTION_INTENT] Retrieving upcoming invoice for Customer: ${customerId} with Price: ${targetPriceId}`);
+            const upcoming = await stripe.invoices.retrieveUpcoming(previewParams);
+            
+            console.log(`[SUBSCRIPTION_INTENT] Upcoming Invoice Subtotal: ${upcoming.subtotal / 100}, Total: ${upcoming.total / 100}, Amount Due: ${upcoming.amount_due / 100}`);
+            
+            // Log line items for debugging
+            upcoming.lines.data.forEach((line: any, index: number) => {
+                console.log(`[SUBSCRIPTION_INTENT] Line ${index}: ${line.description} - Amount: ${line.amount / 100} ${line.currency}`);
+            });
+
+            preview = {
+                total: upcoming.total,
+                subtotal: upcoming.subtotal,
+                tax: upcoming.tax,
+                amount_due: upcoming.amount_due,
+                currency: upcoming.currency,
+                period_start: upcoming.next_payment_attempt || upcoming.period_start,
+                proration_date: upcoming.subscription_proration_date,
+                lines: upcoming.lines.data.map((l: any) => ({
+                    description: l.description,
+                    amount: l.amount,
+                    quantity: l.quantity,
+                    type: l.type,
+                    proration: l.proration
+                }))
+            };
+        } catch (previewError) {
+            console.error("Error creating preview invoice:", previewError);
+            // Wir lassen den Checkout trotzdem zu, auch wenn die Vorschau fehlschlägt
+        }
+
         return new Response(JSON.stringify({
             clientSecret: setupIntent.client_secret,
             intentType: 'setup',
+            preview: preview,
             success: true
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 

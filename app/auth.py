@@ -99,7 +99,10 @@ async def get_current_tenant(
         raise HTTPException(status_code=404, detail=f"School '{subdomain}' not found")
 
     if not tenant.is_active:
-        raise HTTPException(status_code=400, detail="School account is inactive")
+        # Erlaube Zugriff auf Rechnungen und Billing-Portal auch wenn inaktiv (wegen Abo-Kündigung)
+        allowed_paths = ["/api/stripe/invoices", "/api/stripe/portal", "/api/stripe/details"]
+        if not any(path in request.url.path for path in allowed_paths):
+            raise HTTPException(status_code=400, detail="School account is inactive")
 
     return tenant
 
@@ -177,19 +180,19 @@ async def get_current_active_user(
         raise HTTPException(status_code=400, detail="Inactive user")
 
     # Prüfen, ob das Abo der Schule abgelaufen ist
-    # if True:  # user.role != 'admin':
-    #     if tenant.subscription_ends_at:
-    #         now = datetime.now(timezone.utc)
-    #         if tenant.subscription_ends_at < now:
-    #             error_detail = {
-    #                 "code": "SUBSCRIPTION_EXPIRED",
-    #                 "message": "Das Abonnement der Hundeschule ist abgelaufen.",
-    #                 "support_email": tenant.support_email or "support@pfotencard.de"
-    #             }
-    #             raise HTTPException(
-    #                 status_code=402,
-    #                 detail=error_detail
-    #             )
+    if user.role != 'admin':
+        if tenant.subscription_ends_at:
+            now = datetime.now(timezone.utc)
+            if tenant.subscription_ends_at < now:
+                error_detail = {
+                    "code": "SUBSCRIPTION_EXPIRED",
+                    "message": "Das Abonnement der Hundeschule ist abgelaufen.",
+                    "support_email": tenant.support_email or "support@pfotencard.de"
+                }
+                raise HTTPException(
+                    status_code=402,
+                    detail=error_detail
+                )
 
     return user
 

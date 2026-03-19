@@ -131,6 +131,7 @@ Deno.serve(async (req) => {
         const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
           items: lineItems.map(item => ({ price: item.price })),
           proration_behavior: 'always_invoice',
+          payment_settings: { save_default_payment_method: 'on_subscription' },
           metadata: { plan_name: plan, cycle: cycle, tenant_id: tenant.id.toString() }
         })
 

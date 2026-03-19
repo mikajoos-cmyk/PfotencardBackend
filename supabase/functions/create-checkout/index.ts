@@ -2,6 +2,7 @@ import { createAuthClient, createAdminClient } from '../_shared/supabase-client.
 import Stripe from 'https://esm.sh/stripe@14.14.0'
 import { corsHeaders } from '../_shared/cors.ts'
 
+import { getCountryCode } from '../_shared/country-mapping.ts'
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') ?? '', {
   apiVersion: '2023-10-16',
   httpClient: Stripe.createFetchHttpClient(),
@@ -84,13 +85,14 @@ Deno.serve(async (req) => {
 
     if (billingDetails) {
       const customerName = billingDetails.company_name || billingDetails.name
+      const normalizedCountry = getCountryCode(billingDetails.country)
       await stripe.customers.update(customerId, {
         name: customerName,
         address: {
           line1: billingDetails.address_line1,
           postal_code: billingDetails.postal_code,
           city: billingDetails.city,
-          country: billingDetails.country,
+          country: normalizedCountry,
         }
       })
 
@@ -121,7 +123,7 @@ Deno.serve(async (req) => {
     }
 
     const metadata = {
-      tenant_id: tenant.id, plan_name: plan, cycle: cycle,
+      tenant_id: tenant.id, plan_name: targetPlanName, cycle: cycle,
       upcoming_plan: "", upcoming_cycle: ""
     }
 
@@ -226,6 +228,7 @@ Deno.serve(async (req) => {
         customer: customerId,
         items: subscriptionItems,
         payment_behavior: 'allow_incomplete',
+        payment_settings: { save_default_payment_method: 'on_subscription' },
         expand: ['latest_invoice.payment_intent', 'pending_setup_intent'],
         metadata: metadata
       }
