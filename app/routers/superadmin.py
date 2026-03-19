@@ -164,7 +164,8 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
             product=product.id,
             unit_amount=int(package.price_monthly * 100), # Stripe rechnet in Cent!
             currency="eur",
-            recurring={"interval": "month"}
+            recurring={"interval": "month"},
+            tax_behavior="exclusive"
         )
 
         # 2b. Jährlicher Fixpreis (Grundgebühr)
@@ -172,7 +173,8 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
             product=product.id,
             unit_amount=int(package.price_yearly * 100),
             currency="eur",
-            recurring={"interval": "year"}
+            recurring={"interval": "year"},
+            tax_behavior="exclusive"
         )
         
         # 3. Nutzungsbasierte Preise NUR für Basis-Pakete erstellen
@@ -192,6 +194,7 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
                     "usage_type": "metered",
                     "meter": meter_users_id  # <--- HIER: Dynamische ID statt settings!
                 },
+                tax_behavior="exclusive"
             )
             price_users_id = price_users.id
             
@@ -204,6 +207,7 @@ def create_package(package: schemas.SubscriptionPackageCreate, db: Session = Dep
                     "usage_type": "metered",
                     "meter": meter_fees_id   # <--- HIER: Dynamische ID statt settings!
                 },
+                tax_behavior="exclusive"
             )
             price_fees_id = price_fees.id
         
@@ -241,7 +245,8 @@ def update_package(package_id: int, package: schemas.SubscriptionPackageCreate, 
                 product=db_package.stripe_product_id,
                 unit_amount=int(package.price_monthly * 100),
                 currency="eur",
-                recurring={"interval": "month"}
+                recurring={"interval": "month"},
+                tax_behavior="exclusive"
             )
             db_package.stripe_price_id_base_monthly = new_price_base_monthly.id
 
@@ -254,7 +259,8 @@ def update_package(package_id: int, package: schemas.SubscriptionPackageCreate, 
                 product=db_package.stripe_product_id,
                 unit_amount=int(package.price_yearly * 100),
                 currency="eur",
-                recurring={"interval": "year"}
+                recurring={"interval": "year"},
+                tax_behavior="exclusive"
             )
             db_package.stripe_price_id_base_yearly = new_price_base_yearly.id
 
@@ -275,6 +281,7 @@ def update_package(package_id: int, package: schemas.SubscriptionPackageCreate, 
                     "usage_type": "metered",
                     "meter": meter_users_id
                 },
+                tax_behavior="exclusive"
             )
             db_package.stripe_price_id_users = new_price_users.id
 

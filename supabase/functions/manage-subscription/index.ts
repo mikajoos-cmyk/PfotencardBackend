@@ -40,6 +40,147 @@ Deno.serve(async (req) => {
     if (tenantError || !tenant) throw new Error('Tenant nicht gefunden')
 
     // ==========================================
+    // HELPER: GET PRICE IDs
+    // ==========================================
+    async function getStripePriceIdsForPlanAndAddons(plan: string, addons: string[], cycle: string = 'monthly') {
+      const priceIds: string[] = [];
+
+      // 1. Basis-Paket
+      const { data: basePackage } = await supabaseAdmin
+        .from('subscription_packages')
+        .select('*')
+        .eq('plan_name', plan)
+        .eq('package_type', 'base')
+        .single();
+
+      if (basePackage) {
+        const basePriceId = cycle === 'yearly' ? basePackage.stripe_price_id_base_yearly : basePackage.stripe_price_id_base_monthly;
+        if (basePriceId) priceIds.push(basePriceId);
+        
+        // Metered Billing (Zusatzkunden & Gebühren)
+        if (basePackage.stripe_price_id_users) priceIds.push(basePackage.stripe_price_id_users);
+        if (basePackage.stripe_price_id_fees) priceIds.push(basePackage.stripe_price_id_fees);
+      }
+
+      // 2. Addons
+      if (addons && addons.length > 0) {
+        const { data: addonPackages } = await supabaseAdmin
+          .from('subscription_packages')
+          .select('*')
+          .in('plan_name', addons)
+          .eq('package_type', 'addon');
+
+        if (addonPackages) {
+          for (const addon of addonPackages) {
+            const addonPriceId = cycle === 'yearly' ? addon.stripe_price_id_base_yearly : addon.stripe_price_id_base_monthly;
+            if (addonPriceId) priceIds.push(addonPriceId);
+          }
+        }
+      }
+
+      return priceIds;
+    }
+
+    // ==========================================
+    // ACTION: PREVIEW UPGRADE (Preisanzeige)
+    // ==========================================
+    if (action === 'preview_upgrade') {
+      const { newPlan, newAddons, cycle = 'monthly' } = body;
+      
+      // Baue das NEUE Array an Items zusammen
+      const newPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle); 
+      const itemsArray = newPriceIds.map(priceId => ({ price: priceId }));
+
+      // Frage Stripe nach der Vorschau
+      const prorationDate = Math.floor(Date.now() / 1000); // Genau jetzt
+      
+      const previewParams: any = {
+        customer: tenant.stripe_customer_id,
+        subscription_items: itemsArray,
+        automatic_tax: { enabled: true },
+      };
+
+      if (tenant.stripe_subscription_id) {
+        previewParams.subscription = tenant.stripe_subscription_id;
+        previewParams.subscription_proration_date = prorationDate;
+      }
+
+      // Falls kein Customer existiert (z.B. Test-User), wird retrieveUpcoming einen Error werfen.
+      // Wir fangen das ab, da der Wizard trotzdem funktionieren soll.
+      try {
+        const upcomingInvoice = await stripe.invoices.retrieveUpcoming(previewParams);
+
+        return new Response(JSON.stringify({
+          amountDueToday: upcomingInvoice.amount_due / 100, // Das zahlt er SOFORT (anteilig)
+          nextBillingDate: upcomingInvoice.next_payment_attempt || upcomingInvoice.period_end, // Dann ist die nächste Hauptrechnung
+          amountDueNextMonth: upcomingInvoice.lines.data.reduce((acc, line) => acc + (line.amount || 0), 0) / 100, // Zukünftiger Monats-Gesamtpreis
+          lines: upcomingInvoice.lines.data // Detaillierte Positionen für dein Frontend
+        }), { headers: corsHeaders });
+      } catch (e: any) {
+        console.warn("Stripe Vorschau fehlgeschlagen (evtl. kein Customer):", e.message);
+        // Fallback: Manuelle Berechnung für die Anzeige (Brutto)
+        // Wir holen die Pakete aus der DB um Preise zu addieren
+        const { data: allPkgs } = await supabaseAdmin.from('subscription_packages').select('plan_name, price_monthly, price_yearly');
+        const getPrice = (name: string) => {
+            const p = allPkgs?.find(pkg => pkg.plan_name === name);
+            return cycle === 'yearly' ? (p?.price_yearly || (p?.price_monthly || 0) * 10) : (p?.price_monthly || 0);
+        };
+
+        const total = getPrice(newPlan) + newAddons.reduce((sum: number, a: string) => sum + getPrice(a), 0);
+
+        return new Response(JSON.stringify({
+          amountDueToday: total,
+          nextBillingDate: Math.floor(Date.now() / 1000) + (cycle === 'yearly' ? 365 : 30) * 24 * 3600,
+          amountDueNextMonth: total,
+          lines: [{ description: `Paket: ${newPlan}`, amount: total * 100 }]
+        }), { headers: corsHeaders });
+      }
+    }
+
+    // ==========================================
+    // ACTION: UPDATE SUBSCRIPTION (Der Kauf)
+    // ==========================================
+    if (action === 'update_subscription') {
+      const { newPlan, newAddons, cycle = 'monthly' } = body;
+      
+      if (!tenant.stripe_subscription_id) throw new Error("Kein aktives Abo für Update gefunden");
+
+      const newPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle); 
+      const itemsArray = newPriceIds.map(priceId => ({ price: priceId }));
+
+      // Aktuelle Subscription abrufen, um die Item-IDs für den Austausch zu finden (Stripe empfiehlt das für Updates)
+      const currentSub = await stripe.subscriptions.retrieve(tenant.stripe_subscription_id);
+      
+      // Lösche alle alten Items und füge neue hinzu
+      const itemsToUpdate = currentSub.items.data.map(item => ({
+        id: item.id,
+        deleted: true
+      })).concat(itemsArray.map(item => ({ price: item.price })));
+
+      // Stripe die Subscription überschreiben lassen
+      const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
+        items: itemsToUpdate,
+        proration_behavior: 'always_invoice', // WICHTIG: Erstellt SOFORT eine Rechnung für den anteiligen Betrag!
+        metadata: { plan_name: newPlan, addons: JSON.stringify(newAddons), cycle: cycle, tenant_id: tenant.id.toString() }
+      });
+
+      // Die erzeugte anteilige Rechnung direkt bezahlen lassen (falls Karte hinterlegt ist)
+      const latestInvoiceId = updatedSub.latest_invoice;
+      if (latestInvoiceId) {
+         const invoice = await stripe.invoices.retrieve(latestInvoiceId as string);
+         if (invoice.status === 'open' && invoice.amount_due > 0) {
+            // Versuchen abzubuchen
+            await stripe.invoices.pay(invoice.id);
+         }
+      }
+
+      // Update Pfotencard DB (Tenant)
+      await supabaseAdmin.from('tenants').update({ plan: newPlan }).eq('id', tenant.id);
+
+      return new Response(JSON.stringify({ status: 'success' }), { headers: corsHeaders });
+    }
+
+    // ==========================================
     // ACTION: ABO KÜNDIGEN
     // ==========================================
     if (action === 'cancel') {

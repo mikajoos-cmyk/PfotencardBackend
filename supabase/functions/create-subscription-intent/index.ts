@@ -42,9 +42,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
         const { data: { user } } = await supabaseAuth.auth.getUser();
 
         const body = await req.json();
-        const { plan, action, paymentMethodId, vatId: frontendVatId, address, billingCycle, promoCodeId } = body;
+        const { plan, addons = [], action, paymentMethodId, vatId: frontendVatId, address, billingCycle, promoCodeId } = body;
         
-        console.log(`[SUBSCRIPTION_INTENT] Action: ${action}, Plan: ${plan}, Cycle: ${billingCycle}`);
+        console.log(`[SUBSCRIPTION_INTENT] Action: ${action}, Plan: ${plan}, Addons: ${JSON.stringify(addons)}, Cycle: ${billingCycle}`);
         if (address) console.log(`[SUBSCRIPTION_INTENT] Address updated: ${address.city}, ${address.countryCode || address.country}`);
 
         // Fetch tenant details
@@ -126,8 +126,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
             await supabaseAdmin.from('tenants').update({ stripe_customer_id: customerId }).eq('id', tenant.id);
         }
 
-        // Get Price ID from DB
-        let targetPriceId = "";
+        // Get Price IDs from DB
+        const allPriceIds: string[] = [];
         const { data: pkg } = await supabaseAdmin
             .from('subscription_packages')
             .select('*')
@@ -136,25 +136,35 @@ Deno.serve(async (req: Request): Promise<Response> => {
             .single();
         
         if (pkg) {
-            console.log(`[SUBSCRIPTION_INTENT] Package found in DB: ${JSON.stringify(pkg)}`);
-            targetPriceId = billingCycle === 'yearly' ? pkg.stripe_price_id_base_yearly : pkg.stripe_price_id_base_monthly;
+            console.log(`[SUBSCRIPTION_INTENT] Base package found: ${pkg.plan_name}`);
+            const basePriceId = billingCycle === 'yearly' ? pkg.stripe_price_id_base_yearly : pkg.stripe_price_id_base_monthly;
+            if (basePriceId) allPriceIds.push(basePriceId);
+            else if (pkg.stripe_price_id_base) allPriceIds.push(pkg.stripe_price_id_base);
             
-            // Fallback auf die alte Spalte, falls vorhanden und die neuen leer sind
-            if (!targetPriceId && pkg.stripe_price_id_base) {
-                targetPriceId = pkg.stripe_price_id_base;
-                console.log(`[SUBSCRIPTION_INTENT] Using legacy stripe_price_id_base: ${targetPriceId}`);
-            }
-
-            if (targetPriceId) {
-                console.log(`[SUBSCRIPTION_INTENT] Using price ID from DB: ${targetPriceId}`);
-            }
-        } else {
-            console.log(`[SUBSCRIPTION_INTENT] Plan '${plan}' not found in DB`);
+            if (pkg.stripe_price_id_users) allPriceIds.push(pkg.stripe_price_id_users);
+            if (pkg.stripe_price_id_fees) allPriceIds.push(pkg.stripe_price_id_fees);
         }
 
-        if (!targetPriceId && action !== 'cancel_downgrade') {
-            return new Response(JSON.stringify({ error: `Kein gültiger Stripe-Preis für Plan '${plan}' und Zyklus '${billingCycle}' in der Datenbank gefunden.` }), { status: 400, headers: corsHeaders });
+        if (addons.length > 0) {
+            const { data: addonPkgs } = await supabaseAdmin
+                .from('subscription_packages')
+                .select('*')
+                .in('plan_name', addons)
+                .eq('package_type', 'addon');
+            
+            if (addonPkgs) {
+                addonPkgs.forEach(a => {
+                    const pId = billingCycle === 'yearly' ? a.stripe_price_id_base_yearly : a.stripe_price_id_base_monthly;
+                    if (pId) allPriceIds.push(pId);
+                });
+            }
         }
+
+        if (allPriceIds.length === 0 && action !== 'cancel_downgrade' && action !== 'save_billing_details') {
+            return new Response(JSON.stringify({ error: `Keine gültigen Stripe-Preise für Plan '${plan}' gefunden.` }), { status: 400, headers: corsHeaders });
+        }
+
+        const subscriptionItems = allPriceIds.map(id => ({ price: id }));
 
         // ==========================================
         // ACTION: FINALIZE (After SetupIntent or with saved PM)
@@ -214,8 +224,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
             let finalStatus;
 
             if (activeSub) {
+                // Alle alten Items löschen und neue hinzufügen
+                const itemsToUpdate = activeSub.items.data.map((item: any) => ({
+                    id: item.id,
+                    deleted: true
+                })).concat(subscriptionItems as any);
+
                 const updateParams: Stripe.SubscriptionUpdateParams = {
-                    items: [{ id: activeSub.items.data[0].id, price: targetPriceId }],
+                    items: itemsToUpdate,
                     default_payment_method: defaultPaymentMethod,
                     proration_behavior: 'always_invoice',
                     automatic_tax: { enabled: true },
@@ -230,7 +246,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             } else {
                 const subOptions: Stripe.SubscriptionCreateParams = {
                     customer: customerId,
-                    items: [{ price: targetPriceId }],
+                    items: subscriptionItems,
                     default_payment_method: defaultPaymentMethod,
                     automatic_tax: { enabled: true },
                     payment_settings: { save_default_payment_method: 'on_subscription' },
@@ -309,13 +325,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
             if (activeSub) {
                 previewParams.subscription = activeSub.id;
-                previewParams.subscription_items = [
-                    { id: activeSub.items.data[0].id, price: targetPriceId }
-                ];
+                previewParams.subscription_items = activeSub.items.data.map((item: any) => ({
+                    id: item.id,
+                    deleted: true
+                })).concat(subscriptionItems as any);
             } else {
-                previewParams.subscription_items = [
-                    { price: targetPriceId }
-                ];
+                previewParams.subscription_items = subscriptionItems;
             }
 
             if (promoCodeId) {
