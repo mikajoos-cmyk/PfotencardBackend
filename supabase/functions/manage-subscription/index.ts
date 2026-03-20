@@ -120,7 +120,9 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({
         tenant_id: tenant.id,
         plan: tenant.plan,
+        upcoming_plan: tenant.upcoming_plan,
         active_addons: tenant.config?.active_addons || [],
+        upcoming_addons: tenant.config?.upcoming_addons || [],
         stripe_subscription_id: tenant.stripe_subscription_id,
         stripe_subscription_status: tenant.stripe_subscription_status
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -309,7 +311,8 @@ Deno.serve(async (req) => {
           taxDueNextMonth: regularDetails.tax,
           netDueNextMonth: regularDetails.net,
           lines: linesWithMetadata,
-          currency: upcomingInvoice.currency
+          currency: upcomingInvoice.currency,
+          isBaseUpgrade
         }), { 
           headers: { 
             ...corsHeaders, 
@@ -381,7 +384,14 @@ Deno.serve(async (req) => {
       const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
         items: itemsToUpdate,
         proration_behavior: behavior,
-        metadata: { plan_name: newPlan, addons: JSON.stringify(newAddons), cycle: cycle, tenant_id: tenant.id.toString() }
+        metadata: { 
+          plan_name: newPlan, 
+          addons: JSON.stringify(newAddons), 
+          cycle: cycle, 
+          tenant_id: tenant.id.toString(),
+          upcoming_plan: behavior === 'none' ? newPlan : "",
+          upcoming_addons: behavior === 'none' ? JSON.stringify(newAddons) : ""
+        }
       });
 
       // Die erzeugte anteilige Rechnung direkt bezahlen lassen (falls Karte hinterlegt ist)
@@ -396,13 +406,24 @@ Deno.serve(async (req) => {
 
       // Update Pfotencard DB (Tenant)
       const config = tenant.config || {};
-      // Addons in Config synchronisieren
-      config['active_addons'] = newAddons;
+      const updateData: any = { config };
+
+      const isReturningToCurrent = newPlan === tenant.plan && 
+                                   JSON.stringify([...(newAddons || [])].sort()) === JSON.stringify([...(tenant.config?.active_addons || [])].sort());
+
+      if (behavior === 'none' && !isReturningToCurrent) {
+        // Downgrade: Nur vormerken, aktueller Plan bleibt in DB (für Features)
+        updateData.upcoming_plan = newPlan;
+        config['upcoming_addons'] = newAddons;
+      } else {
+        // Upgrade oder Rückkehr zum aktuellen Plan (Vormerkung löschen)
+        updateData.plan = newPlan;
+        updateData.upcoming_plan = null;
+        config['active_addons'] = newAddons;
+        config['upcoming_addons'] = null;
+      }
       
-      await supabaseAdmin.from('tenants').update({ 
-        plan: newPlan,
-        config: config
-      }).eq('id', tenant.id);
+      await supabaseAdmin.from('tenants').update(updateData).eq('id', tenant.id);
 
       return new Response(JSON.stringify({ status: 'success' }), { headers: corsHeaders });
     }

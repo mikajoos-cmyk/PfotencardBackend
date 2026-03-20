@@ -261,6 +261,11 @@ Deno.serve(async (req) => {
         if (sub.metadata?.upcoming_plan) {
           updateData.upcoming_plan = sub.metadata.upcoming_plan;
         }
+        if (sub.metadata?.upcoming_addons) {
+          try {
+            config['upcoming_addons'] = JSON.parse(sub.metadata.upcoming_addons);
+          } catch (e) { log("Error parsing upcoming_addons from metadata", { error: String(e) }); }
+        }
 
         // Handle cancellation state
         if (sub.cancel_at_period_end) {
@@ -282,9 +287,11 @@ Deno.serve(async (req) => {
         if (error) log("ERROR updating tenant on sub update", { error: error.message });
 
         if (tenantBefore && (tenantBefore.stripe_subscription_status !== sub.status || (plan && tenantBefore.plan !== plan))) {
-          // If plan changed real, clear upcoming_plan
+          // If plan changed real, clear upcoming fields
           if (plan && tenantBefore.plan !== plan) {
-             await supabaseAdmin.from('tenants').update({ upcoming_plan: null }).eq('id', tenantBefore.id);
+             const newConfig = tenantBefore.config || {};
+             delete newConfig['upcoming_addons'];
+             await supabaseAdmin.from('tenants').update({ upcoming_plan: null, config: newConfig }).eq('id', tenantBefore.id);
           }
 
           await supabaseAdmin.from('subscription_history').insert({

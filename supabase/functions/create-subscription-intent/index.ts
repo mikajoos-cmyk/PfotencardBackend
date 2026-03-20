@@ -500,7 +500,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 taxDueNextMonth: regularDetails.tax,
                 netDueNextMonth: regularDetails.net,
                 lines: linesWithMetadata,
-                currency: upcoming.currency
+                currency: upcoming.currency,
+                isBaseUpgrade
             };
         } catch (previewError) {
             console.error("Error creating preview invoice:", previewError);
