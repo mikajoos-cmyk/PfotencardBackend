@@ -26,6 +26,7 @@ def send_notification(db: Session, user: models.User, type: str, title: str, mes
         if type == "chat" and user.notif_email_chat: channels.append("email")
         elif type == "news" and user.notif_email_news: channels.append("email")
         elif type == "booking" and user.notif_email_booking: channels.append("email")
+        elif type == "waitinglist_move": channels.append("email") # Immer E-Mail bei Wartelisten-Nachrücken
         elif type == "reminder" and user.notif_email_reminder: channels.append("email")
         elif type == "alert" and user.notif_email_alert: channels.append("email")
         elif type == "homework" and user.notif_email_news: channels.append("email") # Hausaufgaben nutzen News-Einstellung als Fallback
@@ -35,6 +36,7 @@ def send_notification(db: Session, user: models.User, type: str, title: str, mes
         if type == "chat" and user.notif_push_chat: channels.append("push")
         elif type == "news" and user.notif_push_news: channels.append("push")
         elif type == "booking" and user.notif_push_booking: channels.append("push")
+        elif type == "waitinglist_move": channels.append("push") # Auch Push bei Warteliste
         elif type == "reminder" and user.notif_push_reminder: channels.append("push")
         elif type == "alert" and user.notif_push_alert: channels.append("push")
         elif type == "homework" and user.notif_push_news: channels.append("push") # Hausaufgaben nutzen News-Einstellung als Fallback

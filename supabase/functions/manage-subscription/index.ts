@@ -129,6 +129,60 @@ Deno.serve(async (req) => {
     }
 
     // ==========================================
+    // ACTION: GET UPCOMING INVOICE (Nächste Zahlung)
+    // ==========================================
+    if (action === 'get_upcoming_invoice') {
+      if (!tenant.stripe_customer_id) {
+        return new Response(JSON.stringify({ error: 'Kein Stripe-Kunde gefunden' }), { 
+          status: 200, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      }
+
+      try {
+        // Alle Packages abrufen für Zuordnung von Price IDs zu Typ (Base vs Addon)
+        const { data: allPackages } = await supabaseAdmin
+          .from('subscription_packages')
+          .select('plan_name, stripe_price_id_base_monthly, stripe_price_id_base_yearly, stripe_price_id_users, stripe_price_id_fees, package_type');
+
+        const priceTypeMap: Record<string, string> = {};
+        allPackages?.forEach(p => {
+          if (p.stripe_price_id_base_monthly) priceTypeMap[p.stripe_price_id_base_monthly] = p.package_type;
+          if (p.stripe_price_id_base_yearly) priceTypeMap[p.stripe_price_id_base_yearly] = p.package_type;
+          if (p.stripe_price_id_users) priceTypeMap[p.stripe_price_id_users] = 'base';
+          if (p.stripe_price_id_fees) priceTypeMap[p.stripe_price_id_fees] = 'base';
+        });
+
+        const upcomingInvoice = await stripe.invoices.retrieveUpcoming({
+          customer: tenant.stripe_customer_id,
+          automatic_tax: { enabled: true },
+        });
+
+        const linesWithMetadata = upcomingInvoice.lines.data.map(line => ({
+          ...line,
+          package_type: priceTypeMap[line.price?.id] || 'unknown'
+        }));
+
+        return new Response(JSON.stringify({
+          total: upcomingInvoice.total / 100,
+          subtotal: upcomingInvoice.subtotal / 100,
+          tax: (upcomingInvoice.tax || 0) / 100,
+          next_payment_attempt: upcomingInvoice.next_payment_attempt || upcomingInvoice.period_end,
+          currency: upcomingInvoice.currency,
+          lines: linesWithMetadata
+        }), { 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      } catch (e: any) {
+        console.error("Fehler beim Abrufen der nächsten Rechnung:", e.message);
+        return new Response(JSON.stringify({ error: e.message }), { 
+          status: 200, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
+    // ==========================================
     // ACTION: PREVIEW UPGRADE (Preisanzeige)
     // ==========================================
     if (action === 'preview_upgrade') {
@@ -380,28 +434,78 @@ Deno.serve(async (req) => {
         console.warn("Konnte Vorschau für Update nicht laden, nutze Standard-Verhalten:", e.message);
       }
 
-      // Stripe die Subscription überschreiben lassen
-      const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
-        items: itemsToUpdate,
-        proration_behavior: behavior,
-        metadata: { 
-          plan_name: newPlan, 
-          addons: JSON.stringify(newAddons), 
-          cycle: cycle, 
-          tenant_id: tenant.id.toString(),
-          upcoming_plan: behavior === 'none' ? newPlan : "",
-          upcoming_addons: behavior === 'none' ? JSON.stringify(newAddons) : ""
-        }
-      });
+      if (behavior === 'always_invoice') {
+        // UPGRADE: Stripe die Subscription überschreiben lassen (Sofortiges Upgrade)
+        const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
+          items: itemsToUpdate,
+          proration_behavior: behavior,
+          metadata: { 
+            plan_name: newPlan, 
+            addons: JSON.stringify(newAddons), 
+            cycle: cycle, 
+            tenant_id: tenant.id.toString(),
+            upcoming_plan: "",
+            upcoming_addons: ""
+          }
+        });
 
-      // Die erzeugte anteilige Rechnung direkt bezahlen lassen (falls Karte hinterlegt ist)
-      const latestInvoiceId = updatedSub.latest_invoice;
-      if (latestInvoiceId) {
-        const invoice = await stripe.invoices.retrieve(latestInvoiceId as string);
-        if (invoice.status === 'open' && invoice.amount_due > 0) {
-          // Versuchen abzubuchen
-          await stripe.invoices.pay(invoice.id);
+        // Die erzeugte anteilige Rechnung direkt bezahlen lassen (falls Karte hinterlegt ist)
+        const latestInvoiceId = updatedSub.latest_invoice;
+        if (latestInvoiceId) {
+          const invoice = await stripe.invoices.retrieve(latestInvoiceId as string);
+          if (invoice.status === 'open' && invoice.amount_due > 0) {
+            // Versuchen abzubuchen
+            await stripe.invoices.pay(invoice.id);
+          }
         }
+      } else {
+        // DOWNGRADE via Schedule (Wirksam zum nächsten Abrechnungszeitraum)
+        const subId = currentSub.id;
+        let schedId = typeof currentSub.schedule === 'string' ? currentSub.schedule : currentSub.schedule?.id;
+
+        if (!schedId) {
+          const schedule = await stripe.subscriptionSchedules.create({ from_subscription: subId });
+          schedId = schedule.id;
+        }
+
+        const scheduleObj = await stripe.subscriptionSchedules.retrieve(schedId);
+        const periodEndTs = currentSub.current_period_end;
+
+        await stripe.subscriptionSchedules.update(schedId, {
+          end_behavior: 'release',
+          default_settings: { automatic_tax: { enabled: true } },
+          phases: [
+            {
+              // Aktuelle Phase bleibt bis zum Ende der Laufzeit unverändert
+              start_date: scheduleObj.phases[0].start_date,
+              end_date: periodEndTs,
+              items: currentSub.items.data.map((item: any) => ({ price: item.price.id, quantity: 1 })),
+            },
+            {
+              // Neue Phase (Downgrade) startet am Ende der aktuellen Laufzeit
+              start_date: periodEndTs,
+              items: itemsArray.map(item => ({ price: item.price, quantity: 1 })),
+              metadata: {
+                plan_name: newPlan,
+                addons: JSON.stringify(newAddons),
+                cycle: cycle,
+                tenant_id: tenant.id.toString(),
+                upcoming_plan: "",
+                upcoming_addons: ""
+              }
+            }
+          ]
+        });
+
+        // Metadaten an der aktuellen Subscription anpassen, damit das Backend / Webhooks wissen, was ansteht
+        await stripe.subscriptions.update(subId, {
+          metadata: {
+            ...currentSub.metadata,
+            upcoming_plan: newPlan,
+            upcoming_addons: JSON.stringify(newAddons),
+            upcoming_cycle: cycle
+          }
+        });
       }
 
       // Update Pfotencard DB (Tenant)
@@ -415,10 +519,12 @@ Deno.serve(async (req) => {
         // Downgrade: Nur vormerken, aktueller Plan bleibt in DB (für Features)
         updateData.upcoming_plan = newPlan;
         config['upcoming_addons'] = newAddons;
+        updateData.upcoming_cycle = cycle;
       } else {
         // Upgrade oder Rückkehr zum aktuellen Plan (Vormerkung löschen)
         updateData.plan = newPlan;
         updateData.upcoming_plan = null;
+        updateData.upcoming_cycle = null;
         config['active_addons'] = newAddons;
         config['upcoming_addons'] = null;
       }

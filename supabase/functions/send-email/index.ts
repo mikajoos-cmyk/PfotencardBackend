@@ -16,6 +16,14 @@ Deno.serve(async (req) => {
     const payload = await req.json()
     const { to, userName, tenantName, type, title, message, url, details } = payload
 
+    // --- NEU: Keine E-Mails für Chat-Nachrichten versenden ---
+    if (type === "chat") {
+      return new Response(JSON.stringify({ message: "Skipping email for chat message" }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }
+
     let subject = title;
     let content = message;
     let buttonHtml = "";
@@ -33,6 +41,7 @@ Deno.serve(async (req) => {
     // --- LOGIK AUS CREATORSTAY: Switch-Case für verschiedene E-Mail Typen ---
     switch (type) {
       case "chat":
+        // Fallback, falls die Filterung oben nicht greift
         subject = `Neue Nachricht von ${tenantName}`;
         content = `
           <p>Hallo ${userName},</p>
@@ -40,6 +49,17 @@ Deno.serve(async (req) => {
           <blockquote style="border-left: 4px solid #e5e7eb; padding-left: 16px; color: #4b5563; font-style: italic; margin: 16px 0;">
             "${message}"
           </blockquote>
+        `;
+        break;
+
+      case "waitinglist_move":
+        subject = `Gute Nachrichten: Platz bestätigt bei ${tenantName}`;
+        content = `
+          <p>Hallo ${userName},</p>
+          <p>du bist soeben von der <strong>Warteliste nachgerückt</strong>!</p>
+          <p style="font-size: 16px; padding: 12px; background-color: #dcfce7; border: 1px solid #22c55e; border-radius: 6px;">
+            Dein Platz für den Termin <strong>${details?.Kurs || ""}</strong> ist nun fest bestätigt.
+          </p>
         `;
         break;
 

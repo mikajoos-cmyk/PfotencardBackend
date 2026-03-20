@@ -233,6 +233,12 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     # Sicherstellen, dass config ein Dict ist
     current_config = dict(tenant.config) if tenant.config else {}
     
+    # KRITISCH: Verhindern, dass wichtige Keys gelöscht werden, falls sie im Payload fehlen
+    # active_addons und upcoming_plan werden nur über Stripe-Webhooks verwaltet und dürfen hier nicht überschrieben werden
+    active_addons = current_config.get("active_addons", [])
+    upcoming_plan = current_config.get("upcoming_plan")
+    stripe_metadata = {k: v for k, v in current_config.items() if k.startswith('stripe_')}
+
     # Branding Updates
     current_config["branding"] = current_config.get("branding", {})
     current_config["branding"]["primary_color"] = settings.primary_color
@@ -278,6 +284,13 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     # NEU: Widget-Einstellungen
     if settings.widgets:
         current_config["widgets"] = settings.widgets.model_dump()
+
+    # KRITISCH: Stripe-relevante Daten wiederherstellen
+    current_config["active_addons"] = active_addons
+    if upcoming_plan:
+        current_config["upcoming_plan"] = upcoming_plan
+    for k, v in stripe_metadata.items():
+        current_config[k] = v
 
     tenant.config = current_config
     flag_modified(tenant, "config")
@@ -1639,7 +1652,7 @@ def cancel_booking(db: Session, tenant_id: int, appointment_id: int, user_id: in
             notify_user(
                 db=db,
                 user_id=promoted_user_id,
-                type="booking",
+                type="waitinglist_move",
                 title="Platz bestätigt (Nachgerückt)",
                 message=f"Gute Nachrichten! Du bist für '{booking.appointment.title}' nachgerückt.",
                 url="/appointments",
@@ -1703,7 +1716,7 @@ def remove_booking_admin(db: Session, tenant_id: int, booking_id: int):
             notify_user(
                 db=db,
                 user_id=promoted_user_id,
-                type="booking",
+                type="waitinglist_move",
                 title="Platz bestätigt (Nachgerückt)",
                 message=f"Gute Nachrichten! Du bist für '{booking.appointment.title}' nachgerückt.",
                 url="/appointments",
