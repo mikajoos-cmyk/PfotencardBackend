@@ -38,6 +38,25 @@ async function determinePlan(supabase: any, priceId?: string, productId?: string
   return null;
 }
 
+/**
+ * Bestimmt alle Addon-Pläne in der Subscription.
+ */
+async function determineAddons(supabase: any, items: Stripe.SubscriptionItem[]): Promise<string[]> {
+  const addons: string[] = [];
+  for (const item of items) {
+    const { data } = await supabase
+      .from('subscription_packages')
+      .select('plan_name, package_type')
+      .or(`stripe_price_id_base_monthly.eq.${item.price.id},stripe_price_id_base_yearly.eq.${item.price.id}`)
+      .maybeSingle();
+    
+    if (data && data.package_type === 'addon') {
+      addons.push(data.plan_name);
+    }
+  }
+  return addons;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -109,6 +128,14 @@ Deno.serve(async (req) => {
         const trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null;
         const periodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null;
 
+        const activeAddons = await determineAddons(supabaseAdmin, sub.items.data);
+        const { data: currentTenantConfig } = await (tenantId 
+          ? supabaseAdmin.from('tenants').select('config').eq('id', tenantId).maybeSingle()
+          : supabaseAdmin.from('tenants').select('config').eq('stripe_customer_id', customerId).maybeSingle());
+        
+        const config = currentTenantConfig?.config || {};
+        config['active_addons'] = activeAddons;
+
         const updateData: any = {
           stripe_customer_id: customerId,
           stripe_subscription_id: subscriptionId,
@@ -118,6 +145,7 @@ Deno.serve(async (req) => {
           cancel_at_period_end: sub.cancel_at_period_end,
           cancelled_at: null,
           next_payment_date: periodEnd,
+          config: config
         };
 
         if (plan) {
@@ -202,6 +230,14 @@ Deno.serve(async (req) => {
         const periodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null;
         const trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null;
 
+        const activeAddons = await determineAddons(supabaseAdmin, sub.items.data);
+        const { data: currentTenantConfig } = await (tenantId 
+          ? supabaseAdmin.from('tenants').select('config').eq('id', tenantId).maybeSingle()
+          : supabaseAdmin.from('tenants').select('config').eq('stripe_customer_id', customerId).maybeSingle());
+        
+        const config = currentTenantConfig?.config || {};
+        config['active_addons'] = activeAddons;
+
         const updateData: any = {
           stripe_customer_id: customerId,
           stripe_subscription_id: sub.id,
@@ -210,6 +246,7 @@ Deno.serve(async (req) => {
           subscription_ends_at: periodEnd,
           trial_end: trialEnd,
           next_payment_date: periodEnd,
+          config: config
         };
         
         if (sub.cancel_at_period_end) {
@@ -279,6 +316,7 @@ Deno.serve(async (req) => {
           upcoming_plan: null,
           subscription_ends_at: sub.ended_at ? new Date(sub.ended_at * 1000).toISOString() : new Date().toISOString(),
           cancelled_at: sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : new Date().toISOString(),
+          config: { ...(tenantBefore?.config || {}), active_addons: [] }
         };
 
         const query = tenantId 

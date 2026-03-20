@@ -114,10 +114,36 @@ Deno.serve(async (req) => {
     }
 
     // ==========================================
+    // ACTION: GET STATUS
+    // ==========================================
+    if (action === 'get_status') {
+      return new Response(JSON.stringify({
+        tenant_id: tenant.id,
+        plan: tenant.plan,
+        active_addons: tenant.config?.active_addons || [],
+        stripe_subscription_id: tenant.stripe_subscription_id,
+        stripe_subscription_status: tenant.stripe_subscription_status
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // ==========================================
     // ACTION: PREVIEW UPGRADE (Preisanzeige)
     // ==========================================
     if (action === 'preview_upgrade') {
       const { newPlan, newAddons, cycle = 'monthly' } = body;
+
+      // Alle Packages abrufen für Zuordnung von Price IDs zu Typ (Base vs Addon)
+      const { data: allPackages } = await supabaseAdmin
+        .from('subscription_packages')
+        .select('stripe_price_id_base_monthly, stripe_price_id_base_yearly, stripe_price_id_users, stripe_price_id_fees, package_type');
+
+      const priceTypeMap: Record<string, string> = {};
+      allPackages?.forEach(p => {
+        if (p.stripe_price_id_base_monthly) priceTypeMap[p.stripe_price_id_base_monthly] = p.package_type;
+        if (p.stripe_price_id_base_yearly) priceTypeMap[p.stripe_price_id_base_yearly] = p.package_type;
+        if (p.stripe_price_id_users) priceTypeMap[p.stripe_price_id_users] = 'base';
+        if (p.stripe_price_id_fees) priceTypeMap[p.stripe_price_id_fees] = 'base';
+      });
 
       const newPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle);
       const prorationDate = Math.floor(Date.now() / 1000); // Genau jetzt
@@ -188,10 +214,19 @@ Deno.serve(async (req) => {
         const regularLines = upcomingInvoice.lines.data.filter(line => !line.proration);
 
         // Helper: Berechnet Details inkl. Steuern
-        const calculateLineDetails = (lines: any[]) => {
+        const calculateLineDetails = (lines: any[], filterAddonCredits = false) => {
           let netCents = 0;
           let taxCents = 0;
           lines.forEach(line => {
+            // Logik für Gutschriften (negative Beträge):
+            // Bei Modulen (Addons) ignorieren wir Gutschriften heute (da Vormerkung).
+            // Bei Basis-Paketen erlauben wir sie, um Upgrades korrekt zu verrechnen.
+            if (line.amount < 0 && filterAddonCredits) {
+              const priceId = line.price?.id;
+              const type = priceTypeMap[priceId];
+              if (type === 'addon') return;
+            }
+
             let lineNet = line.amount;
             if (line.tax_amounts) {
               line.tax_amounts.forEach((tax: any) => {
@@ -214,7 +249,7 @@ Deno.serve(async (req) => {
           };
         };
 
-        const prorationDetails = calculateLineDetails(prorationLines);
+        const prorationDetails = calculateLineDetails(prorationLines, true); // Filtert Addon-Gutschriften aus
         const regularDetails = calculateLineDetails(regularLines);
 
         let amountDueToday = 0;
@@ -233,6 +268,11 @@ Deno.serve(async (req) => {
           netDueToday = (upcomingInvoice.subtotal || 0) / 100;
         }
 
+        const linesWithMetadata = upcomingInvoice.lines.data.map(line => ({
+          ...line,
+          package_type: priceTypeMap[line.price?.id] || 'unknown'
+        }));
+
         return new Response(JSON.stringify({
           amountDueToday,
           taxDueToday,
@@ -241,7 +281,7 @@ Deno.serve(async (req) => {
           amountDueNextMonth: regularDetails.total,
           taxDueNextMonth: regularDetails.tax,
           netDueNextMonth: regularDetails.net,
-          lines: upcomingInvoice.lines.data,
+          lines: linesWithMetadata,
           currency: upcomingInvoice.currency
         }), { 
           headers: { 
@@ -293,10 +333,27 @@ Deno.serve(async (req) => {
         deleted: true
       })).concat(itemsArray.map(item => ({ price: item.price })));
 
+      // Vorschau generieren um zu sehen ob es ein Downgrade (Gutschrift) oder Upgrade (Zahlung) ist
+      let behavior: 'always_invoice' | 'none' = 'always_invoice';
+      try {
+        const previewInvoice = await stripe.invoices.retrieveUpcoming({
+          customer: tenant.stripe_customer_id,
+          subscription: tenant.stripe_subscription_id,
+          subscription_items: itemsToUpdate,
+          subscription_proration_date: Math.floor(Date.now() / 1000),
+        });
+        // Wenn der Betrag <= 0 ist, ist es ein Downgrade oder keine Änderung -> keine sofortige Rechnung (vormerken)
+        if (previewInvoice.amount_due <= 0) {
+          behavior = 'none';
+        }
+      } catch (e) {
+        console.warn("Konnte Vorschau für Update nicht laden, nutze Standard-Verhalten:", e.message);
+      }
+
       // Stripe die Subscription überschreiben lassen
       const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
         items: itemsToUpdate,
-        proration_behavior: 'always_invoice', // WICHTIG: Erstellt SOFORT eine Rechnung für den anteiligen Betrag!
+        proration_behavior: behavior,
         metadata: { plan_name: newPlan, addons: JSON.stringify(newAddons), cycle: cycle, tenant_id: tenant.id.toString() }
       });
 
@@ -311,7 +368,14 @@ Deno.serve(async (req) => {
       }
 
       // Update Pfotencard DB (Tenant)
-      await supabaseAdmin.from('tenants').update({ plan: newPlan }).eq('id', tenant.id);
+      const config = tenant.config || {};
+      // Addons in Config synchronisieren
+      config['active_addons'] = newAddons;
+      
+      await supabaseAdmin.from('tenants').update({ 
+        plan: newPlan,
+        config: config
+      }).eq('id', tenant.id);
 
       return new Response(JSON.stringify({ status: 'success' }), { headers: corsHeaders });
     }

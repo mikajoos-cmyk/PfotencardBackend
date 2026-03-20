@@ -440,7 +440,8 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "max_customers": max_customers,
         "additional_cost_per_customer": additional_cost_per_customer,
         "top_up_fee_percent": top_up_fee_percent,
-        "current_billing_period_fees": current_billing_period_fees
+        "current_billing_period_fees": current_billing_period_fees,
+        "active_addons": tenant.config.get("active_addons", []) if tenant.config else []
     }
 
 # Sicherheit: Nur mit Secret Key ausführbar

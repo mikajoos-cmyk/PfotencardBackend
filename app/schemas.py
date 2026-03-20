@@ -136,6 +136,7 @@ class TenantStatus(BaseModel):
     additional_cost_per_customer: float = 0.0
     top_up_fee_percent: float = 0.0
     current_billing_period_fees: float = 0.0
+    active_addons: List[str] = []
 
 # --- 1b. ABOS & PAKETE ---
 class SubscriptionPackageBase(BaseModel):

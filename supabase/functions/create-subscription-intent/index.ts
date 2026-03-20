@@ -11,7 +11,7 @@ const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY") ?? "", {
     httpClient: Stripe.createFetchHttpClient(),
 });
 
-// Helfer: Umsatzsteuer-ID sicher prüfen
+        // Helfer: Umsatzsteuer-ID sicher prüfen
 async function syncTaxId(stripeClient: Stripe, customerId: string, vatId: string) {
     if (!vatId) return;
     const taxIds = await stripeClient.customers.listTaxIds(customerId);
@@ -28,6 +28,44 @@ async function syncTaxId(stripeClient: Stripe, customerId: string, vatId: string
             throw new Error("Fehler beim Validieren der USt-IdNr. bei Stripe.");
         }
     }
+}
+
+// Hilfsfunktion zum Berechnen der Zeilen-Details (Netto, Steuern, Gesamt)
+function calculateLineDetails(lines: any[], priceTypeMap: Record<string, string>, filterAddonCredits = false) {
+    let netCents = 0;
+    let taxCents = 0;
+    
+    lines.forEach(line => {
+        // Logik für Gutschriften (negative Beträge):
+        // Bei Modulen (Addons) ignorieren wir Gutschriften heute (da Vormerkung).
+        // Bei Basis-Paketen erlauben wir sie, um Upgrades korrekt zu verrechnen.
+        if (line.amount < 0 && filterAddonCredits) {
+            const priceId = line.price?.id;
+            const type = priceTypeMap[priceId];
+            if (type === 'addon') return;
+        }
+
+        let lineNet = line.amount;
+        if (line.tax_amounts) {
+            line.tax_amounts.forEach((tax: any) => {
+                if (!tax.inclusive) {
+                    taxCents += tax.amount;
+                } else {
+                    // Bei inklusiven Steuern ist die Steuer bereits in line.amount enthalten.
+                    // Wir ziehen sie hier ab, um den reinen Netto-Betrag zu erhalten.
+                    lineNet -= tax.amount;
+                    taxCents += tax.amount;
+                }
+            });
+        }
+        netCents += lineNet;
+    });
+    
+    return { 
+        net: netCents / 100, 
+        tax: taxCents / 100, 
+        total: (netCents + taxCents) / 100 
+    };
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -318,6 +356,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // VORSCHAU DER RECHNUNG ERSTELLEN
         let preview: any = null;
         try {
+            // Alle Packages abrufen für Zuordnung von Price IDs zu Typ (Base vs Addon)
+            const { data: allPackages } = await supabaseAdmin
+                .from('subscription_packages')
+                .select('stripe_price_id_base_monthly, stripe_price_id_base_yearly, stripe_price_id_users, stripe_price_id_fees, package_type');
+
+            const priceTypeMap: Record<string, string> = {};
+            allPackages?.forEach(p => {
+                if (p.stripe_price_id_base_monthly) priceTypeMap[p.stripe_price_id_base_monthly] = p.package_type;
+                if (p.stripe_price_id_base_yearly) priceTypeMap[p.stripe_price_id_base_yearly] = p.package_type;
+                if (p.stripe_price_id_users) priceTypeMap[p.stripe_price_id_users] = 'base';
+                if (p.stripe_price_id_fees) priceTypeMap[p.stripe_price_id_fees] = 'base';
+            });
+
             // Aktuelle Adresse/VAT an Stripe senden für korrekte Steuern
             if (address || frontendVatId) {
                 const normalizedCountry = getCountryCode(address?.country || address?.countryCode || tenant.country);
@@ -379,27 +430,51 @@ Deno.serve(async (req: Request): Promise<Response> => {
             
             console.log(`[SUBSCRIPTION_INTENT] Upcoming Invoice Subtotal: ${upcoming.subtotal / 100}, Total: ${upcoming.total / 100}, Amount Due: ${upcoming.amount_due / 100}`);
             
-            // Log line items for debugging
-            upcoming.lines.data.forEach((line: any, index: number) => {
-                console.log(`[SUBSCRIPTION_INTENT] Line ${index}: ${line.description} - Amount: ${line.amount / 100} ${line.currency}`);
-            });
+            // Wir sortieren die Positionen aus der Stripe-Vorschau:
+            // prorationLines = Das was anteilig für den aktuellen Restmonat berechnet wird
+            // regularLines = Das was ab dem nächsten regulären Rechnungsdatum gilt
+            const prorationLines = upcoming.lines.data.filter(line => line.proration);
+            const regularLines = upcoming.lines.data.filter(line => !line.proration);
+
+            const prorationDetails = calculateLineDetails(prorationLines, priceTypeMap, true); // Filtert Addon-Gutschriften aus
+            const regularDetails = calculateLineDetails(regularLines, priceTypeMap);
+
+            let amountDueToday = 0;
+            let taxDueToday = 0;
+            let netDueToday = 0;
+
+            if (activeSub) {
+                // Beim Upgrade zahlt er heute NUR die Prorations (anteilige Kosten)
+                amountDueToday = Math.max(0, prorationDetails.total);
+                taxDueToday = Math.max(0, prorationDetails.tax);
+                netDueToday = Math.max(0, prorationDetails.net);
+            } else {
+                // Neues Abo: Er zahlt heute den vollen Vorschau-Betrag
+                amountDueToday = upcoming.amount_due / 100;
+                taxDueToday = (upcoming.tax || 0) / 100;
+                netDueToday = (upcoming.subtotal || 0) / 100;
+            }
+
+            const linesWithMetadata = upcoming.lines.data.map(line => ({
+                description: line.description,
+                amount: line.amount,
+                quantity: line.quantity,
+                type: line.type,
+                proration: line.proration,
+                tax_amounts: line.tax_amounts,
+                package_type: priceTypeMap[line.price?.id] || 'unknown'
+            }));
 
             preview = {
-                total: upcoming.total,
-                subtotal: upcoming.subtotal,
-                tax: upcoming.tax,
-                amount_due: upcoming.amount_due,
-                currency: upcoming.currency,
-                period_start: upcoming.next_payment_attempt || upcoming.period_start,
-                proration_date: upcoming.subscription_proration_date,
-                lines: upcoming.lines.data.map((l: any) => ({
-                    description: l.description,
-                    amount: l.amount,
-                    quantity: l.quantity,
-                    type: l.type,
-                    proration: l.proration,
-                    tax_amounts: l.tax_amounts
-                }))
+                amountDueToday,
+                taxDueToday,
+                netDueToday,
+                nextBillingDate: upcoming.next_payment_attempt || upcoming.period_end,
+                amountDueNextMonth: regularDetails.total,
+                taxDueNextMonth: regularDetails.tax,
+                netDueNextMonth: regularDetails.net,
+                lines: linesWithMetadata,
+                currency: upcoming.currency
             };
         } catch (previewError) {
             console.error("Error creating preview invoice:", previewError);
