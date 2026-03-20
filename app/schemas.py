@@ -105,6 +105,7 @@ class Tenant(TenantBase):
 
 class TenantStatus(BaseModel):
     exists: bool
+    tenant_id: Optional[int] = None
     name: Optional[str] = None
     subscription_valid: bool = False
     subscription_ends_at: Optional[datetime] = None

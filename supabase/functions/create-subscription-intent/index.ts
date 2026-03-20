@@ -1,8 +1,8 @@
 /**
  * Create/Update Stripe Subscription Intent for Pfotencard
  */
-import Stripe from "https://esm.sh/stripe@17.0.0?target=deno";
-import { createAuthClient, createAdminClient } from "../_shared/supabase-client.ts";
+import Stripe from "npm:stripe@^17.0.0";
+import { createClient } from "npm:@supabase/supabase-js@^2.40.0";
 import { corsHeaders } from "../_shared/cors.ts";
 import { getCountryCode } from "../_shared/country-mapping.ts";
 
@@ -34,12 +34,38 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
     try {
-        const supabaseAuth = createAuthClient(req);
-        const supabaseAdmin = createAdminClient();
+        const supabaseClient = createClient(
+            Deno.env.get('SUPABASE_URL') ?? '',
+            Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+            { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
+        )
+        const supabaseAdmin = createClient(
+            Deno.env.get('SUPABASE_URL') ?? '',
+            Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+        )
 
-        // Optional: User aus dem Auth-Context laden (Supabase JWT)
-        // Wenn JWT Verifikation aus ist, kann user null sein
-        const { data: { user } } = await supabaseAuth.auth.getUser();
+        // User über das Frontend-Token verifizieren (Sicherheit!)
+        let userEmail: string | undefined;
+        const { data: { user }, error: userError } = await supabaseClient.auth.getUser()
+
+        if (user && !userError) {
+          userEmail = user.email;
+        } else {
+          // Fallback: Wenn kein Supabase-User gefunden wurde, könnte es ein FastAPI-Token von der Marketing-Seite sein.
+          const authHeader = req.headers.get('Authorization');
+          if (authHeader && authHeader.startsWith('Bearer ')) {
+            try {
+              const token = authHeader.split(' ')[1];
+              const base64Url = token.split('.')[1];
+              const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+              const payload = JSON.parse(atob(base64));
+              userEmail = payload.email || payload.sub;
+              console.log('Using FastAPI decoded user email:', userEmail);
+            } catch (e) {
+              console.error('Error decoding custom JWT:', e);
+            }
+          }
+        }
 
         const body = await req.json();
         const { plan, addons = [], action, paymentMethodId, vatId: frontendVatId, address, billingCycle, promoCodeId } = body;
@@ -57,16 +83,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
             if (t) tenantId = t.id;
         }
         
-        if (!tenantId && user) {
-            // Fallback: search for tenant where this user is owner
-            // Wir prüfen 'owner_id' in der tenants Tabelle
-            const { data: tenantData } = await supabaseAdmin
-                .from('tenants')
-                .select('id')
-                .eq('owner_id', user.id)
+        if (!tenantId && userEmail) {
+            // Fallback: search for tenant where this user is owner or has email
+            // In Pfotencard Backend, we search in the users table
+            const { data: dbUser } = await supabaseAdmin
+                .from('users')
+                .select('tenant_id')
+                .eq('email', userEmail.toLowerCase())
                 .maybeSingle();
             
-            if (tenantData) tenantId = tenantData.id;
+            if (dbUser) tenantId = dbUser.tenant_id;
         }
 
         if (!tenantId) {
@@ -110,7 +136,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         // Ensure customer exists in Stripe
         if (!customerId) {
             // Wenn kein User da ist, nutzen wir die Support-Email des Tenants
-            const email = user?.email || tenant.support_email || `support@${tenant.subdomain}.pfotencard.de`;
+            const email = userEmail || tenant.support_email || `support@${tenant.subdomain}.pfotencard.de`;
             
             const customers = await stripe.customers.list({ email: email, limit: 1 });
             if (customers.data.length > 0) {
@@ -348,7 +374,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 }
             }
 
-            console.log(`[SUBSCRIPTION_INTENT] Retrieving upcoming invoice for Customer: ${customerId} with Price: ${targetPriceId}`);
+            console.log(`[SUBSCRIPTION_INTENT] Retrieving upcoming invoice for Customer: ${customerId} with Prices: ${allPriceIds.join(', ')}`);
             const upcoming = await stripe.invoices.retrieveUpcoming(previewParams);
             
             console.log(`[SUBSCRIPTION_INTENT] Upcoming Invoice Subtotal: ${upcoming.subtotal / 100}, Total: ${upcoming.total / 100}, Amount Due: ${upcoming.amount_due / 100}`);

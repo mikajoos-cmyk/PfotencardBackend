@@ -412,6 +412,7 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
 
     return {
         "exists": True, 
+        "tenant_id": tenant.id,
         "name": tenant.name,
         "subscription_valid": is_valid,
         "subscription_ends_at": tenant.subscription_ends_at,
