@@ -397,7 +397,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
                     amount: l.amount,
                     quantity: l.quantity,
                     type: l.type,
-                    proration: l.proration
+                    proration: l.proration,
+                    tax_amounts: l.tax_amounts
                 }))
             };
         } catch (previewError) {
