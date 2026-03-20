@@ -31,18 +31,27 @@ async function syncTaxId(stripeClient: Stripe, customerId: string, vatId: string
 }
 
 // Hilfsfunktion zum Berechnen der Zeilen-Details (Netto, Steuern, Gesamt)
-function calculateLineDetails(lines: any[], priceTypeMap: Record<string, string>, filterAddonCredits = false) {
+function calculateLineDetails(lines: any[], priceTypeMap: Record<string, string>, filterCredits = false, isBaseUpgrade = true) {
     let netCents = 0;
     let taxCents = 0;
     
     lines.forEach(line => {
         // Logik für Gutschriften (negative Beträge):
-        // Bei Modulen (Addons) ignorieren wir Gutschriften heute (da Vormerkung).
-        // Bei Basis-Paketen erlauben wir sie, um Upgrades korrekt zu verrechnen.
-        if (line.amount < 0 && filterAddonCredits) {
+        // 1. Bei Modulen (Addons) ignorieren wir Gutschriften heute (da Vormerkung).
+        // 2. Bei Basis-Paketen erlauben wir sie NUR bei echten Upgrades.
+        if (line.amount < 0 && filterCredits) {
             const priceId = line.price?.id;
             const type = priceTypeMap[priceId];
             if (type === 'addon') return;
+            if (type === 'base' && !isBaseUpgrade) return;
+        }
+
+        // NEU: Bei Basis-Downgrade ignorieren wir heute auch die anteiligen KOSTEN des neuen kleinen Plans,
+        // weil wir den Wechsel nur "vormerken".
+        if (line.amount > 0 && line.proration && filterCredits && !isBaseUpgrade) {
+            const priceId = line.price?.id;
+            const type = priceTypeMap[priceId];
+            if (type === 'base') return;
         }
 
         let lineNet = line.amount;
@@ -359,7 +368,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             // Alle Packages abrufen für Zuordnung von Price IDs zu Typ (Base vs Addon)
             const { data: allPackages } = await supabaseAdmin
                 .from('subscription_packages')
-                .select('stripe_price_id_base_monthly, stripe_price_id_base_yearly, stripe_price_id_users, stripe_price_id_fees, package_type');
+                .select('plan_name, stripe_price_id_base_monthly, stripe_price_id_base_yearly, stripe_price_id_users, stripe_price_id_fees, package_type, price_monthly, price_yearly');
 
             const priceTypeMap: Record<string, string> = {};
             allPackages?.forEach(p => {
@@ -368,6 +377,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 if (p.stripe_price_id_users) priceTypeMap[p.stripe_price_id_users] = 'base';
                 if (p.stripe_price_id_fees) priceTypeMap[p.stripe_price_id_fees] = 'base';
             });
+
+            // Upgrade-Check
+            const currentPkg = allPackages?.find(p => p.plan_name === tenant.plan && p.package_type === 'base');
+            const newPkg = allPackages?.find(p => p.plan_name === plan && p.package_type === 'base');
+            const currentPrice = billingCycle === 'yearly' ? (currentPkg?.price_yearly || 0) : (currentPkg?.price_monthly || 0);
+            const newPrice = billingCycle === 'yearly' ? (newPkg?.price_yearly || 0) : (newPkg?.price_monthly || 0);
+            const isBaseUpgrade = newPrice > currentPrice;
 
             // Aktuelle Adresse/VAT an Stripe senden für korrekte Steuern
             if (address || frontendVatId) {
@@ -436,7 +452,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             const prorationLines = upcoming.lines.data.filter(line => line.proration);
             const regularLines = upcoming.lines.data.filter(line => !line.proration);
 
-            const prorationDetails = calculateLineDetails(prorationLines, priceTypeMap, true); // Filtert Addon-Gutschriften aus
+            const prorationDetails = calculateLineDetails(prorationLines, priceTypeMap, true, isBaseUpgrade); // Filtert Addon-Gutschriften aus
             const regularDetails = calculateLineDetails(regularLines, priceTypeMap);
 
             let amountDueToday = 0;
@@ -463,7 +479,17 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 proration: line.proration,
                 tax_amounts: line.tax_amounts,
                 package_type: priceTypeMap[line.price?.id] || 'unknown'
-            }));
+            })).filter(line => {
+                // Gleiche Filterlogik wie in manage-subscription
+                if (line.proration) {
+                    if (line.amount < 0) {
+                        if (line.package_type === 'addon') return false;
+                        if (line.package_type === 'base' && !isBaseUpgrade) return false;
+                    }
+                    if (line.amount > 0 && line.package_type === 'base' && !isBaseUpgrade) return false;
+                }
+                return true;
+            });
 
             preview = {
                 amountDueToday,

@@ -135,7 +135,7 @@ Deno.serve(async (req) => {
       // Alle Packages abrufen für Zuordnung von Price IDs zu Typ (Base vs Addon)
       const { data: allPackages } = await supabaseAdmin
         .from('subscription_packages')
-        .select('stripe_price_id_base_monthly, stripe_price_id_base_yearly, stripe_price_id_users, stripe_price_id_fees, package_type');
+        .select('plan_name, stripe_price_id_base_monthly, stripe_price_id_base_yearly, stripe_price_id_users, stripe_price_id_fees, package_type, price_monthly, price_yearly');
 
       const priceTypeMap: Record<string, string> = {};
       allPackages?.forEach(p => {
@@ -146,6 +146,13 @@ Deno.serve(async (req) => {
       });
 
       const newPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle);
+
+      const currentPkg = allPackages?.find(p => p.plan_name === tenant.plan && p.package_type === 'base');
+      const newPkg = allPackages?.find(p => p.plan_name === newPlan && p.package_type === 'base');
+      const currentPrice = cycle === 'yearly' ? (currentPkg?.price_yearly || 0) : (currentPkg?.price_monthly || 0);
+      const newPrice = cycle === 'yearly' ? (newPkg?.price_yearly || 0) : (newPkg?.price_monthly || 0);
+      const isBaseUpgrade = newPrice > currentPrice;
+
       const prorationDate = Math.floor(Date.now() / 1000); // Genau jetzt
 
       const previewParams: any = {
@@ -214,17 +221,26 @@ Deno.serve(async (req) => {
         const regularLines = upcomingInvoice.lines.data.filter(line => !line.proration);
 
         // Helper: Berechnet Details inkl. Steuern
-        const calculateLineDetails = (lines: any[], filterAddonCredits = false) => {
+        const calculateLineDetails = (lines: any[], filterCredits = false) => {
           let netCents = 0;
           let taxCents = 0;
           lines.forEach(line => {
             // Logik für Gutschriften (negative Beträge):
-            // Bei Modulen (Addons) ignorieren wir Gutschriften heute (da Vormerkung).
-            // Bei Basis-Paketen erlauben wir sie, um Upgrades korrekt zu verrechnen.
-            if (line.amount < 0 && filterAddonCredits) {
+            // 1. Bei Modulen (Addons) ignorieren wir Gutschriften heute (da Vormerkung).
+            // 2. Bei Basis-Paketen erlauben wir sie NUR bei echten Upgrades.
+            if (line.amount < 0 && filterCredits) {
               const priceId = line.price?.id;
               const type = priceTypeMap[priceId];
               if (type === 'addon') return;
+              if (type === 'base' && !isBaseUpgrade) return;
+            }
+
+            // NEU: Bei Basis-Downgrade ignorieren wir heute auch die anteiligen KOSTEN des neuen kleinen Plans,
+            // weil wir den Wechsel nur "vormerken" (proration_behavior: 'none').
+            if (line.amount > 0 && line.proration && filterCredits && !isBaseUpgrade) {
+              const priceId = line.price?.id;
+              const type = priceTypeMap[priceId];
+              if (type === 'base') return;
             }
 
             let lineNet = line.amount;
@@ -249,7 +265,7 @@ Deno.serve(async (req) => {
           };
         };
 
-        const prorationDetails = calculateLineDetails(prorationLines, true); // Filtert Addon-Gutschriften aus
+        const prorationDetails = calculateLineDetails(prorationLines, true); // Filtert Addon- (und ggf. Base-) Gutschriften aus
         const regularDetails = calculateLineDetails(regularLines);
 
         let amountDueToday = 0;
@@ -271,7 +287,18 @@ Deno.serve(async (req) => {
         const linesWithMetadata = upcomingInvoice.lines.data.map(line => ({
           ...line,
           package_type: priceTypeMap[line.price?.id] || 'unknown'
-        }));
+        })).filter(line => {
+           // Wir filtern die Zeilen raus, die wir in calculateLineDetails ignoriert haben, 
+           // damit die Anzeige im Frontend mit der Summe übereinstimmt.
+           if (line.proration) {
+              if (line.amount < 0) {
+                 if (line.package_type === 'addon') return false;
+                 if (line.package_type === 'base' && !isBaseUpgrade) return false;
+              }
+              if (line.amount > 0 && line.package_type === 'base' && !isBaseUpgrade) return false;
+           }
+           return true;
+        });
 
         return new Response(JSON.stringify({
           amountDueToday,
