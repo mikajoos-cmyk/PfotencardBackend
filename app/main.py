@@ -352,6 +352,7 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         models.SubscriptionPackage.plan_name == tenant.plan
     ).first()
 
+    max_customers = package.included_customers if package else 0
     additional_cost_per_customer = package.additional_cost_per_customer if package else 0.0
     
     # Priorität für top_up_fee_percent: 
@@ -366,45 +367,52 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
 
     # NEU: Summe der Top-up Gebühren im aktuellen Abrechnungszeitraum berechnen
     current_billing_period_fees = 0.0
-    if tenant.subscription_ends_at:
-        # Wir berechnen den Start des aktuellen Zeitraums basierend auf dem Enddatum
-        # Wenn es ein monatliches Abo ist, ist der Start 1 Monat vor dem Ende.
-        
-        interval_days = 30
-        if tenant.plan and 'year' in tenant.plan.lower():
-            interval_days = 365
-            
-        period_start = tenant.subscription_ends_at - timedelta(days=interval_days)
-        
-        # Falls das Abo gerade erst gestartet ist, nehmen wir das created_at des Tenants als Untergrenze
-        if tenant.created_at and period_start < tenant.created_at:
-            period_start = tenant.created_at
-        
-        # Logging für die Berechnung hinzufügen
-        print(f"DEBUG [Billing]: Berechne Top-up Fees für Tenant {tenant.id} ({tenant.name})")
-        print(f"DEBUG [Billing]: Plan: {tenant.plan}, Zeitraum: {period_start} bis {tenant.subscription_ends_at}")
+    
+    # Fallback-Logik für subscription_ends_at: 
+    # Wenn nicht vorhanden (z.B. nach der Umstellung), nehmen wir das heutige Datum
+    # Das verhindert den Fehler, lässt aber die Berechnung (ggf. unvollständig) durchlaufen.
+    eff_subscription_ends_at = tenant.subscription_ends_at
+    if not eff_subscription_ends_at:
+        eff_subscription_ends_at = datetime.now(timezone.utc)
+        print(f"DEBUG [Billing]: Kein subscription_ends_at für Tenant {tenant.id} gefunden, nutze Fallback: {eff_subscription_ends_at}")
 
-        # Wir summieren die top_up_fee aus der transactions Tabelle
-        period_fees = db.query(func.sum(models.Transaction.top_up_fee)).filter(
-            models.Transaction.tenant_id == tenant.id,
-            models.Transaction.date >= period_start,
-            models.Transaction.top_up_fee > 0
-        ).scalar()
+    # Wir berechnen den Start des aktuellen Zeitraums basierend auf dem Enddatum
+    # Wenn es ein monatliches Abo ist, ist der Start 1 Monat vor dem Ende.
+    
+    interval_days = 30
+    if tenant.plan and 'year' in tenant.plan.lower():
+        interval_days = 365
         
-        current_billing_period_fees = float(period_fees) if period_fees else 0.0
-        
-        # Zusätzliches Logging für das Ergebnis
-        transaction_count = db.query(models.Transaction).filter(
-            models.Transaction.tenant_id == tenant.id,
-            models.Transaction.date >= period_start,
-            models.Transaction.top_up_fee > 0
-        ).count()
-        print(f"DEBUG [Billing]: Gefundene Transaktionen mit Gebühren: {transaction_count}, Gesamtsumme: {current_billing_period_fees}")
-    else:
-        print(f"DEBUG [Billing]: Kein subscription_ends_at für Tenant {tenant.id} gefunden, überspringe Gebührenberechnung.")
+    period_start = eff_subscription_ends_at - timedelta(days=interval_days)
+    
+    # Falls das Abo gerade erst gestartet ist, nehmen wir das created_at des Tenants als Untergrenze
+    if tenant.created_at and period_start < tenant.created_at:
+        period_start = tenant.created_at
+    
+    # Logging für die Berechnung hinzufügen
+    print(f"DEBUG [Billing]: Berechne Top-up Fees für Tenant {tenant.id} ({tenant.name})")
+    print(f"DEBUG [Billing]: Plan: {tenant.plan}, Zeitraum: {period_start} bis {eff_subscription_ends_at}")
+
+    # Wir summieren die top_up_fee aus der transactions Tabelle
+    period_fees = db.query(func.sum(models.Transaction.top_up_fee)).filter(
+        models.Transaction.tenant_id == tenant.id,
+        models.Transaction.date >= period_start,
+        models.Transaction.top_up_fee > 0
+    ).scalar()
+    
+    current_billing_period_fees = float(period_fees) if period_fees else 0.0
+    
+    # Zusätzliches Logging für das Ergebnis
+    transaction_count = db.query(models.Transaction).filter(
+        models.Transaction.tenant_id == tenant.id,
+        models.Transaction.date >= period_start,
+        models.Transaction.top_up_fee > 0
+    ).count()
+    print(f"DEBUG [Billing]: Gefundene Transaktionen mit Gebühren: {transaction_count}, Gesamtsumme: {current_billing_period_fees}")
 
     return {
         "exists": True, 
+        "tenant_id": tenant.id,
         "name": tenant.name,
         "subscription_valid": is_valid,
         "subscription_ends_at": tenant.subscription_ends_at,
@@ -429,9 +437,11 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
 
         # NEU: Usage Daten
         "customer_count": customer_count,
+        "max_customers": max_customers,
         "additional_cost_per_customer": additional_cost_per_customer,
         "top_up_fee_percent": top_up_fee_percent,
-        "current_billing_period_fees": current_billing_period_fees
+        "current_billing_period_fees": current_billing_period_fees,
+        "active_addons": tenant.config.get("active_addons", []) if tenant.config else []
     }
 
 # Sicherheit: Nur mit Secret Key ausführbar
@@ -609,7 +619,6 @@ def update_subscription(data: schemas.SubscriptionUpdate, db: Session = Depends(
     
     tenant.plan = data.plan
     tenant.subscription_ends_at = datetime.now(timezone.utc) + timedelta(days=365)
-    tenant.is_active = True
     
     db.commit()
     return {"message": "Subscription updated successfully", "valid_until": tenant.subscription_ends_at}
@@ -697,25 +706,10 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None))
 
     try:
         # --- EVENT HANDLING ---
-        if event['type'] == 'customer.subscription.updated':
-            subscription = event['data']['object']
-            await handle_subscription_update(subscription)
+        # HINWEIS: Subscription-Events werden jetzt primär über den Supabase Edge Function Webhook verarbeitet.
+        # Hier verbleiben nur noch events, die nicht direkt die Abo-Spalten des Tenants betreffen (z.B. Top-ups).
 
-        elif event['type'] == 'customer.subscription.deleted':
-            subscription = event['data']['object']
-            await handle_subscription_deleted(subscription)
-
-        # NEU: Handler für erfolgreiche Zahlungen (Verlängerungen) hinzufügen
-        elif event['type'] == 'invoice.payment_succeeded':
-            invoice = event['data']['object']
-            await handle_invoice_payment_succeeded(invoice)
-
-        elif event['type'] == 'invoice.payment_failed':
-            invoice = event['data']['object']
-            await handle_invoice_payment_failed(invoice)
-
-        # NEU: Handler für erfolgreiche Top-up Zahlungen
-        elif event['type'] == 'payment_intent.succeeded':
+        if event['type'] == 'payment_intent.succeeded':
             intent = event['data']['object']
             if intent.get('metadata', {}).get('type') == 'balance_topup':
                 await handle_payment_intent_succeeded(intent)

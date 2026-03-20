@@ -13,6 +13,77 @@ stripe.api_key = settings.STRIPE_SECRET_KEY
 
 # --- HELPERS ---
 
+def create_or_update_stripe_customer_with_billing(db: Session, tenant: models.Tenant, billing_details, user_email: str = None):
+    """
+    Diese Funktion portiert deine Logik aus CreatorStay:
+    Sie aktualisiert den Stripe Customer mit Adresse und Steuer-ID.
+    """
+    if not tenant.stripe_customer_id:
+        # 1. Neuen Customer erstellen
+        customer_name = billing_details.company_name if billing_details and billing_details.company_name else (billing_details.name if billing_details else tenant.name)
+        customer = stripe.Customer.create(
+            email=user_email or (tenant.users[0].email if tenant.users else None),
+            name=customer_name,
+            address={
+                "line1": billing_details.address_line1 if billing_details else None,
+                "city": billing_details.city if billing_details else None,
+                "postal_code": billing_details.postal_code if billing_details else None,
+                "country": billing_details.country if billing_details else "DE",
+            },
+            metadata={"tenant_id": tenant.id}
+        )
+        tenant.stripe_customer_id = customer.id
+        db.commit()
+    else:
+        # 2. Bestehenden Customer updaten
+        if billing_details:
+            customer_name = billing_details.company_name if billing_details.company_name else billing_details.name
+            stripe.Customer.modify(
+                tenant.stripe_customer_id,
+                name=customer_name,
+                address={
+                    "line1": billing_details.address_line1,
+                    "city": billing_details.city,
+                    "postal_code": billing_details.postal_code,
+                    "country": billing_details.country,
+                }
+            )
+
+    # 3. VAT ID (Steuernummer) an Stripe übergeben
+    if billing_details and billing_details.vat_id:
+        try:
+            # Zuerst alte Tax-IDs löschen (falls sich die VAT geändert hat)
+            existing_tax_ids = stripe.Customer.list_tax_ids(tenant.stripe_customer_id)
+            for tax_id_obj in existing_tax_ids.data:
+                stripe.Customer.delete_tax_id(tenant.stripe_customer_id, tax_id_obj.id)
+            
+            # Neue Tax-ID hinzufügen (eu_vat)
+            stripe.Customer.create_tax_id(
+                tenant.stripe_customer_id,
+                type="eu_vat",
+                value=billing_details.vat_id,
+            )
+        except stripe.error.StripeError as e:
+            print(f"Fehler beim Speichern der VAT ID in Stripe: {e}")
+
+    # 4. In Tenant Config spiegeln
+    if billing_details:
+        current_config = dict(tenant.config) if tenant.config else {}
+        inv_settings = current_config.get("invoice_settings", {})
+        inv_settings["company_name"] = billing_details.company_name
+        inv_settings["account_holder"] = billing_details.name
+        inv_settings["address_line1"] = billing_details.address_line1
+        inv_settings["address_line2"] = f"{billing_details.postal_code} {billing_details.city}"
+        if billing_details.vat_id:
+            inv_settings["vat_id"] = billing_details.vat_id
+
+        current_config["invoice_settings"] = inv_settings
+        tenant.config = current_config
+        flag_modified(tenant, "config")
+        db.commit()
+
+    return tenant.stripe_customer_id
+
 def safe_get(obj, key, default=None):
     """Universeller Getter für Objekte, Dicts und Stripe-Responses."""
     try:
@@ -73,119 +144,67 @@ def extract_client_secret(obj):
         print(f"Error extracting client secret: {e}")
     return None
 
+def get_or_create_meters():
+    """
+    Sucht in Stripe nach den benötigten Billing V2 Meters.
+    Falls sie nicht existieren, werden sie vollautomatisch angelegt.
+    Gibt die IDs der beiden Meters (Users, Fees) zurück.
+    """
+    try:
+        # Hole alle aktiven Meters aus Stripe
+        existing_meters = stripe.billing.Meter.list(limit=100)
+        
+        users_meter_id = None
+        fees_meter_id = None
+        
+        # Prüfen, ob unsere Event-Namen schon existieren
+        for meter in existing_meters.data:
+            if meter.event_name == "pfotencard_extra_users":
+                users_meter_id = meter.id
+            elif meter.event_name == "pfotencard_tx_fees":
+                fees_meter_id = meter.id
+                
+        # Wenn "Zusatzkunden" Meter fehlt -> Automatisch anlegen
+        if not users_meter_id:
+            print("Erstelle Stripe Meter für Zusatzkunden...")
+            users_meter = stripe.billing.Meter.create(
+                display_name="Pfotencard Zusatzkunden",
+                event_name="pfotencard_extra_users",
+                default_aggregation={"formula": "max"} # Nimmt den höchsten Wert des Monats
+            )
+            users_meter_id = users_meter.id
+            
+        # Wenn "Gebühren" Meter fehlt -> Automatisch anlegen
+        if not fees_meter_id:
+            print("Erstelle Stripe Meter für Transaktionsgebühren...")
+            fees_meter = stripe.billing.Meter.create(
+                display_name="Pfotencard Transaktionsgebühren",
+                event_name="pfotencard_tx_fees",
+                default_aggregation={"formula": "sum"} # Summiert alle gemeldeten Cents des Monats
+            )
+            fees_meter_id = fees_meter.id
+            
+        return users_meter_id, fees_meter_id
+        
+    except Exception as e:
+        print(f"Fehler beim Abrufen/Erstellen der Stripe Meters: {e}")
+        raise HTTPException(status_code=500, detail="Konnte Stripe Meters nicht initialisieren.")
+
 # --- CORE SYNC ---
 
 def update_tenant_from_subscription(db: Session, tenant: models.Tenant, subscription):
-    """Synchronisiert DB mit Stripe."""
+    """
+    Synchronisiert DB mit Stripe (HINWEIS: Jetzt deaktiviert zugunsten des Webhooks).
+    Alle Abo-relevanten Änderungen in der 'tenants' Tabelle erfolgen jetzt primär
+    über die Supabase Edge Function (Webhook).
+    """
     try:
         sub_id = safe_get(subscription, 'id')
         status = safe_get(subscription, 'status')
-        metadata = safe_get(subscription, 'metadata') or {}
-
-        # --- Abgebrochene oder abgelaufene Abos direkt sperren ---
-        if status in ['canceled', 'incomplete_expired', 'unpaid']:
-            ended_at = safe_get(subscription, 'ended_at') or safe_get(subscription, 'canceled_at')
-
-            tenant.stripe_subscription_id = sub_id
-            tenant.stripe_subscription_status = status
-            tenant.plan = 'starter'
-            tenant.cancel_at_period_end = False
-
-            if ended_at:
-                tenant.subscription_ends_at = datetime.fromtimestamp(ended_at, tz=timezone.utc)
-            else:
-                tenant.subscription_ends_at = datetime.now(timezone.utc)
-
-            tenant.next_payment_amount = 0.0
-            tenant.next_payment_date = None
-            tenant.upcoming_plan = None
-
-            db.add(tenant)
-            db.commit()
-            db.refresh(tenant)
-            print(f"✅ Tenant synced (CANCELED/EXPIRED). Reverted to starter.")
-            return
-
-        # 1. ENDDATUM
-        current_period_end = safe_get(subscription, 'current_period_end')
-        if not current_period_end:
-            items_data = get_nested(subscription, 'items', 'data')
-            if items_data and len(items_data) > 0:
-                current_period_end = safe_get(items_data[0], 'current_period_end')
-
-        trial_end = safe_get(subscription, 'trial_end')
-        cancel_at = safe_get(subscription, 'cancel_at')
-
-        tenant.stripe_subscription_id = sub_id
-        tenant.stripe_subscription_status = status
-
-        stripe_cancel_flag = safe_get(subscription, 'cancel_at_period_end')
-        if stripe_cancel_flag or (cancel_at is not None):
-            tenant.cancel_at_period_end = True
-            final_end_date = cancel_at if cancel_at else current_period_end
-            if final_end_date:
-                tenant.subscription_ends_at = datetime.fromtimestamp(final_end_date, tz=timezone.utc)
-        else:
-            tenant.cancel_at_period_end = False
-            if status == 'trialing' and trial_end:
-                tenant.subscription_ends_at = datetime.fromtimestamp(trial_end, tz=timezone.utc)
-            elif status == 'active' and current_period_end:
-                tenant.subscription_ends_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
-
-        # 2. PLAN & UPCOMING (Jetzt aus den Metadaten!)
-        if status in ['active', 'trialing']:
-            if safe_get(metadata, 'plan_name'):
-                tenant.plan = safe_get(metadata, 'plan_name')
-
-            upcoming_plan = safe_get(metadata, 'upcoming_plan')
-            if upcoming_plan:
-                tenant.upcoming_plan = upcoming_plan
-            else:
-                tenant.upcoming_plan = None
-
-            tenant.is_active = True
-
-        # 3. PREIS VORSCHAU (Ziel-Plan Preis)
-        target_plan_name = tenant.upcoming_plan if tenant.upcoming_plan else tenant.plan
-
-        # --- NEU: Gebühren vom Paket synchronisieren ---
-        package = db.query(models.SubscriptionPackage).filter(
-            models.SubscriptionPackage.plan_name == target_plan_name
-        ).first()
-        if package:
-            tenant.top_up_fee_percent = package.top_up_fee_percent
-        # -----------------------------------------------
-
-        # --- FIX: Cycle aus Metadata statt raten ---
-        target_cycle = safe_get(metadata, 'upcoming_cycle') if tenant.upcoming_plan else safe_get(metadata, 'cycle')
-
-        # Fallback, falls Metadaten fehlen (z.B. bei alten Abos)
-        if not target_cycle:
-            target_cycle = "monthly"
-            try:
-                items_data = get_nested(subscription, 'items', 'data')
-                if items_data:
-                    interval = get_nested(items_data[0], 'plan', 'interval')
-                    if interval == 'year': target_cycle = "yearly"
-            except:
-                pass
-
-        if not tenant.cancel_at_period_end and status not in ['canceled', 'incomplete_expired', 'unpaid', 'incomplete']:
-            price_conf = get_plan_config(target_plan_name, target_cycle)
-            if price_conf:
-                tenant.next_payment_amount = price_conf["amount"]
-            else:
-                tenant.next_payment_amount = 0.0
-            tenant.next_payment_date = tenant.subscription_ends_at
-        else:
-            tenant.next_payment_amount = 0.0
-            tenant.next_payment_date = None
-            tenant.upcoming_plan = None
-
-        db.add(tenant)
-        db.commit()
-        db.refresh(tenant)
-        print(f"✅ Tenant synced. Plan: {tenant.plan}, Next: {tenant.next_payment_amount}€")
+        print(f"ℹ️ Manual sync called for tenant {tenant.id} (Status: {status}). updates are handled by Webhook.")
+        return
+    except Exception as e:
+        print(f"Error in update_tenant_from_subscription placeholder: {e}")
 
     except Exception as e:
         print(f"❌ Error syncing tenant DB: {e}")
@@ -259,51 +278,8 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             if addon.stripe_price_id_fees:
                 subscription_items.append({"price": addon.stripe_price_id_fees})
 
-    if not tenant.stripe_customer_id:
-        try:
-            c = stripe.Customer.create(email=user_email, name=tenant.name, metadata={"tenant_id": tenant.id})
-            tenant.stripe_customer_id = c.id
-            db.commit()
-        except Exception as e:
-            raise HTTPException(400, f"Stripe Error: {e}")
-
-    customer_id = tenant.stripe_customer_id
-
-    if billing_details:
-        try:
-            customer_name = billing_details.company_name if billing_details.company_name else billing_details.name
-            stripe.Customer.modify(
-                customer_id,
-                name=customer_name,
-                address={
-                    "line1": billing_details.address_line1,
-                    "postal_code": billing_details.postal_code,
-                    "city": billing_details.city,
-                    "country": billing_details.country,
-                }
-            )
-
-            if billing_details.vat_id:
-                existing_tax_ids = stripe.Customer.list_tax_ids(customer_id)
-                for tax_id_obj in existing_tax_ids.data:
-                    stripe.Customer.delete_tax_id(customer_id, tax_id_obj.id)
-                stripe.Customer.create_tax_id(customer_id, type="eu_vat", value=billing_details.vat_id)
-
-            current_config = dict(tenant.config) if tenant.config else {}
-            inv_settings = current_config.get("invoice_settings", {})
-            inv_settings["company_name"] = billing_details.company_name
-            inv_settings["account_holder"] = billing_details.name
-            inv_settings["address_line1"] = billing_details.address_line1
-            inv_settings["address_line2"] = f"{billing_details.postal_code} {billing_details.city}"
-            if billing_details.vat_id:
-                inv_settings["vat_id"] = billing_details.vat_id
-
-            current_config["invoice_settings"] = inv_settings
-            tenant.config = current_config
-            flag_modified(tenant, "config")
-            db.commit()
-        except Exception as e:
-            raise HTTPException(400, f"Fehler bei Rechnungsdaten: {str(e)}")
+    # 2. Stripe Customer sicherstellen & mit Billing Details synchronisieren
+    customer_id = create_or_update_stripe_customer_with_billing(db, tenant, billing_details, user_email)
 
     active_subscription = None
     if tenant.stripe_subscription_id:
@@ -315,7 +291,7 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
             sub_status = safe_get(active_subscription, 'status')
 
             if sub_status in ['canceled', 'incomplete_expired']:
-                update_tenant_from_subscription(db, tenant, active_subscription)
+                # update_tenant_from_subscription(db, tenant, active_subscription)
                 active_subscription = None
 
             elif sub_status in ['incomplete', 'unpaid'] and get_nested(active_subscription, 'items', 'data', 0, 'price',
@@ -370,9 +346,9 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                         stripe.SubscriptionSchedule.release(sched_id)
                     except:
                         pass
-                    tenant.upcoming_plan = None
-                    tenant.next_payment_amount = target_amount
-                    db.commit()
+                    # tenant.upcoming_plan = None
+                    # tenant.next_payment_amount = target_amount
+                    # db.commit()
                     return {"status": "updated", "message": "Wechsel abgebrochen, Plan beibehalten."}
                 return {"status": "updated", "message": "Plan already active"}
 
@@ -431,12 +407,12 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     cancel_at_period_end=False
                 )
 
-                tenant.upcoming_plan = None
-                tenant.plan = plan
-                update_tenant_from_subscription(db, tenant, updated_sub_step1)
-
-                tenant.next_payment_amount = target_amount
-                db.commit()
+                # Subscription updates are handled by Supabase Webhook
+                # tenant.upcoming_plan = None
+                # tenant.plan = plan
+                # update_tenant_from_subscription(db, tenant, updated_sub_step1)
+                # tenant.next_payment_amount = target_amount
+                # db.commit()
 
                 inv = safe_get(updated_sub_step1, 'latest_invoice')
                 amount_due = safe_get(inv, 'amount_due', 0) / 100.0
@@ -520,11 +496,9 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                               "upcoming_plan": plan, "upcoming_cycle": cycle}
                 )
 
-                tenant.upcoming_plan = plan
-                # FIX: Wir synchronisieren den Tenant aus der aktualisierten Subscription,
-                # um sicherzustellen, dass alle Metadaten korrekt verarbeitet werden.
-                update_tenant_from_subscription(db, tenant, updated_sub)
-                db.commit()
+                # tenant.upcoming_plan = plan
+                # update_tenant_from_subscription(db, tenant, updated_sub)
+                # db.commit()
 
                 return {"subscriptionId": sub_id, "status": "success", "message": "Downgrade vorgemerkt."}
 
@@ -608,6 +582,37 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
 
 # ... (Restliche Funktionen) ...
 
+def get_saved_payment_methods(db: Session, tenant_id: int):
+    """
+    Gibt die gespeicherten Zahlungsmethoden (Kreditkarten) des Stripe-Customers
+    für den angegebenen Tenant zurück. Falls kein Customer existiert, wird eine
+    leere Liste zurückgegeben.
+    """
+    tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
+    if not tenant or not tenant.stripe_customer_id:
+        return []
+    try:
+        payment_methods = stripe.PaymentMethod.list(
+            customer=tenant.stripe_customer_id,
+            type="card"
+        )
+        methods = []
+        for pm in payment_methods.data:
+            methods.append({
+                "id": pm.id,
+                "type": pm.type,
+                "card": {
+                    "brand": safe_get(pm, 'card', {}).get('brand') if hasattr(pm, 'card') else None,
+                    "last4": safe_get(pm, 'card', {}).get('last4') if hasattr(pm, 'card') else None,
+                    "expMonth": safe_get(pm, 'card', {}).get('exp_month') if hasattr(pm, 'card') else None,
+                    "expYear": safe_get(pm, 'card', {}).get('exp_year') if hasattr(pm, 'card') else None,
+                }
+            })
+        return methods
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Zahlungsmethoden: {e}")
+        return []
+
 def cancel_subscription(db: Session, tenant_id: int):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant or not tenant.stripe_subscription_id:
@@ -621,9 +626,9 @@ def cancel_subscription(db: Session, tenant_id: int):
             pass
 
         sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=True)
-        tenant.upcoming_plan = None
-        tenant.next_payment_amount = 0.0
-        update_tenant_from_subscription(db, tenant, sub)
+        # tenant.upcoming_plan = None
+        # tenant.next_payment_amount = 0.0
+        # update_tenant_from_subscription(db, tenant, sub)
         return {"message": "Cancelled"}
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -645,7 +650,7 @@ def reactivate_subscription(db: Session, tenant_id: int):
             raise HTTPException(400, "Subscription already canceled")
         # Reaktivieren
         sub = stripe.Subscription.modify(tenant.stripe_subscription_id, cancel_at_period_end=False)
-        update_tenant_from_subscription(db, tenant, sub)
+        # update_tenant_from_subscription(db, tenant, sub)
         return {"message": "Reactivated"}
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -673,21 +678,52 @@ def get_invoices(db: Session, tenant_id: int, limit: int = 100):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant or not tenant.stripe_customer_id: return []
     try:
-        # Load all invoices (Stripe limit is 100 per call, if we need more we would need pagination, but 100 is better than 12)
-        invoices = stripe.Invoice.list(customer=tenant.stripe_customer_id, limit=limit)
+        # Load invoices using pagination to get ALL invoices if they exceed 100
+        # Stripe limit is 100 per call
+        all_invoices = []
+        last_id = None
+        
+        while True:
+            params = {
+                "customer": tenant.stripe_customer_id,
+                "limit": 100
+            }
+            if last_id:
+                params["starting_after"] = last_id
+                
+            invoices = stripe.Invoice.list(**params)
+            all_invoices.extend(invoices.data)
+            
+            if not invoices.has_more:
+                break
+            last_id = invoices.data[-1].id
+
         results = []
-        for i in invoices.data:
-            results.append({
-                "id": i.id,
-                "number": i.number,
-                "created": datetime.fromtimestamp(i.created, tz=timezone.utc),
-                "amount": i.total / 100.0,
-                "status": i.status,
-                "pdf_url": i.invoice_pdf,
-                "hosted_url": i.hosted_invoice_url 
-            })
+        for i in all_invoices:
+            try:
+                # Ensure we have a valid timestamp
+                created_ts = i.created
+                if created_ts is None:
+                    print(f"Warning: Invoice {i.id} has no creation date")
+                    continue
+                
+                results.append({
+                    "id": i.id,
+                    "number": i.number,
+                    "created": datetime.fromtimestamp(created_ts, tz=timezone.utc),
+                    "amount": (i.total or 0) / 100.0,
+                    "status": i.status,
+                    "pdf_url": i.invoice_pdf,
+                    "hosted_url": i.hosted_invoice_url 
+                })
+            except Exception as row_error:
+                print(f"Error processing invoice row {getattr(i, 'id', 'unknown')}: {row_error}")
+                continue
+
         return results
-    except: return []
+    except Exception as e:
+        print(f"Error fetching invoices for tenant {tenant_id}: {e}")
+        return []
 
 def create_topup_intent(db: Session, user_id: int, tenant_id: int, amount: float, bonus: float):
     """

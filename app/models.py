@@ -1,5 +1,5 @@
 # app/models.py
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Date, Boolean, UniqueConstraint, Table
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Date, Boolean, UniqueConstraint, Table, Text
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -31,6 +31,11 @@ class Tenant(Base):
     stripe_subscription_status = Column(String(50), nullable=True) # active, trialing, past_due, canceled, etc.
     cancel_at_period_end = Column(Boolean, default=False) # True wenn gekündigt zum Laufzeitende
     
+    # --- NEU: Erweiterte Stripe Felder ---
+    trial_end = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    # --------------------------------------
+    
     # --- NEU: Datenschutz / AVV Audit Log ---
     avv_accepted_at = Column(DateTime(timezone=True), nullable=True)
     avv_accepted_version = Column(String(50), nullable=True) # z.B. "1.0"
@@ -47,6 +52,14 @@ class Tenant(Base):
     top_up_fee_percent = Column(Float, default=0.0) # Gebühr bei selbstständiger Aufladung (Prozent)
     # -----------------------------------------------------------------
 
+    # --- NEU: Adressdaten für Rechnungen ---
+    street = Column(String(255), nullable=True)
+    city = Column(String(255), nullable=True)
+    postcode = Column(String(50), nullable=True)
+    country = Column(String(255), nullable=True)
+    vat_id = Column(String(100), nullable=True)
+    # ---------------------------------------
+
     # Beziehungen (Ein Tenant hat viele...)
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
     dogs = relationship("Dog", back_populates="tenant", cascade="all, delete-orphan")
@@ -60,6 +73,10 @@ class Tenant(Base):
     exercise_templates = relationship("ExerciseTemplate", back_populates="tenant", cascade="all, delete-orphan")
     homework_assignments = relationship("HomeworkAssignment", back_populates="tenant", cascade="all, delete-orphan")
     certificate_templates = relationship("CertificateTemplate", back_populates="tenant", cascade="all, delete-orphan")
+    
+    # Historie & Promos
+    subscription_history = relationship("SubscriptionHistory", back_populates="tenant", cascade="all, delete-orphan")
+    promo_redemptions = relationship("PromoCodeRedemption", back_populates="tenant", cascade="all, delete-orphan")
 
 
 # --- 1b. ABOS & PAKETE ---
@@ -96,6 +113,49 @@ class SubscriptionPackage(Base):
     stripe_price_id_base_yearly = Column(String(255), nullable=True)  # NEU
     stripe_price_id_users = Column(String(255), nullable=True)
     stripe_price_id_fees = Column(String(255), nullable=True)
+
+
+# --- 1c. ABO HISTORIE & PROMOS ---
+class SubscriptionHistory(Base):
+    __tablename__ = 'subscription_history'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
+    event_type = Column(String(255), nullable=False)
+    source = Column(String(255), default='stripe')
+    description = Column(Text, nullable=True)
+    previous_plan = Column(String(100), nullable=True)
+    new_plan = Column(String(100), nullable=True)
+    previous_status = Column(String(100), nullable=True)
+    new_status = Column(String(100), nullable=True)
+    details = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    tenant = relationship("Tenant", back_populates="subscription_history")
+
+class PromoCode(Base):
+    __tablename__ = 'promo_codes'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    stripe_promotion_code_id = Column(String(255), unique=True, nullable=False)
+    current_uses = Column(Integer, default=0)
+    duration_months = Column(Integer, nullable=True)
+    
+    redemptions = relationship("PromoCodeRedemption", back_populates="promo_code")
+
+class PromoCodeRedemption(Base):
+    __tablename__ = 'promo_code_redemptions'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    promo_code_id = Column(Integer, ForeignKey('promo_codes.id', ondelete="CASCADE"), nullable=False)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
+    applied_months = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    __table_args__ = (UniqueConstraint('promo_code_id', 'tenant_id', name='uq_promo_redemption'),)
+
+    promo_code = relationship("PromoCode", back_populates="redemptions")
+    tenant = relationship("Tenant", back_populates="promo_redemptions")
 
 
 # --- 2. KONFIGURATION (Leistungen & Level) ---

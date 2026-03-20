@@ -73,9 +73,16 @@ class TenantBase(BaseModel):
     name: str
     subdomain: str
     support_email: Optional[str] = None
-    plan: str = "starter"
+    plan: Optional[str] = "starter"
     is_active: bool = True
     config: TenantConfig = TenantConfig()
+
+    # Adressdaten (flach in DB, für Checkout etc.)
+    street: Optional[str] = None
+    city: Optional[str] = None
+    postcode: Optional[str] = None
+    country: Optional[str] = None
+    vat_id: Optional[str] = None
 
 class TenantCreate(TenantBase):
     pass
@@ -98,6 +105,7 @@ class Tenant(TenantBase):
 
 class TenantStatus(BaseModel):
     exists: bool
+    tenant_id: Optional[int] = None
     name: Optional[str] = None
     subscription_valid: bool = False
     subscription_ends_at: Optional[datetime] = None
@@ -124,9 +132,11 @@ class TenantStatus(BaseModel):
     
     # NEU: Usage & Limits
     customer_count: int = 0
+    max_customers: int = 0
     additional_cost_per_customer: float = 0.0
     top_up_fee_percent: float = 0.0
     current_billing_period_fees: float = 0.0
+    active_addons: List[str] = []
 
 # --- 1b. ABOS & PAKETE ---
 class SubscriptionPackageBase(BaseModel):
