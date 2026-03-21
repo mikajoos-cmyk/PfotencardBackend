@@ -57,6 +57,59 @@ async function determineAddons(supabase: any, items: Stripe.SubscriptionItem[]):
   return addons;
 }
 
+/**
+ * Synchronisiert die aktiven Addons eines Tenants in der dedizierten Tabelle.
+ */
+async function syncTenantAddons(supabase: any, tenantId: number, addonNames: string[]) {
+  log("Syncing addons for tenant", { tenantId, addonNames });
+  
+  if (!addonNames || addonNames.length === 0) {
+    const { error: delError } = await supabase.from('tenant_addons').delete().eq('tenant_id', tenantId);
+    if (delError) log("ERROR deleting all addons", { error: delError.message });
+    return;
+  }
+  
+  // 1. IDs der gewünschten Addons holen
+  const { data: packages, error: pkgError } = await supabase
+    .from('subscription_packages')
+    .select('id, plan_name')
+    .in('plan_name', addonNames)
+    .eq('package_type', 'addon');
+    
+  if (pkgError) log("ERROR fetching addon packages", { error: pkgError.message });
+  if (!packages || packages.length === 0) return;
+
+  const targetAddonIds = packages.map((p: any) => p.id);
+
+  // 2. Aktuelle Addons in der DB holen
+  const { data: currentAddons } = await supabase
+    .from('tenant_addons')
+    .select('addon_id')
+    .eq('tenant_id', tenantId);
+
+  const currentAddonIds = currentAddons?.map((a: any) => a.addon_id) || [];
+
+  // 3. Zu löschende Addons finding (die nicht mehr in Stripe sind)
+  const idsToDelete = currentAddonIds.filter(id => !targetAddonIds.includes(id));
+  if (idsToDelete.length > 0) {
+    await supabase.from('tenant_addons').delete().eq('tenant_id', tenantId).in('addon_id', idsToDelete);
+    log("Removed addons no longer in Stripe", { tenantId, idsToDelete });
+  }
+
+  // 4. Neu hinzuzufügende Addons finding
+  const idsToAdd = targetAddonIds.filter(id => !currentAddonIds.includes(id));
+  if (idsToAdd.length > 0) {
+    const inserts = idsToAdd.map(id => ({
+      tenant_id: tenantId,
+      addon_id: id,
+      removes_at_period_end: false
+    }));
+    const { error: insError } = await supabase.from('tenant_addons').insert(inserts);
+    if (insError) log("ERROR inserting new addons", { error: insError.message });
+    log("Added new addons from Stripe", { tenantId, idsToAdd });
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -166,6 +219,7 @@ Deno.serve(async (req) => {
 
         if (dbTenant) {
           log("Tenant updated via checkout", { tenantId: dbTenant.id });
+          await syncTenantAddons(supabaseAdmin, dbTenant.id, activeAddons);
           // Log to history
           await supabaseAdmin.from('subscription_history').insert({
             tenant_id: dbTenant.id,
@@ -209,7 +263,7 @@ Deno.serve(async (req) => {
         const sub = event.data.object as Stripe.Subscription;
         const customerId = typeof sub.customer === 'string' ? sub.customer : sub.customer.id;
         const tenantId = sub.metadata?.tenant_id;
-        
+
         // Den Plan bestimmen: Alle Items durchsuchen, ob eines ein Basis-Paket in unserer DB ist.
         let plan: string | null = null;
         for (const item of sub.items.data) {
@@ -219,24 +273,41 @@ Deno.serve(async (req) => {
             break;
           }
         }
-        
+
         // Fallback auf Metadaten, falls kein Basis-Paket via ID gefunden wurde
         if (!plan) {
           plan = sub.metadata?.plan || sub.metadata?.plan_name || null;
         }
 
-        log(event.type, { customerId, subscriptionId: sub.id, status: sub.status });
+        log(event.type, { customerId, subscriptionId: sub.id, status: sub.status, plan });
 
         const periodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null;
         const trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null;
 
         const activeAddons = await determineAddons(supabaseAdmin, sub.items.data);
-        const { data: currentTenantConfig } = await (tenantId 
-          ? supabaseAdmin.from('tenants').select('config').eq('id', tenantId).maybeSingle()
-          : supabaseAdmin.from('tenants').select('config').eq('stripe_customer_id', customerId).maybeSingle());
-        
+        const { data: currentTenantConfig } = await (tenantId
+          ? supabaseAdmin.from('tenants').select('config, upcoming_plan, plan, upcoming_addons').eq('id', tenantId).maybeSingle()
+          : supabaseAdmin.from('tenants').select('config, upcoming_plan, plan, upcoming_addons').eq('stripe_customer_id', customerId).maybeSingle());
+
         const config = currentTenantConfig?.config || {};
-        config['active_addons'] = activeAddons;
+
+        // Prüfen ob ein Wechsel jetzt aktiv wird
+        // Dies passiert, wenn: ein Wechsel vorgemerkt war UND der neue Plan/Addons aus Stripe mit der Vormerkung übereinstimmen
+        const wasChangePending = !!currentTenantConfig?.upcoming_plan || !!currentTenantConfig?.upcoming_addons;
+        
+        // Wir gehen davon aus, dass wenn ein Change pending war und wir hier ein Update bekommen, 
+        // und die Stripe Items (activeAddons) sich geändert haben oder der Plan stimmt, dass der Downgrade aktiv ist.
+        const downgradeNowActive = wasChangePending && (
+          (currentTenantConfig.upcoming_plan && plan === currentTenantConfig.upcoming_plan) ||
+          (!currentTenantConfig.upcoming_plan && JSON.stringify(activeAddons.sort()) === JSON.stringify((currentTenantConfig.upcoming_addons || []).sort()))
+        );
+
+        if (downgradeNowActive) {
+          log("Scheduled change now active", { newPlan: plan, newAddons: activeAddons });
+          config['active_addons'] = activeAddons;
+        } else {
+          config['active_addons'] = activeAddons;
+        }
 
         const updateData: any = {
           stripe_customer_id: customerId,
@@ -258,13 +329,23 @@ Deno.serve(async (req) => {
         if (plan) {
           updateData.plan = plan;
         }
-        if (sub.metadata?.upcoming_plan) {
-          updateData.upcoming_plan = sub.metadata.upcoming_plan;
-        }
-        if (sub.metadata?.upcoming_addons) {
-          try {
-            config['upcoming_addons'] = JSON.parse(sub.metadata.upcoming_addons);
-          } catch (e) { log("Error parsing upcoming_addons from metadata", { error: String(e) }); }
+
+        // Wenn Downgrade jetzt aktiv wird, upcoming-Felder löschen
+        if (downgradeNowActive) {
+          updateData.upcoming_plan = null;
+          updateData.upcoming_cycle = null;
+          updateData.upcoming_addons = null;
+          log("Clearing upcoming fields as downgrade is now active");
+        } else {
+          // Ansonsten upcoming aus Metadata übernehmen
+          if (sub.metadata?.upcoming_plan) {
+            updateData.upcoming_plan = sub.metadata.upcoming_plan;
+          }
+          if (sub.metadata?.upcoming_addons) {
+            try {
+              updateData.upcoming_addons = JSON.parse(sub.metadata.upcoming_addons);
+            } catch (e) { log("Error parsing upcoming_addons from metadata", { error: String(e) }); }
+          }
         }
 
         // Handle cancellation state
@@ -286,12 +367,19 @@ Deno.serve(async (req) => {
         const { error } = await query;
         if (error) log("ERROR updating tenant on sub update", { error: error.message });
 
+        // Synchronize addons in new table
+        const { data: updatedTenant } = await (tenantId 
+          ? supabaseAdmin.from('tenants').select('id').eq('id', tenantId).maybeSingle()
+          : supabaseAdmin.from('tenants').select('id').eq('stripe_customer_id', customerId).maybeSingle());
+          
+        if (updatedTenant) {
+          await syncTenantAddons(supabaseAdmin, updatedTenant.id, activeAddons);
+        }
+
         if (tenantBefore && (tenantBefore.stripe_subscription_status !== sub.status || (plan && tenantBefore.plan !== plan))) {
           // If plan changed real, clear upcoming fields
           if (plan && tenantBefore.plan !== plan) {
-             const newConfig = tenantBefore.config || {};
-             delete newConfig['upcoming_addons'];
-             await supabaseAdmin.from('tenants').update({ upcoming_plan: null, config: newConfig }).eq('id', tenantBefore.id);
+             await supabaseAdmin.from('tenants').update({ upcoming_plan: null, upcoming_addons: null }).eq('id', tenantBefore.id);
           }
 
           await supabaseAdmin.from('subscription_history').insert({
@@ -319,7 +407,8 @@ Deno.serve(async (req) => {
 
         const updateData = {
           stripe_subscription_status: 'cancelled',
-          plan: 'starter',
+          stripe_subscription_id: null,
+          plan: null,
           upcoming_plan: null,
           subscription_ends_at: sub.ended_at ? new Date(sub.ended_at * 1000).toISOString() : new Date().toISOString(),
           cancelled_at: sub.canceled_at ? new Date(sub.canceled_at * 1000).toISOString() : new Date().toISOString(),
@@ -334,13 +423,14 @@ Deno.serve(async (req) => {
         if (error) log("ERROR on sub deletion", { error: error.message });
 
         if (tenantBefore) {
+          await syncTenantAddons(supabaseAdmin, tenantBefore.id, []);
           await supabaseAdmin.from('subscription_history').insert({
             tenant_id: tenantBefore.id,
             event_type: 'subscription_deleted',
             source: 'stripe',
-            description: 'Abo bei Stripe endgültig beendet. Zurück auf Starter-Plan.',
+            description: 'Abo bei Stripe endgültig beendet.',
             previous_plan: tenantBefore.plan,
-            new_plan: 'starter',
+            new_plan: null,
             previous_status: tenantBefore.stripe_subscription_status,
             new_status: 'cancelled',
           });

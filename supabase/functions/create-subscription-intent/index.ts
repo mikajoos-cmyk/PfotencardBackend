@@ -290,32 +290,191 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 await syncTaxId(stripe, customerId, customerVatId);
             }
 
-            const allSubs = await stripe.subscriptions.list({ customer: customerId, status: 'active', limit: 1 });
-            const activeSub = allSubs.data[0];
+            // Alle Abos abrufen, um zu prüfen, ob ein aktives (oder trialing, past_due) besteht
+            const allSubs = await stripe.subscriptions.list({ customer: customerId, limit: 1 });
+            const maybeSub = allSubs.data[0];
+            const activeSub = (maybeSub && !['canceled', 'incomplete_expired'].includes(maybeSub.status)) ? maybeSub : null;
 
             let finalSubscriptionId;
             let finalStatus;
 
             if (activeSub) {
-                // Alle alten Items löschen und neue hinzufügen
-                const itemsToUpdate = activeSub.items.data.map((item: any) => ({
-                    id: item.id,
-                    deleted: true
-                })).concat(subscriptionItems as any);
+                console.log("🔍 [create-subscription-intent] Checking for Upgrade/Downgrade...");
 
-                const updateParams: Stripe.SubscriptionUpdateParams = {
-                    items: itemsToUpdate,
-                    default_payment_method: defaultPaymentMethod,
-                    proration_behavior: 'always_invoice',
-                    automatic_tax: { enabled: true },
-                    metadata: { tenant_id: tenant.id, plan }
-                };
-                if (promoCodeId) {
-                    updateParams.discounts = [{ promotion_code: promoCodeId }];
+                // DOWNGRADE-ERKENNUNG: Prüfen ob neuer Preis niedriger ist als aktueller
+                // Packages abrufen um Preise zu vergleichen
+                const { data: allPackages } = await supabaseAdmin
+                    .from('subscription_packages')
+                    .select('plan_name, price_monthly, price_yearly, package_type');
+
+                const currentPlan = tenant.plan;
+                const currentCycleFromMeta = activeSub.metadata?.cycle || 'monthly';
+
+                // Aktuelle und neue Preise berechnen
+                const currentBasePkg = allPackages?.find((p: any) => p.plan_name === currentPlan && p.package_type === 'base');
+                const newBasePkg = allPackages?.find((p: any) => p.plan_name === plan && p.package_type === 'base');
+
+                const currentBasePrice = currentCycleFromMeta === 'yearly' ? (currentBasePkg?.price_yearly || 0) : (currentBasePkg?.price_monthly || 0);
+                const newBasePrice = cycle === 'yearly' ? (newBasePkg?.price_yearly || 0) : (newBasePkg?.price_monthly || 0);
+
+                // Add-ons berücksichtigen
+                let currentAddons: string[] = [];
+                if (tenant.config) {
+                    if (typeof tenant.config === 'object') {
+                        currentAddons = tenant.config.active_addons || [];
+                    } else if (typeof tenant.config === 'string') {
+                        try {
+                            const parsed = JSON.parse(tenant.config);
+                            currentAddons = parsed.active_addons || [];
+                        } catch (e) {
+                            console.warn("Could not parse tenant.config");
+                        }
+                    }
                 }
-                const updatedSub = await stripe.subscriptions.update(activeSub.id, updateParams);
-                finalSubscriptionId = updatedSub.id;
-                finalStatus = updatedSub.status;
+
+                let currentAddonsPrice = 0;
+                if (currentAddons.length > 0) {
+                    const currentAddonPkgs = allPackages?.filter((p: any) => currentAddons.includes(p.plan_name) && p.package_type === 'addon') || [];
+                    currentAddonsPrice = currentAddonPkgs.reduce((sum: number, pkg: any) => {
+                        return sum + (currentCycleFromMeta === 'yearly' ? (pkg.price_yearly || 0) : (pkg.price_monthly || 0));
+                    }, 0);
+                }
+
+                let newAddonsPrice = 0;
+                if (addons && addons.length > 0) {
+                    const newAddonPkgs = allPackages?.filter((p: any) => addons.includes(p.plan_name) && p.package_type === 'addon') || [];
+                    newAddonsPrice = newAddonPkgs.reduce((sum: number, pkg: any) => {
+                        return sum + (cycle === 'yearly' ? (pkg.price_yearly || 0) : (pkg.price_monthly || 0));
+                    }, 0);
+                }
+
+                const currentTotalPrice = currentBasePrice + currentAddonsPrice;
+                const newTotalPrice = newBasePrice + newAddonsPrice;
+
+                console.log("📊 Price comparison:", {
+                    currentPlan, currentBasePrice, currentAddonsPrice, currentTotalPrice,
+                    newPlan: plan, newBasePrice, newAddonsPrice, newTotalPrice
+                });
+
+                // Downgrade wenn neuer Preis niedriger oder Add-ons entfernt werden
+                const isDowngrade = newTotalPrice < currentTotalPrice;
+                const addonsRemoved = currentAddons.some((addon: string) => !(addons || []).includes(addon));
+
+                console.log("📋 Decision:", { isDowngrade, addonsRemoved });
+
+                let prorationBehavior: 'always_invoice' | 'none' = 'always_invoice';
+
+                if (isDowngrade || addonsRemoved) {
+                    prorationBehavior = 'none';
+                    console.log("⚠️ DOWNGRADE DETECTED - Using subscription schedule");
+
+                    // DOWNGRADE via Subscription Schedule
+                    let schedId = typeof activeSub.schedule === 'string' ? activeSub.schedule : activeSub.schedule?.id;
+
+                    if (!schedId) {
+                        const schedule = await stripe.subscriptionSchedules.create({ from_subscription: activeSub.id });
+                        schedId = schedule.id;
+                    }
+
+                    const scheduleObj = await stripe.subscriptionSchedules.retrieve(schedId);
+                    const periodEndTs = activeSub.current_period_end;
+
+                    // Für metered prices dürfen wir keine quantity setzen
+                    // Aktuelle Items: Price-Infos aus activeSub nutzen (die haben bereits price.recurring.usage_type)
+                    const currentPhaseItems = activeSub.items.data.map((item: any) => {
+                        const baseItem: any = { price: item.price.id };
+                        // Nur quantity setzen wenn es KEIN metered price ist
+                        if (item.price.recurring?.usage_type !== 'metered') {
+                            baseItem.quantity = 1;
+                        }
+                        return baseItem;
+                    });
+
+                    // Neue Items: Wir müssen die Prices abrufen um usage_type zu prüfen
+                    const newPhaseItems = await Promise.all(
+                        subscriptionItems.map(async (item: any) => {
+                            const priceObj = await stripe.prices.retrieve(item.price);
+                            const baseItem: any = { price: item.price };
+                            // Nur quantity setzen wenn es KEIN metered price ist
+                            if (priceObj.recurring?.usage_type !== 'metered') {
+                                baseItem.quantity = 1;
+                            }
+                            return baseItem;
+                        })
+                    );
+
+                    await stripe.subscriptionSchedules.update(schedId, {
+                        end_behavior: 'release',
+                        default_settings: { automatic_tax: { enabled: true } },
+                        phases: [
+                            {
+                                start_date: scheduleObj.phases[0].start_date,
+                                end_date: periodEndTs,
+                                items: currentPhaseItems,
+                            },
+                            {
+                                start_date: periodEndTs,
+                                items: newPhaseItems,
+                                metadata: {
+                                    plan_name: plan,
+                                    addons: JSON.stringify(addons || []),
+                                    cycle: cycle,
+                                    tenant_id: tenant.id.toString(),
+                                }
+                            }
+                        ]
+                    });
+
+                    // Metadaten an der aktuellen Subscription anpassen
+                    await stripe.subscriptions.update(activeSub.id, {
+                        metadata: {
+                            ...activeSub.metadata,
+                            upcoming_plan: plan,
+                            upcoming_addons: JSON.stringify(addons || []),
+                            upcoming_cycle: cycle
+                        }
+                    });
+
+                    // In DB vormerken
+                    const config = tenant.config || {};
+                    if (typeof config === 'object') {
+                        config['upcoming_addons'] = addons || [];
+                    }
+                    await supabaseAdmin.from('tenants').update({
+                        upcoming_plan: plan,
+                        upcoming_cycle: cycle,
+                        config: config
+                    }).eq('id', tenant.id);
+
+                    console.log("✅ Downgrade scheduled successfully");
+
+                    finalSubscriptionId = activeSub.id;
+                    finalStatus = activeSub.status;
+                } else {
+                    console.log("⬆️ UPGRADE DETECTED - Applying immediately");
+
+                    // UPGRADE: Sofort anwenden
+                    const itemsToUpdate = activeSub.items.data.map((item: any) => ({
+                        id: item.id,
+                        deleted: true
+                    })).concat(subscriptionItems as any);
+
+                    const updateParams: Stripe.SubscriptionUpdateParams = {
+                        items: itemsToUpdate,
+                        default_payment_method: defaultPaymentMethod,
+                        proration_behavior: 'always_invoice',
+                        automatic_tax: { enabled: true },
+                        metadata: { tenant_id: tenant.id, plan, cycle: cycle, upcoming_plan: "", upcoming_addons: "" }
+                    };
+                    if (promoCodeId) {
+                        updateParams.discounts = [{ promotion_code: promoCodeId }];
+                    }
+                    const updatedSub = await stripe.subscriptions.update(activeSub.id, updateParams);
+                    finalSubscriptionId = updatedSub.id;
+                    finalStatus = updatedSub.status;
+
+                    console.log("✅ Upgrade applied successfully");
+                }
             } else {
                 const subOptions: Stripe.SubscriptionCreateParams = {
                     customer: customerId,
@@ -408,8 +567,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 }
             }
 
-            const allSubs = await stripe.subscriptions.list({ customer: customerId, status: 'active', limit: 1 });
-            const activeSub = allSubs.data[0];
+            // Alle Abos abrufen, um zu prüfen, ob ein aktives (oder trialing, past_due) besteht
+            const allSubs = await stripe.subscriptions.list({ customer: customerId, limit: 1 });
+            const maybeSub = allSubs.data[0];
+            const activeSub = (maybeSub && !['canceled', 'incomplete_expired'].includes(maybeSub.status)) ? maybeSub : null;
 
             const previewParams: any = {
                 customer: customerId,
@@ -465,10 +626,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 taxDueToday = Math.max(0, prorationDetails.tax);
                 netDueToday = Math.max(0, prorationDetails.net);
             } else {
-                // Neues Abo: Er zahlt heute den vollen Vorschau-Betrag
-                amountDueToday = upcoming.amount_due / 100;
-                taxDueToday = (upcoming.tax || 0) / 100;
-                netDueToday = (upcoming.subtotal || 0) / 100;
+                // Neues Abo: Er zahlt heute den vollen Paketpreis
+                // Wir nutzen hier regularDetails, da Stripe bei upcoming_invoice für neue Abos 
+                // manchmal 0.00 als amount_due zurückgibt (z.B. wenn es nur eine Vorschau ist).
+                amountDueToday = regularDetails.total;
+                taxDueToday = regularDetails.tax;
+                netDueToday = regularDetails.net;
             }
 
             const linesWithMetadata = upcoming.lines.data.map(line => ({

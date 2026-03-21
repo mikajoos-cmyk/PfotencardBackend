@@ -93,6 +93,44 @@ def get_next_invoice_number(db: Session, tenant_id: int) -> str:
 def get_tenant_by_subdomain(db: Session, subdomain: str):
     return db.query(models.Tenant).filter(models.Tenant.subdomain == subdomain.lower()).first()
 
+def get_active_addons_for_tenant(db: Session, tenant_id: int) -> List[str]:
+    """Gibt die Namen der aktiven Addons für einen Tenant zurück."""
+    addons = db.query(models.SubscriptionPackage.plan_name).join(
+        models.TenantAddon, models.TenantAddon.addon_id == models.SubscriptionPackage.id
+    ).filter(models.TenantAddon.tenant_id == tenant_id).all()
+    
+    result = [a[0] for a in addons]
+    print(f"DEBUG: get_active_addons_for_tenant({tenant_id}) -> {result}")
+    return result
+
+def get_cancelled_addons_for_tenant(db: Session, tenant_id: int) -> List[str]:
+    """Gibt die Namen der Addons zurück, die zum Periodenende gekündigt wurden."""
+    addons = db.query(models.SubscriptionPackage.plan_name).join(
+        models.TenantAddon, models.TenantAddon.addon_id == models.SubscriptionPackage.id
+    ).filter(
+        models.TenantAddon.tenant_id == tenant_id,
+        models.TenantAddon.removes_at_period_end == True
+    ).all()
+    return [a[0] for a in addons]
+
+def set_active_addons_for_tenant(db: Session, tenant_id: int, addon_names: List[str]):
+    """Setzt die aktiven Addons für einen Tenant (ersetzt bestehende)."""
+    # 1. Bestehende löschen
+    db.query(models.TenantAddon).filter(models.TenantAddon.tenant_id == tenant_id).delete()
+    
+    # 2. Neue hinzufügen
+    if addon_names:
+        packages = db.query(models.SubscriptionPackage).filter(
+            models.SubscriptionPackage.plan_name.in_(addon_names),
+            models.SubscriptionPackage.package_type == 'addon'
+        ).all()
+        
+        for pkg in packages:
+            db_addon = models.TenantAddon(tenant_id=tenant_id, addon_id=pkg.id)
+            db.add(db_addon)
+    
+    db.commit()
+
 def delete_tenant(db: Session, tenant_id: int):
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant: return None
@@ -202,6 +240,28 @@ def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
     tenant = db.query(models.Tenant).filter(models.Tenant.id == tenant_id).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # Sicherstellen, dass die Addons aus der Datenbank in die Config gemischt werden
+    active_addons = get_active_addons_for_tenant(db, tenant.id)
+    
+    # Wir erstellen eine Kopie der Config für die Antwort, um die DB nicht unnötig zu triggern.
+    # Da FastAPI das Objekt serialisiert, hängen wir die dynamischen Daten an.
+    current_config = dict(tenant.config) if tenant.config else {}
+    current_config["active_addons"] = active_addons
+    
+    # Falls ein upcoming_plan in der Spalte steht, stellen wir sicher, dass er auch in der Config landet
+    upcoming_plan = tenant.upcoming_plan
+    if upcoming_plan:
+        current_config["upcoming_plan"] = upcoming_plan
+        
+    print(f"DEBUG: get_app_config for {tenant.subdomain} - active_addons found: {active_addons}")
+    
+    # Explizit am Objekt setzen für das Pydantic-Mapping
+    tenant.config = current_config
+    # Wir setzen sie auch als dynamische Attribute direkt am tenant-Objekt,
+    # da schemas.Tenant nun diese Felder explizit hat.
+    setattr(tenant, "active_addons", active_addons)
+    setattr(tenant, "upcoming_plan", upcoming_plan)
         
     levels = db.query(models.Level).options(
         joinedload(models.Level.requirements).joinedload(models.LevelRequirement.training_type)
@@ -219,7 +279,9 @@ def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
         tenant=tenant,
         levels=levels,
         training_types=training_types,
-        appointments=appointments
+        appointments=appointments,
+        active_addons=active_addons,
+        upcoming_plan=upcoming_plan
     )
 
 def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.SettingsUpdate):
@@ -235,7 +297,7 @@ def update_tenant_settings(db: Session, tenant_id: int, settings: schemas.Settin
     
     # KRITISCH: Verhindern, dass wichtige Keys gelöscht werden, falls sie im Payload fehlen
     # active_addons und upcoming_plan werden nur über Stripe-Webhooks verwaltet und dürfen hier nicht überschrieben werden
-    active_addons = current_config.get("active_addons", [])
+    active_addons = get_active_addons_for_tenant(db, tenant.id)
     upcoming_plan = current_config.get("upcoming_plan")
     stripe_metadata = {k: v for k, v in current_config.items() if k.startswith('stripe_')}
 

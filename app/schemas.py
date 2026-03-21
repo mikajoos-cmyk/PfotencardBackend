@@ -62,6 +62,8 @@ class TenantConfig(BaseModel):
     balance: Dict[str, Any] = {} 
     features: Dict[str, bool] = {} 
     active_modules: List[str] = ["news", "documents"]
+    active_addons: List[str] = [] # NEU: Dynamisch aus der DB befüllt
+    upcoming_plan: Optional[str] = None # NEU: Für Vorausschau
     auto_billing_enabled: bool = False
     auto_progress_enabled: bool = False
     appointments: Dict[str, Any] = {"default_duration": 60, "max_participants": 10}
@@ -95,6 +97,8 @@ class Tenant(TenantBase):
     # NEU: Felder auch im Tenant Schema
     stripe_subscription_status: Optional[str] = None
     cancel_at_period_end: bool = False
+    active_addons: List[str] = [] # NEU: Explizit hier statt nur in config
+    upcoming_plan: Optional[str] = None # NEU: Explizit hier
     # NEU:
     avv_accepted_at: Optional[datetime] = None
     avv_accepted_version: Optional[str] = None
@@ -114,6 +118,7 @@ class TenantStatus(BaseModel):
     in_trial: bool = False
     
     # NEU: WICHTIG - Diese Felder müssen hier rein!
+    stripe_subscription_id: Optional[str] = None
     stripe_subscription_status: Optional[str] = None
     cancel_at_period_end: bool = False
     
@@ -121,6 +126,8 @@ class TenantStatus(BaseModel):
     next_payment_amount: Optional[float] = None
     next_payment_date: Optional[datetime] = None
     upcoming_plan: Optional[str] = None
+    upcoming_addons: Optional[List[str]] = None
+    cancelled_addons: Optional[List[str]] = None
 
     # NEU: AVV Status
     avv_accepted_at: Optional[datetime] = None
@@ -137,6 +144,9 @@ class TenantStatus(BaseModel):
     top_up_fee_percent: float = 0.0
     current_billing_period_fees: float = 0.0
     active_addons: List[str] = []
+    
+    # Abwärtskompatibilität
+    config: Dict[str, Any] = {}
 
 # --- 1b. ABOS & PAKETE ---
 class SubscriptionPackageBase(BaseModel):
@@ -512,6 +522,8 @@ class AppConfig(BaseModel):
     levels: List[Level]
     training_types: List[TrainingType]
     appointments: List[Appointment] = []
+    active_addons: List[str] = [] # NEU
+    upcoming_plan: Optional[str] = None # NEU
 
 class ServiceUpdateItem(BaseModel):
     id: Optional[int] = None

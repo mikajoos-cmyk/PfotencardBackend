@@ -352,9 +352,17 @@ def create_checkout_session(db: Session, tenant_id: int, plan: str, cycle: str, 
                     return {"status": "updated", "message": "Wechsel abgebrochen, Plan beibehalten."}
                 return {"status": "updated", "message": "Plan already active"}
 
+            # Prüfen ob es ein Upgrade oder Downgrade ist (inkl. Add-ons)
+            print(f"DEBUG: Checking Upgrade/Downgrade...")
+            print(f"  Current: plan={tenant.plan}, price={current_stripe_price}")
+            print(f"  New: plan={target_plan_name}, price={target_amount}")
+            print(f"  Current addons: {tenant.config.get('active_addons', []) if tenant.config else []}")
+            print(f"  New addons: {selected_addons}")
+
             is_upgrade = target_amount > current_stripe_price
-            print(f"DEBUG: target_amount={target_amount}, current_stripe_price={current_stripe_price}, is_upgrade={is_upgrade}")
             is_trial = safe_get(active_subscription, 'status') == 'trialing'
+
+            print(f"DEBUG: is_upgrade={is_upgrade}, is_trial={is_trial}")
 
             # A) UPGRADE (Sofort)
             if is_upgrade or is_trial:

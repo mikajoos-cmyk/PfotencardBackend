@@ -410,6 +410,16 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
     ).count()
     print(f"DEBUG [Billing]: Gefundene Transaktionen mit Gebühren: {transaction_count}, Gesamtsumme: {current_billing_period_fees}")
 
+    # NEU: Addons aus der neuen Tabelle holen
+    active_addons = crud.get_active_addons_for_tenant(db, tenant.id)
+    cancelled_addons = crud.get_cancelled_addons_for_tenant(db, tenant.id)
+    upcoming_addons = tenant.upcoming_addons
+    
+    # Für Abwärtskompatibilität im config-Objekt spiegeln
+    config_dict = dict(tenant.config) if tenant.config else {}
+    config_dict["active_addons"] = active_addons
+    config_dict["upcoming_addons"] = upcoming_addons
+
     return {
         "exists": True, 
         "tenant_id": tenant.id,
@@ -419,8 +429,10 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "plan": tenant.plan,
         "has_payment_method": has_stripe,
         "in_trial": in_trial,
+        "config": config_dict,
         
         # NEU: Die DB-Werte zurückgeben
+        "stripe_subscription_id": tenant.stripe_subscription_id,
         "stripe_subscription_status": tenant.stripe_subscription_status,
         "cancel_at_period_end": tenant.cancel_at_period_end,
         
@@ -428,6 +440,8 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "next_payment_amount": tenant.next_payment_amount,
         "next_payment_date": tenant.next_payment_date,
         "upcoming_plan": tenant.upcoming_plan,
+        "upcoming_addons": upcoming_addons,
+        "cancelled_addons": cancelled_addons,
         
         # NEU: AVV Status & Daten
         "avv_accepted_at": tenant.avv_accepted_at,
@@ -441,7 +455,7 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "additional_cost_per_customer": additional_cost_per_customer,
         "top_up_fee_percent": top_up_fee_percent,
         "current_billing_period_fees": current_billing_period_fees,
-        "active_addons": tenant.config.get("active_addons", []) if tenant.config else []
+        "active_addons": active_addons
     }
 
 # Sicherheit: Nur mit Secret Key ausführbar
@@ -756,11 +770,23 @@ async def handle_subscription_deleted(subscription):
         tenant = db.query(models.Tenant).filter(models.Tenant.stripe_customer_id == customer_id).first()
         
         if tenant:
-            tenant.plan = 'starter' 
+            tenant.plan = None 
+            tenant.stripe_subscription_id = None
             tenant.subscription_ends_at = datetime.now(timezone.utc)
             tenant.stripe_subscription_status = 'canceled'
             tenant.cancel_at_period_end = False 
             
+            # Log to history
+            db.add(models.SubscriptionHistory(
+                tenant_id=tenant.id,
+                event_type='subscription_deleted',
+                source='stripe',
+                description='Abo bei Stripe endgültig beendet.',
+                previous_plan=tenant.plan,
+                new_plan=None,
+                previous_status=tenant.stripe_subscription_status,
+                new_status='canceled'
+            ))
             db.commit()
             print(f"Webhook: Subscription deleted for tenant {tenant.name}")
     finally:

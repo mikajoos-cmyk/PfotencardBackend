@@ -1,4 +1,5 @@
 # app/models.py
+import uuid
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Date, Boolean, UniqueConstraint, Table, Text
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
@@ -46,6 +47,8 @@ class Tenant(Base):
     next_payment_amount = Column(Float, default=0.0)
     next_payment_date = Column(DateTime(timezone=True), nullable=True)
     upcoming_plan = Column(String(50), nullable=True) # z.B. 'pro' wenn ein Wechsel ansteht
+    upcoming_addons = Column(JSONB, nullable=True)
+    upcoming_cycle = Column(String(20), nullable=True)
     # ---------------------------------------------------
 
     # --- NEU: Gebühren & Limits (Kopiert vom Paket für Persistenz) ---
@@ -77,6 +80,7 @@ class Tenant(Base):
     # Historie & Promos
     subscription_history = relationship("SubscriptionHistory", back_populates="tenant", cascade="all, delete-orphan")
     promo_redemptions = relationship("PromoCodeRedemption", back_populates="tenant", cascade="all, delete-orphan")
+    active_addons_list = relationship("TenantAddon", back_populates="tenant", cascade="all, delete-orphan")
 
 
 # --- 1b. ABOS & PAKETE ---
@@ -113,6 +117,23 @@ class SubscriptionPackage(Base):
     stripe_price_id_base_yearly = Column(String(255), nullable=True)  # NEU
     stripe_price_id_users = Column(String(255), nullable=True)
     stripe_price_id_fees = Column(String(255), nullable=True)
+
+    tenant_addons = relationship("TenantAddon", back_populates="addon", cascade="all, delete-orphan")
+
+
+class TenantAddon(Base):
+    __tablename__ = 'tenant_addons'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
+    addon_id = Column(Integer, ForeignKey('subscription_packages.id', ondelete="CASCADE"), nullable=False)
+    removes_at_period_end = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    tenant = relationship("Tenant", back_populates="active_addons_list")
+    addon = relationship("SubscriptionPackage", back_populates="tenant_addons")
+
+    __table_args__ = (UniqueConstraint('tenant_id', 'addon_id', name='uq_tenant_addon'),)
 
 
 # --- 1c. ABO HISTORIE & PROMOS ---
@@ -405,6 +426,8 @@ appointment_target_levels = Table(
 )
 
 # --- 4. TERMINVEREINBARUNG (APPOINTMENTS) ---
+
+
 
 class Appointment(Base):
     __tablename__ = 'appointments'

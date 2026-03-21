@@ -44,6 +44,8 @@ Deno.serve(async (req) => {
     const body = await req.json()
     const { action, tenantId } = body
 
+    console.log(`[manage-subscription] Action: ${action}, TenantId: ${tenantId}, User: ${userEmail}`);
+
     // Supabase Admin Client für sichere DB-Abfragen
     const supabaseAdmin = createClient(
         Deno.env.get('SUPABASE_URL') ?? '',
@@ -57,7 +59,12 @@ Deno.serve(async (req) => {
         .eq('id', tenantId)
         .single()
 
-    if (tenantError || !tenant) throw new Error('Tenant nicht gefunden')
+    if (tenantError || !tenant) {
+      console.error('[manage-subscription] Tenant nicht gefunden:', { tenantId, error: tenantError?.message });
+      throw new Error('Tenant nicht gefunden');
+    }
+
+    console.log('[manage-subscription] Tenant gefunden:', { id: tenant.id, plan: tenant.plan, active_addons: tenant.config?.active_addons });
 
     // Sicherheit: Prüfen ob die E-Mail ein Admin für diesen Tenant ist (Sync mit Pfotencard DB)
     const { data: dbUser } = await supabaseAdmin
@@ -68,8 +75,11 @@ Deno.serve(async (req) => {
         .maybeSingle();
 
     if (!dbUser || dbUser.role !== 'admin') {
+      console.error('[manage-subscription] Nicht autorisiert:', { userEmail, dbUser, tenant_id: tenantId });
       throw new Error('Nicht autorisiert: Nur Mandanten-Administratoren können diese Aktion ausführen.')
     }
+
+    console.log('[manage-subscription] Authorization OK, proceeding with action:', action);
 
     // ==========================================
     // HELPER: GET PRICE IDs
@@ -113,18 +123,59 @@ Deno.serve(async (req) => {
       return priceIds;
     }
 
+    async function syncTenantAddons(tenantId: number, addonNames: string[]) {
+      console.log("Syncing addons for tenant", { tenantId, addonNames });
+      
+      // 1. Bestehende löschen
+      await supabaseAdmin.from('tenant_addons').delete().eq('tenant_id', tenantId);
+      
+      if (!addonNames || addonNames.length === 0) return;
+      
+      // 2. IDs der Addons holen
+      const { data: addonPackages } = await supabaseAdmin
+        .from('subscription_packages')
+        .select('id')
+        .in('plan_name', addonNames)
+        .eq('package_type', 'addon');
+        
+      if (!addonPackages || addonPackages.length === 0) return;
+      
+      // 3. Neue einfügen
+      const inserts = addonPackages.map((p: any) => ({
+        tenant_id: tenantId,
+        addon_id: p.id,
+        removes_at_period_end: false
+      }));
+      
+      await supabaseAdmin.from('tenant_addons').insert(inserts);
+    }
+
+    const hasActiveSub = !!(tenant.stripe_subscription_id && 
+                           tenant.stripe_subscription_status && 
+                           !['canceled', 'incomplete_expired'].includes(tenant.stripe_subscription_status));
+
     // ==========================================
     // ACTION: GET STATUS
     // ==========================================
     if (action === 'get_status') {
+      const { data: cancelledAddonsData } = await supabaseAdmin
+        .from('tenant_addons')
+        .select('subscription_packages(plan_name)')
+        .eq('tenant_id', tenant.id)
+        .eq('removes_at_period_end', true);
+      
+      const cancelled_addons = (cancelledAddonsData || []).map((a: any) => a.subscription_packages.plan_name);
+
       return new Response(JSON.stringify({
         tenant_id: tenant.id,
         plan: tenant.plan,
         upcoming_plan: tenant.upcoming_plan,
         active_addons: tenant.config?.active_addons || [],
-        upcoming_addons: tenant.config?.upcoming_addons || [],
+        upcoming_addons: tenant.upcoming_addons || [],
+        cancelled_addons: cancelled_addons,
         stripe_subscription_id: tenant.stripe_subscription_id,
-        stripe_subscription_status: tenant.stripe_subscription_status
+        stripe_subscription_status: tenant.stripe_subscription_status,
+        hasActiveSub
       }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
@@ -232,10 +283,6 @@ Deno.serve(async (req) => {
 
       // Nur wenn wir ein aktives Abo haben, machen wir eine Upgrade-Vorschau (Prorations)
       // Ansonsten machen wir eine Vorschau für ein NEUES Abo.
-      const hasActiveSub = tenant.stripe_subscription_id && 
-                           tenant.stripe_subscription_status && 
-                           !['canceled', 'incomplete_expired'].includes(tenant.stripe_subscription_status);
-
       if (hasActiveSub) {
         try {
           // --- UPGRADE-VORSCHAU ---
@@ -328,16 +375,18 @@ Deno.serve(async (req) => {
         let taxDueToday = 0;
         let netDueToday = 0;
 
-        if (tenant.stripe_subscription_id) {
+        if (hasActiveSub) {
           // Beim Upgrade zahlt er heute NUR die Prorations (anteilige Kosten)
           amountDueToday = Math.max(0, prorationDetails.total);
           taxDueToday = Math.max(0, prorationDetails.tax);
           netDueToday = Math.max(0, prorationDetails.net);
         } else {
-          // Neues Abo: Er zahlt heute den vollen Vorschau-Betrag
-          amountDueToday = upcomingInvoice.amount_due / 100;
-          taxDueToday = (upcomingInvoice.tax || 0) / 100;
-          netDueToday = (upcomingInvoice.subtotal || 0) / 100;
+          // Neues Abo: Er zahlt heute den vollen Paketpreis (da keine Prorationen für den Start anfallen)
+          // Wir nutzen hier regularDetails, da Stripe bei upcoming_invoice für neue Abos 
+          // manchmal 0.00 als amount_due zurückgibt (z.B. wenn es nur eine Vorschau ist).
+          amountDueToday = regularDetails.total;
+          taxDueToday = regularDetails.tax;
+          netDueToday = regularDetails.net;
         }
 
         const linesWithMetadata = upcomingInvoice.lines.data.map(line => ({
@@ -397,15 +446,21 @@ Deno.serve(async (req) => {
     // ACTION: UPDATE SUBSCRIPTION (Der Kauf)
     // ==========================================
     if (action === 'update_subscription') {
+      console.log("🔄 UPDATE SUBSCRIPTION ACTION CALLED");
       const { newPlan, newAddons, cycle = 'monthly' } = body;
+      console.log("Request body:", { newPlan, newAddons, cycle, tenantId });
 
-      const hasActiveSub = tenant.stripe_subscription_id && 
-                           tenant.stripe_subscription_status && 
-                           !['canceled', 'incomplete_expired'].includes(tenant.stripe_subscription_status);
-      
+      console.log("Active subscription check:", {
+        stripe_subscription_id: tenant.stripe_subscription_id,
+        stripe_subscription_status: tenant.stripe_subscription_status,
+        hasActiveSub
+      });
+
       if (!hasActiveSub) throw new Error("Kein aktives Abo für Update gefunden. Bitte nutze den Checkout.");
 
+      console.log("Fetching price IDs for:", { newPlan, newAddons, cycle });
       const newPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle);
+      console.log("Got price IDs:", newPriceIds);
       const itemsArray = newPriceIds.map(priceId => ({ price: priceId }));
 
       // Aktuelle Subscription abrufen, um die Item-IDs für den Austausch zu finden (Stripe empfiehlt das für Updates)
@@ -417,21 +472,121 @@ Deno.serve(async (req) => {
         deleted: true
       })).concat(itemsArray.map(item => ({ price: item.price })));
 
-      // Vorschau generieren um zu sehen ob es ein Downgrade (Gutschrift) oder Upgrade (Zahlung) ist
+      // Prüfen ob es ein Upgrade oder Downgrade ist (inkl. Add-ons)
+      // Wir müssen Basis-Paket UND Add-ons berücksichtigen
+      let currentAddons: string[] = [];
+      let addonsRemoved = false;
       let behavior: 'always_invoice' | 'none' = 'always_invoice';
+
       try {
-        const previewInvoice = await stripe.invoices.retrieveUpcoming({
-          customer: tenant.stripe_customer_id,
-          subscription: tenant.stripe_subscription_id,
-          subscription_items: itemsToUpdate,
-          subscription_proration_date: Math.floor(Date.now() / 1000),
-        });
-        // Wenn der Betrag <= 0 ist, ist es ein Downgrade oder keine Änderung -> keine sofortige Rechnung (vormerken)
-        if (previewInvoice.amount_due <= 0) {
-          behavior = 'none';
+        // Aktuelle Paket-Preise ermitteln
+        const { data: allPackages } = await supabaseAdmin
+          .from('subscription_packages')
+          .select('plan_name, price_monthly, price_yearly, package_type');
+
+        const currentPlan = tenant.plan;
+
+        // WICHTIG: tenant.config könnte ein JSON-String sein oder undefined
+        if (tenant.config) {
+          // Falls config ein Objekt ist
+          if (typeof tenant.config === 'object') {
+            currentAddons = tenant.config.active_addons || [];
+          }
+          // Falls config ein String ist (manchmal passiert das bei JSON-Feldern)
+          else if (typeof tenant.config === 'string') {
+            try {
+              const parsed = JSON.parse(tenant.config);
+              currentAddons = parsed.active_addons || [];
+            } catch (e) {
+              console.warn("Could not parse tenant.config:", e);
+            }
+          }
         }
+
+        const currentCycleFromMeta = currentSub.metadata?.cycle || 'monthly';
+
+        console.log("=== DOWNGRADE CHECK START ===");
+        console.log("Tenant config raw:", tenant.config);
+        console.log("Current state:", { currentPlan, currentAddons, currentCycle: currentCycleFromMeta });
+        console.log("New state:", { newPlan, newAddons, newCycle: cycle });
+
+        const currentBasePkg = allPackages?.find(p => p.plan_name === currentPlan && p.package_type === 'base');
+        const newBasePkg = allPackages?.find(p => p.plan_name === newPlan && p.package_type === 'base');
+
+        if (!currentBasePkg) {
+          console.warn("WARNING: Current base package not found:", currentPlan);
+        }
+        if (!newBasePkg) {
+          console.warn("WARNING: New base package not found:", newPlan);
+        }
+
+        const currentBasePrice = currentCycleFromMeta === 'yearly' ? (currentBasePkg?.price_yearly || 0) : (currentBasePkg?.price_monthly || 0);
+        const newBasePrice = cycle === 'yearly' ? (newBasePkg?.price_yearly || 0) : (newBasePkg?.price_monthly || 0);
+
+        // Addon-Preise berechnen
+        let currentAddonsPrice = 0;
+        if (currentAddons.length > 0) {
+          const currentAddonPkgs = allPackages?.filter(p => currentAddons.includes(p.plan_name) && p.package_type === 'addon') || [];
+          console.log("Current addon packages found:", currentAddonPkgs.map(p => p.plan_name));
+          currentAddonsPrice = currentAddonPkgs.reduce((sum, pkg) => {
+            const price = currentCycleFromMeta === 'yearly' ? (pkg.price_yearly || 0) : (pkg.price_monthly || 0);
+            console.log(`  ${pkg.plan_name}: ${price}€`);
+            return sum + price;
+          }, 0);
+        }
+
+        let newAddonsPrice = 0;
+        if (newAddons && newAddons.length > 0) {
+          const newAddonPkgs = allPackages?.filter(p => newAddons.includes(p.plan_name) && p.package_type === 'addon') || [];
+          console.log("New addon packages found:", newAddonPkgs.map(p => p.plan_name));
+          newAddonsPrice = newAddonPkgs.reduce((sum, pkg) => {
+            const price = cycle === 'yearly' ? (pkg.price_yearly || 0) : (pkg.price_monthly || 0);
+            console.log(`  ${pkg.plan_name}: ${price}€`);
+            return sum + price;
+          }, 0);
+        }
+
+        const currentTotalPrice = currentBasePrice + currentAddonsPrice;
+        const newTotalPrice = newBasePrice + newAddonsPrice;
+
+        console.log("Price comparison:", {
+          currentBase: currentBasePrice,
+          currentAddons: currentAddonsPrice,
+          currentTotal: currentTotalPrice,
+          newBase: newBasePrice,
+          newAddons: newAddonsPrice,
+          newTotal: newTotalPrice
+        });
+
+        // Wenn der neue Gesamtpreis niedriger ist -> Downgrade (vormerken)
+        // ODER wenn Add-ons entfernt werden (auch wenn Basis gleich bleibt) -> Downgrade (vormerken)
+        const isDowngrade = newTotalPrice < currentTotalPrice;
+
+        // Prüfen ob Add-ons entfernt wurden (nicht nur Anzahl, sondern tatsächliche Änderung)
+        const normalizedNewAddons = (newAddons || []).sort();
+        const normalizedCurrentAddons = currentAddons.sort();
+        const addonsChanged = JSON.stringify(normalizedNewAddons) !== JSON.stringify(normalizedCurrentAddons);
+        addonsRemoved = currentAddons.some(addon => !normalizedNewAddons.includes(addon));
+
+        console.log("Decision factors:", {
+          isDowngrade,
+          addonsChanged,
+          addonsRemoved,
+          priceDifference: newTotalPrice - currentTotalPrice
+        });
+
+        // WICHTIG: Bei gleichem Preis aber geänderten Add-ons ist es KEIN Downgrade
+        // Nur wenn Preis sinkt ODER Add-ons entfernt werden (bei gleichem/höherem Basispaket)
+        if (isDowngrade || (addonsRemoved && !isDowngrade && newBasePrice >= currentBasePrice)) {
+          behavior = 'none';
+          console.log("✅ DOWNGRADE ERKANNT - Wird zum Periodenende vorgemerkt");
+        } else {
+          console.log("✅ UPGRADE ERKANNT - Wird sofort durchgeführt");
+        }
+        console.log("=== DOWNGRADE CHECK END ===");
       } catch (e) {
-        console.warn("Konnte Vorschau für Update nicht laden, nutze Standard-Verhalten:", e.message);
+        console.error("FEHLER bei Upgrade/Downgrade-Prüfung:", e);
+        console.warn("Nutze Fallback Standard-Verhalten (always_invoice)");
       }
 
       if (behavior === 'always_invoice') {
@@ -471,6 +626,27 @@ Deno.serve(async (req) => {
         const scheduleObj = await stripe.subscriptionSchedules.retrieve(schedId);
         const periodEndTs = currentSub.current_period_end;
 
+        // Für metered prices dürfen wir keine quantity setzen
+        const currentPhaseItems = currentSub.items.data.map((item: any) => {
+          const baseItem: any = { price: item.price.id };
+          if (item.price.recurring?.usage_type !== 'metered') {
+            baseItem.quantity = 1;
+          }
+          return baseItem;
+        });
+
+        // Neue Items: Prices abrufen um usage_type zu prüfen
+        const newPhaseItems = await Promise.all(
+          itemsArray.map(async (item: any) => {
+            const priceObj = await stripe.prices.retrieve(item.price);
+            const baseItem: any = { price: item.price };
+            if (priceObj.recurring?.usage_type !== 'metered') {
+              baseItem.quantity = 1;
+            }
+            return baseItem;
+          })
+        );
+
         await stripe.subscriptionSchedules.update(schedId, {
           end_behavior: 'release',
           default_settings: { automatic_tax: { enabled: true } },
@@ -479,12 +655,12 @@ Deno.serve(async (req) => {
               // Aktuelle Phase bleibt bis zum Ende der Laufzeit unverändert
               start_date: scheduleObj.phases[0].start_date,
               end_date: periodEndTs,
-              items: currentSub.items.data.map((item: any) => ({ price: item.price.id, quantity: 1 })),
+              items: currentPhaseItems,
             },
             {
               // Neue Phase (Downgrade) startet am Ende der aktuellen Laufzeit
               start_date: periodEndTs,
-              items: itemsArray.map(item => ({ price: item.price, quantity: 1 })),
+              items: newPhaseItems,
               metadata: {
                 plan_name: newPlan,
                 addons: JSON.stringify(newAddons),
@@ -512,24 +688,53 @@ Deno.serve(async (req) => {
       const config = tenant.config || {};
       const updateData: any = { config };
 
-      const isReturningToCurrent = newPlan === tenant.plan && 
+      const isReturningToCurrent = newPlan === tenant.plan &&
                                    JSON.stringify([...(newAddons || [])].sort()) === JSON.stringify([...(tenant.config?.active_addons || [])].sort());
 
       if (behavior === 'none' && !isReturningToCurrent) {
-        // Downgrade: Nur vormerken, aktueller Plan bleibt in DB (für Features)
+        // Downgrade: Nur vormerken, aktueller Plan und Add-ons bleiben aktiv bis Periodenende
         updateData.upcoming_plan = newPlan;
-        config['upcoming_addons'] = newAddons;
+        updateData.upcoming_addons = newAddons || [];
         updateData.upcoming_cycle = cycle;
+        console.log("Vorgemerkt für nächste Periode:", { upcoming_plan: newPlan, upcoming_addons: newAddons });
+
+        // NEU: Markiere Addons, die entfernt werden sollen, mit removes_at_period_end = true
+        if (addonsRemoved) {
+          const removedAddons = currentAddons.filter(a => !(newAddons || []).includes(a));
+          const { data: removedPkgs } = await supabaseAdmin
+            .from('subscription_packages')
+            .select('id')
+            .in('plan_name', removedAddons)
+            .eq('package_type', 'addon');
+          
+          if (removedPkgs && removedPkgs.length > 0) {
+            const removedIds = removedPkgs.map((p: any) => p.id);
+            await supabaseAdmin.from('tenant_addons')
+              .update({ removes_at_period_end: true })
+              .eq('tenant_id', tenant.id)
+              .in('addon_id', removedIds);
+            console.log("Addons marked for removal at period end:", removedAddons);
+          }
+        }
       } else {
-        // Upgrade oder Rückkehr zum aktuellen Plan (Vormerkung löschen)
+        // Upgrade oder Rückkehr zum aktuellen Plan: Sofort aktivieren
         updateData.plan = newPlan;
         updateData.upcoming_plan = null;
         updateData.upcoming_cycle = null;
-        config['active_addons'] = newAddons;
-        config['upcoming_addons'] = null;
+        updateData.upcoming_addons = null;
+        console.log("Sofort aktiviert:", { plan: newPlan, active_addons: newAddons });
       }
-      
+
       await supabaseAdmin.from('tenants').update(updateData).eq('id', tenant.id);
+
+      // Synchronize addons in tenant_addons table
+      // NUR bei Upgrades sofort synchronisieren, bei Downgrades erst beim Webhook
+      if (behavior !== 'none' || isReturningToCurrent) {
+          await syncTenantAddons(tenant.id, newAddons || []);
+          console.log("tenant_addons sofort aktualisiert");
+      } else {
+          console.log("tenant_addons Synchronisation (Löschen/Hinzufügen) verschoben auf Periodenende (via Webhook)");
+      }
 
       return new Response(JSON.stringify({ status: 'success' }), { headers: corsHeaders });
     }
@@ -614,7 +819,7 @@ Deno.serve(async (req) => {
       if (packageData.stripe_price_id_users) lineItems.push({ price: packageData.stripe_price_id_users })
       if (packageData.stripe_price_id_fees) lineItems.push({ price: packageData.stripe_price_id_fees })
 
-      if (tenant.stripe_subscription_id) {
+      if (hasActiveSub) {
         const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
           items: lineItems.map(item => ({ price: item.price })),
           proration_behavior: 'always_invoice',
