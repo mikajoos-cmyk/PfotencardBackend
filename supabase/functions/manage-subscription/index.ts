@@ -204,10 +204,33 @@ Deno.serve(async (req) => {
           if (p.stripe_price_id_fees) priceTypeMap[p.stripe_price_id_fees] = 'base';
         });
 
-        const upcomingInvoice = await stripe.invoices.retrieveUpcoming({
-          customer: tenant.stripe_customer_id,
-          automatic_tax: { enabled: true },
-        });
+        let upcomingInvoice;
+        
+        if (tenant.upcoming_plan) {
+           // Workaround for Stripe Schedule "release" bug:
+           // When a Schedule's final phase releases, Stripe's Upcoming Invoice generator
+           // natively evaluates it as having a 0-duration, dropping advance charges.
+           // To get the TRUE upcoming invoice cost, we bypass the Schedule evaluation
+           // and manually pass the exact items. 
+           let upcomingAddons: string[] = [];
+           if (typeof tenant.upcoming_addons === 'object') {
+             upcomingAddons = tenant.upcoming_addons || [];
+           } else if (typeof tenant.upcoming_addons === 'string') {
+             try { upcomingAddons = JSON.parse(tenant.upcoming_addons); } catch(e) {}
+           }
+           const finalPriceIds = await getStripePriceIdsForPlanAndAddons(tenant.upcoming_plan, upcomingAddons, tenant.upcoming_cycle || 'monthly');
+           
+           upcomingInvoice = await stripe.invoices.retrieveUpcoming({
+             customer: tenant.stripe_customer_id,
+             subscription_items: finalPriceIds.map(id => ({ price: id })),
+             automatic_tax: { enabled: true }
+           });
+        } else {
+           upcomingInvoice = await stripe.invoices.retrieveUpcoming({
+             customer: tenant.stripe_customer_id,
+             automatic_tax: { enabled: true },
+           });
+        }
 
         const linesWithMetadata = upcomingInvoice.lines.data.map(line => ({
           ...line,
@@ -252,13 +275,45 @@ Deno.serve(async (req) => {
         if (p.stripe_price_id_fees) priceTypeMap[p.stripe_price_id_fees] = 'base';
       });
 
-      const newPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle);
+      let currentSub: any = null;
+      let currentCycleFromMeta = 'monthly';
+      
+      if (hasActiveSub) {
+        try {
+          currentSub = await stripe.subscriptions.retrieve(tenant.stripe_subscription_id);
+          currentCycleFromMeta = currentSub.metadata?.cycle || 'monthly';
+        } catch (e: any) {
+          console.error("Fehler beim Abrufen der Subscription für Vorschau:", e.message);
+        }
+      }
 
       const currentPkg = allPackages?.find(p => p.plan_name === tenant.plan && p.package_type === 'base');
       const newPkg = allPackages?.find(p => p.plan_name === newPlan && p.package_type === 'base');
-      const currentPrice = cycle === 'yearly' ? (currentPkg?.price_yearly || 0) : (currentPkg?.price_monthly || 0);
-      const newPrice = cycle === 'yearly' ? (newPkg?.price_yearly || 0) : (newPkg?.price_monthly || 0);
-      const isBaseUpgrade = newPrice > currentPrice;
+      
+      const currentBasePrice = currentCycleFromMeta === 'yearly' ? (currentPkg?.price_yearly || 0) : (currentPkg?.price_monthly || 0);
+      const newBasePrice = cycle === 'yearly' ? (newPkg?.price_yearly || 0) : (newPkg?.price_monthly || 0);
+      
+      const isBaseDowngrade = newBasePrice < currentBasePrice;
+      const isBaseUpgrade = newBasePrice > currentBasePrice;
+
+      // Berechne immediate (Sofort-) Status analog zu update_subscription
+      const immediatePlan = isBaseDowngrade ? tenant.plan : newPlan;
+      const immediateCycle = isBaseDowngrade ? currentCycleFromMeta : cycle;
+      
+      let currentAddons: string[] = [];
+      if (tenant.config) {
+        if (typeof tenant.config === 'object') {
+          currentAddons = tenant.config.active_addons || [];
+        } else if (typeof tenant.config === 'string') {
+          try {
+            const parsed = JSON.parse(tenant.config);
+            currentAddons = parsed.active_addons || [];
+          } catch (e) {}
+        }
+      }
+      
+      const immediateAddons = Array.from(new Set([...currentAddons, ...(newAddons || [])]));
+      const immediatePriceIds = await getStripePriceIdsForPlanAndAddons(immediatePlan, immediateAddons, immediateCycle);
 
       const prorationDate = Math.floor(Date.now() / 1000); // Genau jetzt
 
@@ -270,7 +325,6 @@ Deno.serve(async (req) => {
         previewParams.customer = tenant.stripe_customer_id;
       } else {
         // Fallback für Vorschau ohne registrierten Stripe-Kunden
-        // Versuchen wir, Adressdaten aus dem Tenant-Profil zu nutzen für die Steuer-Vorschau
         previewParams.customer_details = {
           address: { 
             line1: tenant.street || undefined,
@@ -286,32 +340,29 @@ Deno.serve(async (req) => {
       if (hasActiveSub) {
         try {
           // --- UPGRADE-VORSCHAU ---
-          // 1. Aktuelle Subscription abrufen
-          const currentSub = await stripe.subscriptions.retrieve(tenant.stripe_subscription_id);
-          
-          if (currentSub.status === 'canceled') {
+          if (currentSub?.status === 'canceled' || !currentSub) {
             // Falls es doch canceled ist (Sync-Gap), neues Abo Vorschau
-            previewParams.subscription_items = newPriceIds.map(priceId => ({ price: priceId }));
+            previewParams.subscription_items = immediatePriceIds.map((priceId: string) => ({ price: priceId }));
           } else {
             // Alte Items virtuell löschen und neue hinzufügen
-            const deletedItems = currentSub.items.data.map(item => ({
+            const deletedItems = currentSub.items.data.map((item: any) => ({
               id: item.id,
               deleted: true
             }));
-            const addedItems = newPriceIds.map(priceId => ({ price: priceId }));
+            const addedItems = immediatePriceIds.map((priceId: string) => ({ price: priceId }));
 
             previewParams.subscription = tenant.stripe_subscription_id;
             previewParams.subscription_items = [...deletedItems, ...addedItems];
             previewParams.subscription_proration_date = prorationDate;
           }
-        } catch (e) {
-          console.error("Fehler beim Abrufen der Subscription für Vorschau:", e.message);
-          // Fallback auf neues Abo Vorschau
-          previewParams.subscription_items = newPriceIds.map(priceId => ({ price: priceId }));
+        } catch (e: any) {
+          console.error("Fehler bei Vorschau-Params:", e.message);
+          previewParams.subscription_items = immediatePriceIds.map((priceId: string) => ({ price: priceId }));
         }
       } else {
         // --- NEUES ABO VORSCHAU ---
-        previewParams.subscription_items = newPriceIds.map(priceId => ({ price: priceId }));
+        const finalPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle);
+        previewParams.subscription_items = finalPriceIds.map((priceId: string) => ({ price: priceId }));
       }
 
       try {
@@ -368,8 +419,27 @@ Deno.serve(async (req) => {
           };
         };
 
-        const prorationDetails = calculateLineDetails(prorationLines, true); // Filtert Addon- (und ggf. Base-) Gutschriften aus
-        const regularDetails = calculateLineDetails(regularLines);
+        const prorationDetails = calculateLineDetails(prorationLines, true);
+
+        // --- FINAL-STATE VORSCHAU (Für den Preis im nächsten Monat) ---
+        // Da 'previewParams' nur den Immediate State enthält, müssen wir den 
+        // zukünftigen (Final) Zustand separat evaluieren, um den genauen
+        // Preis für den nächsten Abrechnungszyklus zu erhalten.
+        const finalPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle);
+        const finalPreviewParams: any = {
+          automatic_tax: { enabled: true },
+          subscription_items: finalPriceIds.map((priceId: string) => ({ price: priceId }))
+        };
+
+        if (tenant.stripe_customer_id) {
+          finalPreviewParams.customer = tenant.stripe_customer_id;
+        } else if (previewParams.customer_details) {
+          finalPreviewParams.customer_details = previewParams.customer_details;
+        }
+
+        const finalInvoice = await stripe.invoices.retrieveUpcoming(finalPreviewParams);
+        const finalRegularLines = finalInvoice.lines.data.filter(line => !line.proration);
+        const regularDetails = calculateLineDetails(finalRegularLines);
 
         let amountDueToday = 0;
         let taxDueToday = 0;
@@ -389,12 +459,10 @@ Deno.serve(async (req) => {
           netDueToday = regularDetails.net;
         }
 
-        const linesWithMetadata = upcomingInvoice.lines.data.map(line => ({
+        const upcomingLinesWithMetadata = upcomingInvoice.lines.data.map(line => ({
           ...line,
           package_type: priceTypeMap[line.price?.id] || 'unknown'
         })).filter(line => {
-           // Wir filtern die Zeilen raus, die wir in calculateLineDetails ignoriert haben, 
-           // damit die Anzeige im Frontend mit der Summe übereinstimmt.
            if (line.proration) {
               if (line.amount < 0) {
                  if (line.package_type === 'addon') return false;
@@ -405,6 +473,17 @@ Deno.serve(async (req) => {
            return true;
         });
 
+        const finalLinesWithMetadata = finalInvoice.lines.data.map(line => ({
+          ...line,
+          package_type: priceTypeMap[line.price?.id] || 'unknown'
+        }));
+
+        // Wir kombinieren die Prorations der aktuellen Vorschau (für "Heute fällig")
+        // mit den regulären Zeilen der finalen Vorschau (für "Nächster Monat")
+        const prorationLinesWithMetadata = upcomingLinesWithMetadata.filter(l => l.proration);
+        const finalRegularLinesWithMetadata = finalLinesWithMetadata.filter(l => !l.proration);
+        const combinedLines = [...prorationLinesWithMetadata, ...finalRegularLinesWithMetadata];
+
         return new Response(JSON.stringify({
           amountDueToday,
           taxDueToday,
@@ -413,10 +492,11 @@ Deno.serve(async (req) => {
           amountDueNextMonth: regularDetails.total,
           taxDueNextMonth: regularDetails.tax,
           netDueNextMonth: regularDetails.net,
-          lines: linesWithMetadata,
+          lines: combinedLines,
           currency: upcomingInvoice.currency,
           isBaseUpgrade
         }), { 
+
           headers: { 
             ...corsHeaders, 
             'Content-Type': 'application/json' 
@@ -458,165 +538,111 @@ Deno.serve(async (req) => {
 
       if (!hasActiveSub) throw new Error("Kein aktives Abo für Update gefunden. Bitte nutze den Checkout.");
 
-      console.log("Fetching price IDs for:", { newPlan, newAddons, cycle });
-      const newPriceIds = await getStripePriceIdsForPlanAndAddons(newPlan, newAddons, cycle);
-      console.log("Got price IDs:", newPriceIds);
-      const itemsArray = newPriceIds.map(priceId => ({ price: priceId }));
-
-      // Aktuelle Subscription abrufen, um die Item-IDs für den Austausch zu finden (Stripe empfiehlt das für Updates)
+      // Aktuelle Subscription abrufen, um die Item-IDs für den Austausch zu finden
       const currentSub = await stripe.subscriptions.retrieve(tenant.stripe_subscription_id);
 
-      // Lösche alle alten Items und füge neue hinzu
-      const itemsToUpdate = currentSub.items.data.map(item => ({
-        id: item.id,
-        deleted: true
-      })).concat(itemsArray.map(item => ({ price: item.price })));
-
-      // Prüfen ob es ein Upgrade oder Downgrade ist (inkl. Add-ons)
-      // Wir müssen Basis-Paket UND Add-ons berücksichtigen
       let currentAddons: string[] = [];
-      let addonsRemoved = false;
-      let behavior: 'always_invoice' | 'none' = 'always_invoice';
-
-      try {
-        // Aktuelle Paket-Preise ermitteln
-        const { data: allPackages } = await supabaseAdmin
-          .from('subscription_packages')
-          .select('plan_name, price_monthly, price_yearly, package_type');
-
-        const currentPlan = tenant.plan;
-
-        // WICHTIG: tenant.config könnte ein JSON-String sein oder undefined
-        if (tenant.config) {
-          // Falls config ein Objekt ist
-          if (typeof tenant.config === 'object') {
-            currentAddons = tenant.config.active_addons || [];
-          }
-          // Falls config ein String ist (manchmal passiert das bei JSON-Feldern)
-          else if (typeof tenant.config === 'string') {
-            try {
-              const parsed = JSON.parse(tenant.config);
-              currentAddons = parsed.active_addons || [];
-            } catch (e) {
-              console.warn("Could not parse tenant.config:", e);
-            }
+      if (tenant.config) {
+        if (typeof tenant.config === 'object') {
+          currentAddons = tenant.config.active_addons || [];
+        } else if (typeof tenant.config === 'string') {
+          try {
+            const parsed = JSON.parse(tenant.config);
+            currentAddons = parsed.active_addons || [];
+          } catch (e) {
+            console.warn("Could not parse tenant.config:", e);
           }
         }
-
-        const currentCycleFromMeta = currentSub.metadata?.cycle || 'monthly';
-
-        console.log("=== DOWNGRADE CHECK START ===");
-        console.log("Tenant config raw:", tenant.config);
-        console.log("Current state:", { currentPlan, currentAddons, currentCycle: currentCycleFromMeta });
-        console.log("New state:", { newPlan, newAddons, newCycle: cycle });
-
-        const currentBasePkg = allPackages?.find(p => p.plan_name === currentPlan && p.package_type === 'base');
-        const newBasePkg = allPackages?.find(p => p.plan_name === newPlan && p.package_type === 'base');
-
-        if (!currentBasePkg) {
-          console.warn("WARNING: Current base package not found:", currentPlan);
-        }
-        if (!newBasePkg) {
-          console.warn("WARNING: New base package not found:", newPlan);
-        }
-
-        const currentBasePrice = currentCycleFromMeta === 'yearly' ? (currentBasePkg?.price_yearly || 0) : (currentBasePkg?.price_monthly || 0);
-        const newBasePrice = cycle === 'yearly' ? (newBasePkg?.price_yearly || 0) : (newBasePkg?.price_monthly || 0);
-
-        // Addon-Preise berechnen
-        let currentAddonsPrice = 0;
-        if (currentAddons.length > 0) {
-          const currentAddonPkgs = allPackages?.filter(p => currentAddons.includes(p.plan_name) && p.package_type === 'addon') || [];
-          console.log("Current addon packages found:", currentAddonPkgs.map(p => p.plan_name));
-          currentAddonsPrice = currentAddonPkgs.reduce((sum, pkg) => {
-            const price = currentCycleFromMeta === 'yearly' ? (pkg.price_yearly || 0) : (pkg.price_monthly || 0);
-            console.log(`  ${pkg.plan_name}: ${price}€`);
-            return sum + price;
-          }, 0);
-        }
-
-        let newAddonsPrice = 0;
-        if (newAddons && newAddons.length > 0) {
-          const newAddonPkgs = allPackages?.filter(p => newAddons.includes(p.plan_name) && p.package_type === 'addon') || [];
-          console.log("New addon packages found:", newAddonPkgs.map(p => p.plan_name));
-          newAddonsPrice = newAddonPkgs.reduce((sum, pkg) => {
-            const price = cycle === 'yearly' ? (pkg.price_yearly || 0) : (pkg.price_monthly || 0);
-            console.log(`  ${pkg.plan_name}: ${price}€`);
-            return sum + price;
-          }, 0);
-        }
-
-        const currentTotalPrice = currentBasePrice + currentAddonsPrice;
-        const newTotalPrice = newBasePrice + newAddonsPrice;
-
-        console.log("Price comparison:", {
-          currentBase: currentBasePrice,
-          currentAddons: currentAddonsPrice,
-          currentTotal: currentTotalPrice,
-          newBase: newBasePrice,
-          newAddons: newAddonsPrice,
-          newTotal: newTotalPrice
-        });
-
-        // Wenn der neue Gesamtpreis niedriger ist -> Downgrade (vormerken)
-        // ODER wenn Add-ons entfernt werden (auch wenn Basis gleich bleibt) -> Downgrade (vormerken)
-        const isDowngrade = newTotalPrice < currentTotalPrice;
-
-        // Prüfen ob Add-ons entfernt wurden (nicht nur Anzahl, sondern tatsächliche Änderung)
-        const normalizedNewAddons = (newAddons || []).sort();
-        const normalizedCurrentAddons = currentAddons.sort();
-        const addonsChanged = JSON.stringify(normalizedNewAddons) !== JSON.stringify(normalizedCurrentAddons);
-        addonsRemoved = currentAddons.some(addon => !normalizedNewAddons.includes(addon));
-
-        console.log("Decision factors:", {
-          isDowngrade,
-          addonsChanged,
-          addonsRemoved,
-          priceDifference: newTotalPrice - currentTotalPrice
-        });
-
-        // WICHTIG: Bei gleichem Preis aber geänderten Add-ons ist es KEIN Downgrade
-        // Nur wenn Preis sinkt ODER Add-ons entfernt werden (bei gleichem/höherem Basispaket)
-        if (isDowngrade || (addonsRemoved && !isDowngrade && newBasePrice >= currentBasePrice)) {
-          behavior = 'none';
-          console.log("✅ DOWNGRADE ERKANNT - Wird zum Periodenende vorgemerkt");
-        } else {
-          console.log("✅ UPGRADE ERKANNT - Wird sofort durchgeführt");
-        }
-        console.log("=== DOWNGRADE CHECK END ===");
-      } catch (e) {
-        console.error("FEHLER bei Upgrade/Downgrade-Prüfung:", e);
-        console.warn("Nutze Fallback Standard-Verhalten (always_invoice)");
       }
 
-      if (behavior === 'always_invoice') {
-        // UPGRADE: Stripe die Subscription überschreiben lassen (Sofortiges Upgrade)
-        const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
-          items: itemsToUpdate,
-          proration_behavior: behavior,
-          metadata: { 
-            plan_name: newPlan, 
-            addons: JSON.stringify(newAddons), 
-            cycle: cycle, 
-            tenant_id: tenant.id.toString(),
-            upcoming_plan: "",
-            upcoming_addons: ""
-          }
-        });
+      const currentPlan = tenant.plan;
+      const currentCycleFromMeta = currentSub.metadata?.cycle || 'monthly';
+      const normalizedCurrentAddons = [...currentAddons].sort();
+      const normalizedNewAddons = [...(newAddons || [])].sort();
 
-        // Die erzeugte anteilige Rechnung direkt bezahlen lassen (falls Karte hinterlegt ist)
-        const latestInvoiceId = updatedSub.latest_invoice;
-        if (latestInvoiceId) {
-          const invoice = await stripe.invoices.retrieve(latestInvoiceId as string);
-          if (invoice.status === 'open' && invoice.amount_due > 0) {
-            // Versuchen abzubuchen
-            await stripe.invoices.pay(invoice.id);
-          }
+      // Aktuelle Paket-Preise ermitteln, um Downgrades zu erkennen
+      const { data: allPackages } = await supabaseAdmin
+        .from('subscription_packages')
+        .select('plan_name, price_monthly, price_yearly, package_type');
+
+      const currentBasePkg = allPackages?.find(p => p.plan_name === currentPlan && p.package_type === 'base');
+      const newBasePkg = allPackages?.find(p => p.plan_name === newPlan && p.package_type === 'base');
+
+      const currentBasePrice = currentCycleFromMeta === 'yearly' ? (currentBasePkg?.price_yearly || 0) : (currentBasePkg?.price_monthly || 0);
+      const newBasePrice = cycle === 'yearly' ? (newBasePkg?.price_yearly || 0) : (newBasePkg?.price_monthly || 0);
+
+      const isBaseDowngrade = newBasePrice < currentBasePrice;
+
+      // 1. BESTIMME SOFORTIGE / ULTIMATIVE ZIEL-ITEMS
+      // Immediate Plan (Alles was teurer oder gleich ist, wird sofort aktiv. Downgrades werden "verschoben" -> dh. der alte Plan bleibt aktiv)
+      const immediatePlan = isBaseDowngrade ? currentPlan : newPlan;
+      const immediateCycle = isBaseDowngrade ? currentCycleFromMeta : cycle;
+
+      // Immediate Addons: Alle NEUEN Addons sollen sofort aktiv sein (Upgrades). 
+      // Alle ABGEWÄHLTEN Addons sollen auch erstmal aktiv bleiben (da Downgrade).
+      // Daher ist die Menge an sofort aktiven Addons = currentAddons UNION newAddons
+      const immediateAddons = Array.from(new Set([...normalizedCurrentAddons, ...normalizedNewAddons]));
+
+      const finalPlan = newPlan;
+      const finalCycle = cycle;
+      const finalAddons = normalizedNewAddons;
+
+      console.log("=== MIXED UPGRADE/DOWNGRADE CALCULATION ===");
+      console.log("Current state:", { plan: currentPlan, addons: normalizedCurrentAddons, cycle: currentCycleFromMeta });
+      console.log("Immediate state:", { plan: immediatePlan, addons: immediateAddons, cycle: immediateCycle });
+      console.log("Final state:", { plan: finalPlan, addons: finalAddons, cycle: finalCycle });
+
+      const needsSchedule = immediatePlan !== finalPlan || 
+                            immediateCycle !== finalCycle ||
+                            JSON.stringify([...immediateAddons].sort()) !== JSON.stringify([...finalAddons].sort());
+
+      // 2. SOFORTIGE PRORATION (Sofortiges Update)
+      const immediatePriceIds = await getStripePriceIdsForPlanAndAddons(immediatePlan, immediateAddons, immediateCycle);
+      const finalPriceIds = await getStripePriceIdsForPlanAndAddons(finalPlan, finalAddons, finalCycle);
+
+      const immediateItemsToUpdate = currentSub.items.data.map(item => ({
+        id: item.id,
+        deleted: true
+      })).concat(immediatePriceIds.map(price => ({ price })));
+
+      const isReturningToCurrent = finalPlan === tenant.plan &&
+                                   JSON.stringify(finalAddons) === JSON.stringify(normalizedCurrentAddons);
+
+      // Metadaten für das anstehende Abo
+      const upcomingPlanMeta = (needsSchedule && !isReturningToCurrent) ? finalPlan : "";
+      const upcomingAddonsMeta = (needsSchedule && !isReturningToCurrent) ? JSON.stringify(finalAddons) : "";
+      const upcomingCycleMeta = (needsSchedule && !isReturningToCurrent) ? finalCycle : "";
+
+      const updatedSub = await stripe.subscriptions.update(tenant.stripe_subscription_id, {
+        items: immediateItemsToUpdate,
+        proration_behavior: 'always_invoice',
+        metadata: { 
+          plan_name: immediatePlan, 
+          addons: JSON.stringify(immediateAddons), 
+          cycle: immediateCycle, 
+          tenant_id: tenant.id.toString(),
+          upcoming_plan: upcomingPlanMeta,
+          upcoming_addons: upcomingAddonsMeta,
+          upcoming_cycle: upcomingCycleMeta
         }
-      } else {
-        // DOWNGRADE via Schedule (Wirksam zum nächsten Abrechnungszeitraum)
-        const subId = currentSub.id;
-        let schedId = typeof currentSub.schedule === 'string' ? currentSub.schedule : currentSub.schedule?.id;
+      });
+
+      // Sofort-Rechnung ggf. abbuchen
+      const latestInvoiceId = updatedSub.latest_invoice;
+      if (latestInvoiceId) {
+        const invoice = await stripe.invoices.retrieve(latestInvoiceId as string);
+        if (invoice.status === 'open' && invoice.amount_due > 0) {
+          try {
+             await stripe.invoices.pay(invoice.id);
+          } catch(e) { console.warn("Auto-pay failed", e); }
+        }
+      }
+
+      // 3. SCHEDULE ERSTELLEN FALLS NÖTIG
+      if (needsSchedule && !isReturningToCurrent) {
+        console.log("✅ ÄNDERUNG ENTHÄLT DOWNGRADE KOMPONENTEN - Erstelle Schedule für das Periodenende");
+        const subId = updatedSub.id;
+        let schedId = typeof updatedSub.schedule === 'string' ? updatedSub.schedule : updatedSub.schedule?.id;
 
         if (!schedId) {
           const schedule = await stripe.subscriptionSchedules.create({ from_subscription: subId });
@@ -624,22 +650,23 @@ Deno.serve(async (req) => {
         }
 
         const scheduleObj = await stripe.subscriptionSchedules.retrieve(schedId);
-        const periodEndTs = currentSub.current_period_end;
+        const periodEndTs = updatedSub.current_period_end;
 
-        // Für metered prices dürfen wir keine quantity setzen
-        const currentPhaseItems = currentSub.items.data.map((item: any) => {
-          const baseItem: any = { price: item.price.id };
-          if (item.price.recurring?.usage_type !== 'metered') {
-            baseItem.quantity = 1;
+        const currentPhaseItems = scheduleObj.phases[0].items.map((i: any) => {
+          const baseItem: any = { price: typeof i.price === 'string' ? i.price : i.price.id };
+          if (i.quantity !== undefined && i.quantity !== null) {
+            baseItem.quantity = i.quantity;
+          }
+          if (i.billing_thresholds) {
+            baseItem.billing_thresholds = i.billing_thresholds;
           }
           return baseItem;
         });
 
-        // Neue Items: Prices abrufen um usage_type zu prüfen
         const newPhaseItems = await Promise.all(
-          itemsArray.map(async (item: any) => {
-            const priceObj = await stripe.prices.retrieve(item.price);
-            const baseItem: any = { price: item.price };
+          finalPriceIds.map(async (priceId: string) => {
+            const priceObj = await stripe.prices.retrieve(priceId);
+            const baseItem: any = { price: priceId };
             if (priceObj.recurring?.usage_type !== 'metered') {
               baseItem.quantity = 1;
             }
@@ -652,55 +679,57 @@ Deno.serve(async (req) => {
           default_settings: { automatic_tax: { enabled: true } },
           phases: [
             {
-              // Aktuelle Phase bleibt bis zum Ende der Laufzeit unverändert
               start_date: scheduleObj.phases[0].start_date,
               end_date: periodEndTs,
               items: currentPhaseItems,
             },
             {
-              // Neue Phase (Downgrade) startet am Ende der aktuellen Laufzeit
               start_date: periodEndTs,
+              iterations: 1, // Zwingt Stripe dazu, die Phase für genau 1 Rechnungszyklus zu evaluieren, wodurch wiederkehrende Kosten für die nächste Rechnung ordnungsgemäß projektiert werden
               items: newPhaseItems,
               metadata: {
-                plan_name: newPlan,
-                addons: JSON.stringify(newAddons),
-                cycle: cycle,
+                plan_name: finalPlan,
+                addons: JSON.stringify(finalAddons),
+                cycle: finalCycle,
                 tenant_id: tenant.id.toString(),
                 upcoming_plan: "",
-                upcoming_addons: ""
+                upcoming_addons: "",
+                upcoming_cycle: ""
               }
             }
           ]
         });
-
-        // Metadaten an der aktuellen Subscription anpassen, damit das Backend / Webhooks wissen, was ansteht
-        await stripe.subscriptions.update(subId, {
-          metadata: {
-            ...currentSub.metadata,
-            upcoming_plan: newPlan,
-            upcoming_addons: JSON.stringify(newAddons),
-            upcoming_cycle: cycle
-          }
-        });
+      } else if (isReturningToCurrent && typeof updatedSub.schedule === 'string') {
+         await stripe.subscriptionSchedules.release(updatedSub.schedule);
+      } else if (isReturningToCurrent && updatedSub.schedule?.id) {
+         await stripe.subscriptionSchedules.release(updatedSub.schedule.id);
       }
 
-      // Update Pfotencard DB (Tenant)
+      // 4. Update Pfotencard DB (Tenant)
       const config = tenant.config || {};
       const updateData: any = { config };
 
-      const isReturningToCurrent = newPlan === tenant.plan &&
-                                   JSON.stringify([...(newAddons || [])].sort()) === JSON.stringify([...(tenant.config?.active_addons || [])].sort());
+      if (needsSchedule && !isReturningToCurrent) {
+        updateData.plan = immediatePlan;
+        updateData.upcoming_plan = finalPlan;
+        updateData.upcoming_addons = finalAddons;
+        updateData.upcoming_cycle = finalCycle;
+      } else {
+        updateData.plan = finalPlan;
+        updateData.upcoming_plan = null;
+        updateData.upcoming_cycle = null;
+        updateData.upcoming_addons = null;
+      }
 
-      if (behavior === 'none' && !isReturningToCurrent) {
-        // Downgrade: Nur vormerken, aktueller Plan und Add-ons bleiben aktiv bis Periodenende
-        updateData.upcoming_plan = newPlan;
-        updateData.upcoming_addons = newAddons || [];
-        updateData.upcoming_cycle = cycle;
-        console.log("Vorgemerkt für nächste Periode:", { upcoming_plan: newPlan, upcoming_addons: newAddons });
+      await supabaseAdmin.from('tenants').update(updateData).eq('id', tenant.id);
 
-        // NEU: Markiere Addons, die entfernt werden sollen, mit removes_at_period_end = true
-        if (addonsRemoved) {
-          const removedAddons = currentAddons.filter(a => !(newAddons || []).includes(a));
+      // tenant_addons synchronisieren (sofort aktualisieren auf den Immediate Zustand)
+      await syncTenantAddons(tenant.id, immediateAddons);
+
+      // Falls es Downgrades bei Addons gab, diese nun nachträglich auf removes_at_period_end setzen
+      if (needsSchedule && !isReturningToCurrent) {
+        const removedAddons = immediateAddons.filter(a => !finalAddons.includes(a));
+        if (removedAddons.length > 0) {
           const { data: removedPkgs } = await supabaseAdmin
             .from('subscription_packages')
             .select('id')
@@ -716,27 +745,49 @@ Deno.serve(async (req) => {
             console.log("Addons marked for removal at period end:", removedAddons);
           }
         }
-      } else {
-        // Upgrade oder Rückkehr zum aktuellen Plan: Sofort aktivieren
-        updateData.plan = newPlan;
-        updateData.upcoming_plan = null;
-        updateData.upcoming_cycle = null;
-        updateData.upcoming_addons = null;
-        console.log("Sofort aktiviert:", { plan: newPlan, active_addons: newAddons });
-      }
-
-      await supabaseAdmin.from('tenants').update(updateData).eq('id', tenant.id);
-
-      // Synchronize addons in tenant_addons table
-      // NUR bei Upgrades sofort synchronisieren, bei Downgrades erst beim Webhook
-      if (behavior !== 'none' || isReturningToCurrent) {
-          await syncTenantAddons(tenant.id, newAddons || []);
-          console.log("tenant_addons sofort aktualisiert");
-      } else {
-          console.log("tenant_addons Synchronisation (Löschen/Hinzufügen) verschoben auf Periodenende (via Webhook)");
       }
 
       return new Response(JSON.stringify({ status: 'success' }), { headers: corsHeaders });
+    }
+
+    // ==========================================
+    // ACTION: UPCOMING CHANGES VERWERFEN
+    // ==========================================
+    if (action === 'cancel_pending_changes') {
+      if (!tenant.stripe_subscription_id) throw new Error('Kein aktives Abo');
+
+      const currentSub = await stripe.subscriptions.retrieve(tenant.stripe_subscription_id);
+      
+      // 1. Metadaten auf der Subscription bereinigen, BEVOR der Schedule released wird 
+      //    (damit Webhooks nicht die alten Metadaten in die DB zurückschreiben)
+      await stripe.subscriptions.update(tenant.stripe_subscription_id, {
+        metadata: {
+          ...currentSub.metadata,
+          upcoming_plan: "",
+          upcoming_addons: "",
+          upcoming_cycle: ""
+        }
+      });
+
+      // 2. Wenn es einen Schedule gibt, diesen releasen
+      let schedId = typeof currentSub.schedule === 'string' ? currentSub.schedule : currentSub.schedule?.id;
+      if (schedId) {
+        await stripe.subscriptionSchedules.release(schedId);
+      }
+
+      // 3. Datenbank aktualisieren (Tenants)
+      await supabaseAdmin.from('tenants').update({
+        upcoming_plan: null,
+        upcoming_addons: null,
+        upcoming_cycle: null
+      }).eq('id', tenant.id);
+
+      // 4. Datenbank aktualisieren (Tenant Addons) - removes_at_period_end zurücksetzen
+      await supabaseAdmin.from('tenant_addons').update({
+        removes_at_period_end: false
+      }).eq('tenant_id', tenant.id);
+
+      return new Response(JSON.stringify({ status: 'success', message: 'Änderungen verworfen' }), { headers: corsHeaders });
     }
 
     // ==========================================
