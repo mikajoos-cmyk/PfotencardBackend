@@ -155,6 +155,45 @@ Deno.serve(async (req) => {
                            !['canceled', 'incomplete_expired'].includes(tenant.stripe_subscription_status));
 
     // ==========================================
+    // ACTION: GET_PAYMENT_METHODS
+    // ==========================================
+    if (action === 'get_payment_methods') {
+      if (!tenant.stripe_customer_id) {
+        return new Response(JSON.stringify({ paymentMethods: [] }), { 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      }
+
+      try {
+        const paymentMethods = await stripe.paymentMethods.list({
+          customer: tenant.stripe_customer_id,
+          type: 'card',
+        });
+
+        return new Response(JSON.stringify({ 
+          paymentMethods: paymentMethods.data.map(pm => ({
+            id: pm.id,
+            type: pm.type,
+            card: pm.card ? {
+              brand: pm.card.brand,
+              last4: pm.card.last4,
+              exp_month: pm.card.exp_month,
+              exp_year: pm.card.exp_year,
+            } : null,
+          }))
+        }), { 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      } catch (e: any) {
+        console.error("Fehler beim Abrufen der Zahlungsmethoden:", e.message);
+        return new Response(JSON.stringify({ error: e.message }), { 
+          status: 400, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
+    // ==========================================
     // ACTION: GET STATUS
     // ==========================================
     if (action === 'get_status') {

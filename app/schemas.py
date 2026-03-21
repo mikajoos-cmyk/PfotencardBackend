@@ -306,6 +306,7 @@ class UserBase(BaseModel):
     notif_push_alert: bool = False
     
     reminder_offset_minutes: int = 60
+    ical_token: Optional[str] = None
     permissions: Dict[str, bool] = {
         "can_create_courses": False,
         "can_edit_status": False,

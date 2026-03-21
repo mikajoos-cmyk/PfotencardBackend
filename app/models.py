@@ -279,6 +279,9 @@ class User(Base):
 
     # Erinnerungseinstellungen
     reminder_offset_minutes = Column(Integer, default=60)
+    
+    # NEU: iCal Export Token
+    ical_token = Column(String(255), unique=True, nullable=True)
 
     # Berechtigungen (für Mitarbeiter)
     permissions = Column(JSONB, default={

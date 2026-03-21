@@ -18,6 +18,13 @@ def send_notification(db: Session, user: models.User, type: str, title: str, mes
     Prüft die Berechtigungen des Users und delegiert den tatsächlichen Versand
     an die Supabase Edge Functions (send-email / send-push).
     """
+    # --- URL vervollständigen (Subdomain hinzufügen) ---
+    if url and url.startswith("/"):
+        if user.tenant and user.tenant.subdomain:
+            url = f"https://{user.tenant.subdomain}.pfotencard.de{url}"
+        else:
+            url = f"https://pfotencard.de{url}"
+
     channels = []
     print(f"DEBUG [Notify]: Starte Prüfung für Typ '{type}' an User '{user.email}'")
 
@@ -44,6 +51,13 @@ def send_notification(db: Session, user: models.User, type: str, title: str, mes
     print(f"DEBUG [Notify]: Gewählte Kanäle nach Berechtigungs-Prüfung: {channels}")
 
     tenant_name = user.tenant.name if user.tenant else "Pfotencard"
+    branding = (user.tenant.config or {}).get("branding", {}) if user.tenant else {}
+    invoice_settings = (user.tenant.config or {}).get("invoice_settings", {}) if user.tenant else {}
+    
+    # Logo-Suche: Erst Branding, dann Invoice-Settings
+    logo_url = branding.get("logo_url") or invoice_settings.get("logo_url")
+    
+    support_email = user.tenant.support_email if user.tenant else "support@pfotencard.de"
 
     # Headers für den sicheren Aufruf der Edge Functions
     headers = {
@@ -61,7 +75,10 @@ def send_notification(db: Session, user: models.User, type: str, title: str, mes
             "title": title,
             "message": message,
             "url": url,
-            "details": details
+            "details": details,
+            "logoUrl": logo_url,
+            "primaryColor": branding.get("primary_color"),
+            "supportEmail": support_email
         }
         try:
             # Sende asynchron oder synchron an die Edge Function

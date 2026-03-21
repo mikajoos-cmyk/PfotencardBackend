@@ -1365,7 +1365,7 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
                         notify_user(
                             db=db,
                             user_id=booking.user_id,
-                            type="booking",
+                            type="waitinglist_move",
                             title="Platz bestätigt (Nachgerückt)",
                             message=f"Gute Nachrichten! Du bist für '{other_appt.title}' nachgerückt, da die Teilnehmerzahl erhöht wurde.",
                             url="/appointments",
@@ -1402,7 +1402,7 @@ def update_appointment(db: Session, appointment_id: int, tenant_id: int, update:
                 notify_user(
                     db=db,
                     user_id=booking.user_id,
-                    type="booking",
+                    type="waitinglist_move",
                     title="Platz bestätigt (Nachgerückt)",
                     message=f"Gute Nachrichten! Du bist für '{db_appt.title}' nachgerückt, da die Teilnehmerzahl erhöht wurde.",
                     url="/appointments",
