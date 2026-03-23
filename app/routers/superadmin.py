@@ -3,6 +3,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
+from uuid import UUID
+import uuid
 import httpx
 
 from app import models, schemas, auth, database, crud, stripe_service
@@ -92,13 +94,17 @@ def get_stats(db: Session = Depends(database.get_db)):
     # Neue Tenants im letzten Monat
     last_month = datetime.now() - timedelta(days=30)
     new_tenants = db.query(models.Tenant).filter(models.Tenant.created_at >= last_month).count()
+
+    # Promo Codes Gesamtzahl
+    total_promo_codes = db.query(models.PromoCode).count()
     
     return {
         "total_tenants": total_tenants,
         "active_tenants": active_tenants,
         "total_revenue": total_revenue,
         "total_users": total_users,
-        "new_tenants_last_month": new_tenants
+        "new_tenants_last_month": new_tenants,
+        "total_promo_codes": total_promo_codes
     }
 
 @router.get("/tenants", response_model=List[schemas.Tenant], dependencies=[Depends(auth.get_current_superadmin)])
@@ -294,7 +300,124 @@ def update_package(package_id: int, package: schemas.SubscriptionPackageCreate, 
         db.commit()
         db.refresh(db_package)
         return db_package
+        
+    except stripe.error.StripeError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Stripe Error: {str(e)}")
+
+# --- PROMO CODES ---
+
+@router.get("/promo-codes", response_model=List[schemas.PromoCode], dependencies=[Depends(auth.get_current_superadmin)])
+def get_promo_codes(db: Session = Depends(database.get_db)):
+    return db.query(models.PromoCode).order_by(models.PromoCode.created_at.desc()).all()
+
+@router.post("/promo-codes", response_model=schemas.PromoCode)
+def create_promo_code(
+    promo: schemas.PromoCodeCreate, 
+    current_user: models.User = Depends(auth.get_current_superadmin), 
+    db: Session = Depends(database.get_db)
+):
+    # 1. Stripe Product IDs für applicable_plans holen
+    stripe_product_ids = []
+    if promo.applicable_plans:
+        packages = db.query(models.SubscriptionPackage).filter(
+            models.SubscriptionPackage.plan_name.in_(promo.applicable_plans),
+            models.SubscriptionPackage.stripe_product_id.isnot(None)
+        ).all()
+        stripe_product_ids = [p.stripe_product_id for p in packages]
+
+    try:
+        # 2. Stripe Coupon erstellen
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+        coupon = stripe.Coupon.create(
+            percent_off=100,
+            duration='repeating',
+            duration_in_months=promo.duration_months,
+            applies_to={'products': stripe_product_ids} if stripe_product_ids else None,
+            name=promo.name or promo.code,
+        )
+
+        # 3. Stripe Promotion Code erstellen
+        promotion_code = stripe.PromotionCode.create(
+            coupon=coupon.id,
+            code=promo.code.upper(),
+            max_redemptions=promo.max_uses,
+            expires_at=int(promo.expires_at.timestamp()) if promo.expires_at else None,
+        )
+
+        # 4. In Datenbank speichern
+        db_promo = models.PromoCode(
+            **promo.dict(),
+            code=promo.code.upper(),
+            stripe_coupon_id=coupon.id,
+            stripe_promotion_code_id=promotion_code.id,
+            created_by=None # In FastAPI haben wir keine Supabase User ID direkt, wir könnten current_user.id nehmen
+        )
+        # Wenn current_user.auth_id vorhanden ist (UUID), nutzen wir diese
+        if hasattr(current_user, 'auth_id') and current_user.auth_id:
+            db_promo.created_by = current_user.auth_id
+
+        db.add(db_promo)
+        db.commit()
+        db.refresh(db_promo)
+        return db_promo
 
     except stripe.error.StripeError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Stripe Error: {str(e)}")
+
+@router.put("/promo-codes/{promo_id}", response_model=schemas.PromoCode, dependencies=[Depends(auth.get_current_superadmin)])
+def update_promo_code(promo_id: UUID, promo_update: schemas.PromoCodeUpdate, db: Session = Depends(database.get_db)):
+    db_promo = db.query(models.PromoCode).filter(models.PromoCode.id == promo_id).first()
+    if not db_promo:
+        raise HTTPException(status_code=404, detail="Promo code not found")
+
+    try:
+        # Falls is_active geändert wurde -> Stripe Sync
+        if promo_update.is_active is not None and promo_update.is_active != db_promo.is_active:
+            stripe.api_key = settings.STRIPE_SECRET_KEY
+            if db_promo.stripe_promotion_code_id:
+                stripe.PromotionCode.modify(
+                    db_promo.stripe_promotion_code_id,
+                    active=promo_update.is_active
+                )
+        
+        # Felder updaten
+        update_data = promo_update.dict(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(db_promo, key, value)
+        
+        db.commit()
+        db.refresh(db_promo)
+        return db_promo
+
+    except stripe.error.StripeError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Stripe Error: {str(e)}")
+
+@router.delete("/promo-codes/{promo_id}", dependencies=[Depends(auth.get_current_superadmin)])
+def delete_promo_code(promo_id: UUID, db: Session = Depends(database.get_db)):
+    db_promo = db.query(models.PromoCode).filter(models.PromoCode.id == promo_id).first()
+    if not db_promo:
+        raise HTTPException(status_code=404, detail="Promo code not found")
+
+    try:
+        # Stripe Promotion Code deaktivieren
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+        if db_promo.stripe_promotion_code_id:
+            try:
+                stripe.PromotionCode.modify(db_promo.stripe_promotion_code_id, active=False)
+            except:
+                pass
+        
+        db.delete(db_promo)
+        db.commit()
+        return {"message": "Promo code deleted successfully"}
+
+    except stripe.error.StripeError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Stripe Error: {str(e)}")
+
+@router.get("/promo-redemptions", response_model=List[schemas.PromoCodeRedemption], dependencies=[Depends(auth.get_current_superadmin)])
+def get_promo_redemptions(db: Session = Depends(database.get_db)):
+    return db.query(models.PromoCodeRedemption).order_by(models.PromoCodeRedemption.created_at.desc()).all()

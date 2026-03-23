@@ -150,6 +150,42 @@ Deno.serve(async (req) => {
       await supabaseAdmin.from('tenant_addons').insert(inserts);
     }
 
+    async function redeemPromoCode(promoCodeId: string, tenantId: number) {
+      if (!promoCodeId) return;
+
+      console.log('[manage-subscription] Löse Promo-Code ein:', promoCodeId);
+
+      // Finde den internen Promo Code anhand der Stripe Promotion Code ID
+      const { data: promo, error: promoError } = await supabaseAdmin
+        .from('promo_codes')
+        .select('*')
+        .eq('stripe_promotion_code_id', promoCodeId)
+        .single();
+
+      if (promoError || !promo) {
+        console.error('[manage-subscription] Promo Code nicht in DB gefunden für Stripe ID:', promoCodeId);
+        return;
+      }
+
+      // Eintrag in redemptions (Unique Constraint auf promo_code_id, tenant_id verhindert Mehrfachnutzung)
+      const { error: redeemError } = await supabaseAdmin.from('promo_code_redemptions').insert({
+        promo_code_id: promo.id,
+        tenant_id: tenantId,
+        applied_months: promo.duration_months
+      });
+
+      if (redeemError) {
+          console.warn('[manage-subscription] Fehler beim Erstellen des Redemption-Eintrags (vielleicht schon eingelöst):', redeemError.message);
+          return;
+      }
+
+      // Zähler erhöhen
+      await supabaseAdmin
+        .from('promo_codes')
+        .update({ current_uses: (promo.current_uses || 0) + 1 })
+        .eq('id', promo.id);
+    }
+
     const hasActiveSub = !!(tenant.stripe_subscription_id && 
                            tenant.stripe_subscription_status && 
                            !['canceled', 'incomplete_expired'].includes(tenant.stripe_subscription_status));
@@ -859,8 +895,41 @@ Deno.serve(async (req) => {
     // ACTION: CHECKOUT / UPGRADE / NEUES ABO
     // ==========================================
     if (action === 'create_checkout') {
-      // ... (Dein existierender Code bleibt hier unangetastet)
-      const { plan, cycle, billingDetails, addons = [] } = body
+      const { plan, cycle, billingDetails, addons = [], promoCodeId } = body
+
+      if (promoCodeId) {
+          console.log('[manage-subscription] Validiere Promo-Code vor Checkout:', promoCodeId);
+          const { data: promoCheck, error: promoCheckError } = await supabaseAdmin
+            .from('promo_codes')
+            .select('id, is_active, max_uses, current_uses, expires_at')
+            .eq('stripe_promotion_code_id', promoCodeId)
+            .single();
+
+          if (promoCheckError || !promoCheck) {
+              throw new Error('Gutscheincode nicht gefunden.');
+          }
+          if (!promoCheck.is_active) {
+              throw new Error('Gutscheincode ist nicht aktiv.');
+          }
+          if (promoCheck.max_uses && promoCheck.current_uses >= promoCheck.max_uses) {
+              throw new Error('Gutscheincode Nutzungslimit erreicht.');
+          }
+          if (promoCheck.expires_at && new Date(promoCheck.expires_at) < new Date()) {
+              throw new Error('Gutscheincode abgelaufen.');
+          }
+          
+          // Prüfung auf Mehrfachnutzung
+          const { data: redemptionCheck } = await supabaseAdmin
+            .from('promo_code_redemptions')
+            .select('id')
+            .eq('promo_code_id', promoCheck.id)
+            .eq('tenant_id', tenant.id)
+            .maybeSingle();
+            
+          if (redemptionCheck) {
+              throw new Error('Gutscheincode wurde bereits eingelöst.');
+          }
+      }
 
       const { data: packageData } = await supabaseAdmin
           .from('subscription_packages')
@@ -915,8 +984,13 @@ Deno.serve(async (req) => {
           proration_behavior: 'always_invoice',
           automatic_tax: { enabled: true },
           payment_settings: { save_default_payment_method: 'on_subscription' },
+          discounts: promoCodeId ? [{ promotion_code: promoCodeId }] : undefined,
           metadata: { plan_name: plan, cycle: cycle, tenant_id: tenant.id.toString() }
         })
+
+        if (promoCodeId) {
+            await redeemPromoCode(promoCodeId, tenant.id)
+        }
 
         return new Response(JSON.stringify({ status: 'updated', subscriptionId: updatedSub.id }), { headers: corsHeaders })
       } else {
@@ -927,8 +1001,13 @@ Deno.serve(async (req) => {
           automatic_tax: { enabled: true },
           payment_settings: { save_default_payment_method: 'on_subscription' },
           expand: ['latest_invoice.payment_intent'],
+          discounts: promoCodeId ? [{ promotion_code: promoCodeId }] : undefined,
           metadata: { plan_name: plan, cycle: cycle, tenant_id: tenant.id.toString() }
         })
+
+        if (promoCodeId) {
+            await redeemPromoCode(promoCodeId, tenant.id)
+        }
 
         const invoice = sub.latest_invoice as Stripe.Invoice
         const paymentIntent = invoice.payment_intent as Stripe.PaymentIntent

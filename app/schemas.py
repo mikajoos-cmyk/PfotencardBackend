@@ -103,6 +103,10 @@ class Tenant(TenantBase):
     avv_accepted_at: Optional[datetime] = None
     avv_accepted_version: Optional[str] = None
     top_up_fee_percent: float = 0.0
+    
+    # Stripe Connect Integration
+    stripe_account_id: Optional[str] = None
+    stripe_account_active: bool = False
 
     class Config:
         from_attributes = True
@@ -144,6 +148,7 @@ class TenantStatus(BaseModel):
     top_up_fee_percent: float = 0.0
     current_billing_period_fees: float = 0.0
     active_addons: List[str] = []
+    active_promo_code: Optional[Dict[str, Any]] = None
     
     # Abwärtskompatibilität
     config: Dict[str, Any] = {}
@@ -182,6 +187,7 @@ class SuperAdminStats(BaseModel):
     total_revenue: float
     total_users: int
     new_tenants_last_month: int
+    total_promo_codes: int
 
 class SubscriptionDetails(BaseModel):
     plan: Optional[str] = None
@@ -785,3 +791,47 @@ class CertificateLayoutMetadata(BaseModel):
     image_slots: List[Dict[str, Any]]
     placeholders: List[str]
     trigger_data: Dict[str, Dict[str, Any]] = {}
+
+# --- PROMO CODES ---
+
+class PromoCodeBase(BaseModel):
+    code: str
+    name: Optional[str] = None
+    duration_months: int = 1
+    max_uses: Optional[int] = None
+    is_active: bool = True
+    expires_at: Optional[datetime] = None
+    applicable_plans: List[str] = []
+    discount_type: str = "stripe"
+
+class PromoCodeCreate(PromoCodeBase):
+    pass
+
+class PromoCodeUpdate(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+    max_uses: Optional[int] = None
+    expires_at: Optional[datetime] = None
+
+class PromoCode(PromoCodeBase):
+    id: UUID
+    current_uses: int
+    created_at: datetime
+    stripe_coupon_id: Optional[str] = None
+    stripe_promotion_code_id: Optional[str] = None
+    created_by: Optional[UUID] = None
+
+    class Config:
+        from_attributes = True
+
+class PromoCodeRedemption(BaseModel):
+    id: UUID
+    promo_code_id: UUID
+    tenant_id: int
+    applied_months: int
+    created_at: datetime
+    promo_code: Optional[PromoCode] = None
+    tenant: Optional[Tenant] = None
+
+    class Config:
+        from_attributes = True

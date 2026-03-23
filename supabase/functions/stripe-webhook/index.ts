@@ -514,6 +514,73 @@ Deno.serve(async (req) => {
         break;
       }
 
+      case "account.updated": {
+        const account = event.data.object as Stripe.Account;
+        // Ein Account gilt als "aktiv", wenn das Onboarding abgeschlossen ist (details_submitted)
+        // und Auszahlungen möglich sind (payouts_enabled).
+        const isReady = account.details_submitted && account.payouts_enabled;
+        
+        log("account.updated", { 
+          accountId: account.id, 
+          details_submitted: account.details_submitted, 
+          payouts_enabled: account.payouts_enabled,
+          isReady 
+        });
+
+        const { data: tenant, error } = await supabaseAdmin
+          .from('tenants')
+          .update({ stripe_account_active: isReady })
+          .eq('stripe_account_id', account.id)
+          .select('id, name, stripe_account_active')
+          .maybeSingle();
+
+        if (error) {
+          log("ERROR updating tenant on account.updated", { error: error.message });
+        } else if (tenant) {
+          log(`Tenant stripe_account_active set to ${isReady}`, { tenantId: tenant.id, tenantName: tenant.name });
+          
+          if (isReady) {
+            await supabaseAdmin.from('subscription_history').insert({
+              tenant_id: tenant.id,
+              event_type: 'stripe_connect_active',
+              source: 'stripe',
+              description: 'Stripe Connect Onboarding abgeschlossen. Konto ist aktiv und bereit für Auszahlungen.',
+            });
+          } else {
+            // Falls es vorher aktiv war und jetzt nicht mehr (z.B. neue Verifizierung nötig)
+            await supabaseAdmin.from('subscription_history').insert({
+              tenant_id: tenant.id,
+              event_type: 'stripe_connect_inactive',
+              source: 'stripe',
+              description: 'Stripe Connect Status geändert: Konto benötigt weitere Informationen oder Verifizierung.',
+            });
+          }
+        } else {
+          log("No tenant found for stripe_account_id", { accountId: account.id });
+        }
+        break;
+      }
+
+      case "capability.updated": {
+        const capability = event.data.object as Stripe.Capability;
+        log("capability.updated", { accountId: capability.account, capability: capability.ID, status: capability.status });
+        
+        // Wenn die 'transfers' Capability aktiv wird, können wir das Konto ebenfalls als aktiv markieren
+        if (capability.ID === 'transfers' && capability.status === 'active') {
+          const { data: tenant } = await supabaseAdmin
+            .from('tenants')
+            .update({ stripe_account_active: true })
+            .eq('stripe_account_id', capability.account)
+            .select('id')
+            .maybeSingle();
+            
+          if (tenant) {
+            log("Tenant stripe_account_active set to true via capability.updated", { tenantId: tenant.id });
+          }
+        }
+        break;
+      }
+
       default:
         log("Unhandled event type", { type: event.type });
     }

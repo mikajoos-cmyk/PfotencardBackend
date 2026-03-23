@@ -415,6 +415,28 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
     cancelled_addons = crud.get_cancelled_addons_for_tenant(db, tenant.id)
     upcoming_addons = tenant.upcoming_addons
     
+    # NEU: Aktiven Gutschein holen
+    active_promo = None
+    redemption = db.query(models.PromoCodeRedemption).filter(
+        models.PromoCodeRedemption.tenant_id == tenant.id
+    ).order_by(models.PromoCodeRedemption.created_at.desc()).first()
+    
+    if redemption:
+        promo = db.query(models.PromoCode).filter(models.PromoCode.id == redemption.promo_code_id).first()
+        if promo:
+            # Prüfen ob der Gutschein noch gilt (basierend auf applied_months und created_at)
+            # In dieser App sind Gutscheine meist 100% Rabatt für X Monate ab Einlösedatum
+            expiry_date = redemption.created_at + timedelta(days=30 * redemption.applied_months)
+            if expiry_date > datetime.now(timezone.utc):
+                active_promo = {
+                    "code": promo.code,
+                    "name": promo.name,
+                    "discount_percent": 100, # In dieser App aktuell immer 100%
+                    "applied_at": redemption.created_at,
+                    "expires_at": expiry_date,
+                    "duration_months": redemption.applied_months
+                }
+
     # Für Abwärtskompatibilität im config-Objekt spiegeln
     config_dict = dict(tenant.config) if tenant.config else {}
     config_dict["active_addons"] = active_addons
@@ -455,7 +477,8 @@ def check_tenant_status(subdomain: str, db: Session = Depends(get_db)):
         "additional_cost_per_customer": additional_cost_per_customer,
         "top_up_fee_percent": top_up_fee_percent,
         "current_billing_period_fees": current_billing_period_fees,
-        "active_addons": active_addons
+        "active_addons": active_addons,
+        "active_promo_code": active_promo
     }
 
 # Sicherheit: Nur mit Secret Key ausführbar
