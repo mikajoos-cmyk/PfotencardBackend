@@ -91,13 +91,41 @@ def get_or_create_public_token(
 ):
     if current_user.role != 'admin':
         raise HTTPException(status_code=403, detail="Not authorized")
+    
     cfg = dict(tenant.config) if tenant.config else {}
     token = cfg.get('public_widget_token')
+    needs_update = False
+
+    # 1. Prüfen ob der Token existiert und ob er eindeutig ist
+    if token:
+        # Check if another tenant uses this token
+        other_tenant = db.query(models.Tenant).filter(
+            models.Tenant.id != tenant.id,
+            models.Tenant.config['public_widget_token'].astext == token
+        ).first()
+        if other_tenant:
+            print(f"DEBUG [get_or_create_public_token]: Token collision detected for '{token}' (Tenant {tenant.id} and {other_tenant.id}). Generating new token.")
+            token = None # Erzwinge Neugenerierung
+            needs_update = True
+
+    # 2. Falls kein Token da oder Kollision -> Neu generieren
     if not token:
-        token = uuid.uuid4().hex
+        while True:
+            token = uuid.uuid4().hex
+            # Sicherheitshalber: Ist er wirklich global eindeutig?
+            exists = db.query(models.Tenant).filter(models.Tenant.config['public_widget_token'].astext == token).first()
+            if not exists:
+                break
         cfg['public_widget_token'] = token
+        needs_update = True
+
+    if needs_update:
+        from sqlalchemy.orm.attributes import flag_modified
         tenant.config = cfg
+        flag_modified(tenant, "config") # Sicherstellen dass SQLAlchemy die Änderung im JSON merkt
         db.commit()
+        print(f"DEBUG [get_or_create_public_token]: Assigned new unique token '{token}' to tenant {tenant.id}")
+
     return {"public_widget_token": token}
 
 # Öffentliche Endpunkte nach Token
@@ -105,12 +133,22 @@ def get_or_create_public_token(
 def public_tenant_status(token: str, db: Session = Depends(get_db)):
     """Öffentlicher Endpunkt: Liefert den aktuellen Status und Branding einer Hundeschule.
     """
-    tenant = db.query(models.Tenant).filter(models.Tenant.config['public_widget_token'].astext == token).first()
-    if not tenant:
+    if not token or len(token) < 10:
+        print(f"DEBUG [public_tenant_status]: Invalid token received: '{token}'")
+        raise HTTPException(status_code=400, detail="Invalid token")
+
+    tenants = db.query(models.Tenant).filter(models.Tenant.config['public_widget_token'].astext == token).all()
+    if not tenants:
+        print(f"DEBUG [public_tenant_status]: No tenant found for token '{token}'")
         raise HTTPException(status_code=404, detail="Tenant not found")
     
+    if len(tenants) > 1:
+        print(f"WARNING [public_tenant_status]: Multiple tenants found for token '{token}': {[t.id for t in tenants]}")
+    
+    tenant = tenants[0]
+    print(f"DEBUG [public_tenant_status]: Token '{token}' resolved to tenant {tenant.id} ('{tenant.name}')")
     status = crud.get_app_status(db, tenant.id)
-    branding = tenant.config.get("branding", {})
+    branding = (tenant.config or {}).get("branding", {})
     
     return {
         "status": status.status,
@@ -128,14 +166,26 @@ def public_tenant_status(token: str, db: Session = Depends(get_db)):
 def public_tenant_appointments(token: str, db: Session = Depends(get_db)):
     """Öffentlicher Endpunkt: Liefert verfügbare Termine inkl. konfigurierter Farbregeln und Branding.
     """
+    if not token or len(token) < 10:
+        print(f"DEBUG [public_tenant_appointments]: Invalid token received: '{token}'")
+        raise HTTPException(status_code=400, detail="Invalid token")
+
     from sqlalchemy import and_, func
     from sqlalchemy.orm import joinedload
 
-    tenant = db.query(models.Tenant).filter(models.Tenant.config['public_widget_token'].astext == token).first()
-    if not tenant:
+    tenants = db.query(models.Tenant).filter(models.Tenant.config['public_widget_token'].astext == token).all()
+    if not tenants:
+        print(f"DEBUG [public_tenant_appointments]: No tenant found for token '{token}'")
         raise HTTPException(status_code=404, detail="Tenant not found")
     
+    if len(tenants) > 1:
+        print(f"WARNING [public_tenant_appointments]: Multiple tenants found for token '{token}': {[t.id for t in tenants]}")
+    
+    tenant = tenants[0]
+    print(f"DEBUG [public_tenant_appointments]: Token '{token}' resolved to tenant {tenant.id} ('{tenant.name}')")
+    # Nutze die gleiche Zeit-Logik wie in AppointmentsPage.tsx (ab heute 00:00)
     now = datetime.utcnow()
+    display_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Zähle bestätigte Teilnehmer und lade Relationen (trainer, training_type, target_levels)
     q = db.query(
@@ -150,14 +200,45 @@ def public_tenant_appointments(token: str, db: Session = Depends(get_db)):
     ).filter(
         and_(
             models.Appointment.tenant_id == tenant.id,
-            models.Appointment.start_time >= now
+            models.Appointment.start_time >= display_start
         )
     ).options(
         joinedload(models.Appointment.training_type),
-        joinedload(models.Appointment.target_levels)
+        joinedload(models.Appointment.target_levels),
+        joinedload(models.Appointment.trainer)
     ).group_by(models.Appointment.id)
      
-    results = q.order_by(models.Appointment.start_time.asc()).all()
+    all_results = q.order_by(models.Appointment.start_time.asc()).all()
+
+    # Block-Filterung: Wenn nicht gebucht (im Widget immer), zeige nur den ersten Termin eines Blocks.
+    # Da wir nur Termine ab heute geladen haben, müssen wir prüfen, ob der Termin der absolut erste des Blocks ist.
+    # Wenn der absolut erste Termin in der Vergangenheit liegt, zeigen wir den Block gar nicht mehr an.
+    
+    # 1. Holen wir uns alle Block IDs der aktuellen Ergebnisse
+    block_ids = {a.block_id for (a, pc) in all_results if a.block_id}
+    
+    # 2. Für diese Blöcke finden wir den jeweils absolut ersten Termin (auch in der Vergangenheit)
+    first_appointments_map = {}
+    if block_ids:
+        first_appts = db.query(
+            models.Appointment.block_id,
+            func.min(models.Appointment.start_time).label('min_start')
+        ).filter(
+            models.Appointment.block_id.in_(list(block_ids))
+        ).group_by(models.Appointment.block_id).all()
+        first_appointments_map = {b_id: min_s for b_id, min_s in first_appts}
+
+    filtered_results = []
+    for a, pc in all_results:
+        if a.block_id:
+            # Nur anzeigen, wenn dieser Termin der absolut erste des Blocks ist
+            if a.start_time == first_appointments_map.get(a.block_id):
+                filtered_results.append((a, pc))
+        else:
+            # Kein Block -> immer anzeigen
+            filtered_results.append((a, pc))
+            
+    results = filtered_results
 
     branding = (tenant.config or {}).get("branding", {})
     appt_cfg = (tenant.config or {}).get("appointments", {})
@@ -171,11 +252,17 @@ def public_tenant_appointments(token: str, db: Session = Depends(get_db)):
             return None
         return {"id": getattr(tt, 'id', None), "name": getattr(tt, 'name', None)}
 
+    def serialize_trainer(trainer):
+        if not trainer:
+            return None
+        return {"id": getattr(trainer, 'id', None), "name": getattr(trainer, 'name', None)}
+
     return {
         "appointments": [
             {
                 "id": a.id,
                 "title": a.title,
+                "description": getattr(a, 'description', None),
                 "start_time": a.start_time.isoformat() if hasattr(a.start_time, 'isoformat') else str(a.start_time),
                 "end_time": a.end_time.isoformat() if hasattr(a.end_time, 'isoformat') else str(a.end_time),
                 "location": getattr(a, 'location', None),
@@ -183,6 +270,7 @@ def public_tenant_appointments(token: str, db: Session = Depends(get_db)):
                 "participants_count": int(pc or 0),
                 "training_type_id": getattr(a, 'training_type_id', None),
                 "training_type": serialize_training_type(getattr(a, 'training_type', None)),
+                "trainer": serialize_trainer(getattr(a, 'trainer', None)),
                 "target_levels": [serialize_level(l) for l in (getattr(a, 'target_levels', []) or [])],
                 "is_open_for_all": getattr(a, 'is_open_for_all', False)
             }
@@ -211,6 +299,7 @@ def read_app_status(
     db: Session = Depends(get_db),
     tenant: models.Tenant = Depends(auth.get_current_tenant)
 ):
+    print(f"DEBUG [read_app_status]: Requesting status for tenant {tenant.id} ('{tenant.name}')")
     return crud.get_app_status(db, tenant.id)
 
 @app.put("/api/status", response_model=schemas.AppStatus)
@@ -222,6 +311,7 @@ def update_app_status(
 ):
     #if current_user.role != 'admin':
     #   raise HTTPException(status_code=403, detail="Not authorized")
+    print(f"DEBUG [update_app_status]: Updating status for tenant {tenant.id} ('{tenant.name}') to {status_update.status}")
     return crud.update_app_status(db, tenant.id, status_update)
 
 @app.put("/api/settings")
