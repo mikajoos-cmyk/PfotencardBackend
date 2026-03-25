@@ -25,11 +25,55 @@ Deno.serve(async (req) => {
     let selectedAddons = payload.selected_addons || []
     const billingDetails = payload.billing_details
     const trialAllowed = payload.trial_allowed !== false
+    const promoCodeId = payload.promo_code_id || payload.promoCodeId
+
+    async function redeemPromoCode(promoCodeId: string, tenantId: number) {
+        if (!promoCodeId) return;
+        console.log('[CREATE-CHECKOUT] Redeeming promo code:', promoCodeId);
+        const { data: promo } = await supabaseAdmin
+            .from('promo_codes')
+            .select('*')
+            .eq('stripe_promotion_code_id', promoCodeId)
+            .single();
+        if (promo) {
+            const { error: redeemError } = await supabaseAdmin.from('promo_code_redemptions').insert({
+                promo_code_id: promo.id,
+                tenant_id: tenantId,
+                applied_months: promo.duration_months
+            });
+            if (!redeemError) {
+                await supabaseAdmin.from('promo_codes').update({ current_uses: (promo.current_uses || 0) + 1 }).eq('id', promo.id);
+            }
+        }
+    }
 
     // 1. Tenant laden
     const { data: tenant, error: tenantError } = await supabaseAdmin
         .from('tenants').select('*').eq('id', tenantId).single()
     if (tenantError || !tenant) throw new Error("Tenant not found")
+
+    if (promoCodeId) {
+        console.log('[CREATE-CHECKOUT] Validating promo code:', promoCodeId);
+        const { data: promoCheck, error: promoCheckError } = await supabaseAdmin
+          .from('promo_codes')
+          .select('id, is_active, max_uses, current_uses, expires_at')
+          .eq('stripe_promotion_code_id', promoCodeId)
+          .single();
+
+        if (promoCheckError || !promoCheck) throw new Error('Gutscheincode nicht gefunden.');
+        if (!promoCheck.is_active) throw new Error('Gutscheincode ist nicht aktiv.');
+        if (promoCheck.max_uses && promoCheck.current_uses >= promoCheck.max_uses) throw new Error('Gutscheincode Nutzungslimit erreicht.');
+        if (promoCheck.expires_at && new Date(promoCheck.expires_at) < new Date()) throw new Error('Gutscheincode abgelaufen.');
+        
+        const { data: redemptionCheck } = await supabaseAdmin
+          .from('promo_code_redemptions')
+          .select('id')
+          .eq('promo_code_id', promoCheck.id)
+          .eq('tenant_id', tenant.id)
+          .maybeSingle();
+          
+        if (redemptionCheck) throw new Error('Gutscheincode wurde bereits eingelöst.');
+    }
 
     // 2. Paket und Addons bestimmen (Exakte Python Logik)
     let targetPlanName = plan
@@ -157,7 +201,7 @@ Deno.serve(async (req) => {
         const newItems = activeSubscription.items.data.map((item: any) => ({ id: item.id, deleted: true }))
         subscriptionItems.forEach(si => newItems.push({ price: si.price }))
 
-        const updatedSub = await stripe.subscriptions.update(activeSubscription.id, {
+        const updateParams: Stripe.SubscriptionUpdateParams = {
           items: newItems,
           proration_behavior: 'always_invoice',
           payment_behavior: 'allow_incomplete',
@@ -165,7 +209,16 @@ Deno.serve(async (req) => {
           metadata: metadata,
           cancel_at_period_end: false,
           expand: ['latest_invoice.payment_intent']
-        })
+        }
+        if (promoCodeId) {
+          updateParams.discounts = [{ promotion_code: promoCodeId }]
+        }
+
+        const updatedSub = await stripe.subscriptions.update(activeSubscription.id, updateParams)
+
+        if (promoCodeId) {
+          await redeemPromoCode(promoCodeId, tenant.id);
+        }
 
         const inv = updatedSub.latest_invoice as Stripe.Invoice
         const amountDue = (inv?.amount_due || 0) / 100
@@ -236,8 +289,16 @@ Deno.serve(async (req) => {
         metadata: metadata
       }
       if (trialDays > 0) subData.trial_period_days = trialDays
+      if (promoCodeId) {
+        subData.discounts = [{ promotion_code: promoCodeId }]
+      }
 
       const sub = await stripe.subscriptions.create(subData)
+      
+      if (promoCodeId) {
+        await redeemPromoCode(promoCodeId, tenant.id);
+      }
+
       const inv = sub.latest_invoice as Stripe.Invoice
       const amountDue = (inv?.amount_due || 0) / 100
 

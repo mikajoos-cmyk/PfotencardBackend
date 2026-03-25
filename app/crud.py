@@ -271,9 +271,10 @@ def get_app_config(db: Session, tenant_id: int) -> schemas.AppConfig:
         models.TrainingType.tenant_id == tenant_id
     ).order_by(models.TrainingType.rank_order.asc()).all()
     
-    appointments = db.query(models.Appointment).filter(
-        models.Appointment.tenant_id == tenant_id
-    ).order_by(models.Appointment.start_time.desc()).all()
+    # PERFORMANCE-FIX: Termine werden NICHT mehr hier geladen, da sie redundant sind
+    # und die App-Config unnötig aufblähen (Ladezeit-Verzögerung).
+    # Termine werden über die spezifischen /api/appointments Endpunkte geladen.
+    appointments = [] 
     
     return schemas.AppConfig(
         tenant=tenant,
@@ -2560,11 +2561,15 @@ def get_chat_conversations(db: Session, tenant_id: int):
 def get_app_status(db: Session, tenant_id: int):
     status = db.query(models.AppStatus).filter(models.AppStatus.tenant_id == tenant_id).first()
     if not status:
+        print(f"DEBUG [get_app_status]: No status entry found for tenant {tenant_id}. Creating default 'active' status.")
         # Initialen Status erstellen wenn nicht vorhanden
         status = models.AppStatus(tenant_id=tenant_id, status="active", message="")
         db.add(status)
         db.commit()
         db.refresh(status)
+        print(f"DEBUG [get_app_status]: Created status entry for tenant {tenant_id}")
+    else:
+        print(f"DEBUG [get_app_status]: Found existing status for tenant {tenant_id}: {status.status}")
     return status
 
 def update_app_status(db: Session, tenant_id: int, status_update: schemas.AppStatusUpdate):

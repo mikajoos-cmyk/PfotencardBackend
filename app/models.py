@@ -28,6 +28,10 @@ class Tenant(Base):
     stripe_customer_id = Column(String(255), nullable=True, index=True)
     stripe_subscription_id = Column(String(255), nullable=True)
     
+    # Stripe Connect Integration
+    stripe_account_id = Column(String(255), nullable=True, index=True)
+    stripe_account_active = Column(Boolean, default=False)
+    
     # NEU: Status direkt in DB speichern für einfachere Abfragen
     stripe_subscription_status = Column(String(50), nullable=True) # active, trialing, past_due, canceled, etc.
     cancel_at_period_end = Column(Boolean, default=False) # True wenn gekündigt zum Laufzeitende
@@ -157,18 +161,30 @@ class SubscriptionHistory(Base):
 class PromoCode(Base):
     __tablename__ = 'promo_codes'
     
-    id = Column(Integer, primary_key=True, index=True)
-    stripe_promotion_code_id = Column(String(255), unique=True, nullable=False)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code = Column(String(50), unique=True, nullable=False)
+    name = Column(String(255), nullable=True)
+    duration_months = Column(Integer, default=1)
+    max_uses = Column(Integer, nullable=True)
     current_uses = Column(Integer, default=0)
-    duration_months = Column(Integer, nullable=True)
+    is_active = Column(Boolean, default=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    applicable_plans = Column(JSONB, default=[]) # Liste von Plan-Namen
     
-    redemptions = relationship("PromoCodeRedemption", back_populates="promo_code")
+    stripe_coupon_id = Column(String(255), nullable=True)
+    stripe_promotion_code_id = Column(String(255), unique=True, nullable=True)
+    
+    discount_type = Column(String(50), default="stripe")
+    created_by = Column(UUID(as_uuid=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    redemptions = relationship("PromoCodeRedemption", back_populates="promo_code", cascade="all, delete-orphan")
 
 class PromoCodeRedemption(Base):
     __tablename__ = 'promo_code_redemptions'
     
-    id = Column(Integer, primary_key=True, index=True)
-    promo_code_id = Column(Integer, ForeignKey('promo_codes.id', ondelete="CASCADE"), nullable=False)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    promo_code_id = Column(UUID(as_uuid=True), ForeignKey('promo_codes.id', ondelete="CASCADE"), nullable=False)
     tenant_id = Column(Integer, ForeignKey('tenants.id', ondelete="CASCADE"), nullable=False)
     applied_months = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

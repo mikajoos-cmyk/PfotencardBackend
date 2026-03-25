@@ -54,26 +54,30 @@ def get_subdomain(request: Request) -> Optional[str]:
     Liest die Subdomain aus dem Host-Header oder dem Custom-Header.
     """
     # 1. Custom Header für Frontend-Calls (wichtig für Marketing-Seite)
-    header_subdomain = request.headers.get("x-tenant-subdomain")
-    if header_subdomain:
-        return header_subdomain.lower()
+    if "x-tenant-subdomain" in request.headers:
+        header_subdomain = request.headers.get("x-tenant-subdomain")
+        print(f"DEBUG [get_subdomain]: Found header x-tenant-subdomain: '{header_subdomain}'")
+        return header_subdomain.lower() if header_subdomain else None
 
     # 2. Host Header (für echte Subdomain-Aufrufe)
     host = request.headers.get("host", "")
     if not host:
+        print("DEBUG [get_subdomain]: No host header found")
         return None
 
     domain = host.split(":")[0]
 
     # Ignoriere Localhost oder IP-Adressen (Fallback für Dev)
     if "localhost" in domain or "127.0.0.1" in domain:
-        # return request.headers.get("x-tenant-id") # Fallback ID
+        print(f"DEBUG [get_subdomain]: Localhost/IP detected on '{domain}', falling back to 'dev'")
         return "dev"
 
     parts = domain.split(".")
     if len(parts) >= 3:
+        print(f"DEBUG [get_subdomain]: Extracted subdomain '{parts[0]}' from host '{host}'")
         return parts[0]
 
+    print(f"DEBUG [get_subdomain]: Could not extract subdomain from host '{host}'")
     return None
 
 
@@ -84,20 +88,26 @@ async def get_current_tenant(
     Dependency, die den aktuellen Tenant basierend auf der Subdomain lädt.
     """
     subdomain = get_subdomain(request)
-    print(subdomain, 2387764238428)
+    print(f"DEBUG [get_current_tenant]: Resolved subdomain is '{subdomain}'")
     if not subdomain:
         # Versuche Fallback ID wenn keine Subdomain da ist
         tenant_id_header = request.headers.get("x-tenant-id")
         if tenant_id_header:
+            print(f"DEBUG [get_current_tenant]: Trying fallback x-tenant-id: {tenant_id_header}")
             tenant = db.query(models.Tenant).filter(models.Tenant.id == int(tenant_id_header)).first()
-            if tenant: return tenant
+            if tenant: 
+                print(f"DEBUG [get_current_tenant]: Found tenant {tenant.id} via x-tenant-id header")
+                return tenant
 
+        print("DEBUG [get_current_tenant]: No subdomain or fallback ID provided")
         raise HTTPException(status_code=404, detail="No tenant specified (subdomain missing)")
 
     tenant = crud.get_tenant_by_subdomain(db, subdomain=subdomain)
     if not tenant:
+        print(f"DEBUG [get_current_tenant]: Tenant for subdomain '{subdomain}' not found in DB")
         raise HTTPException(status_code=404, detail=f"School '{subdomain}' not found")
 
+    print(f"DEBUG [get_current_tenant]: Successfully resolved tenant {tenant.id} ('{tenant.name}') for subdomain '{subdomain}'")
     if not tenant.is_active:
         # Erlaube Zugriff auf Rechnungen und Billing-Portal auch wenn inaktiv (wegen Abo-Kündigung)
         allowed_paths = ["/api/stripe/invoices", "/api/stripe/portal", "/api/stripe/details"]

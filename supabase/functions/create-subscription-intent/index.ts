@@ -91,6 +91,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
         )
 
+        async function redeemPromoCode(promoCodeId: string, tenantId: number) {
+            if (!promoCodeId) return;
+            console.log('[SUBSCRIPTION_INTENT] Redeeming promo code:', promoCodeId);
+            const { data: promo, error: promoError } = await supabaseAdmin
+                .from('promo_codes')
+                .select('*')
+                .eq('stripe_promotion_code_id', promoCodeId)
+                .single();
+            if (promoError || !promo) {
+                console.error('[SUBSCRIPTION_INTENT] Promo Code not found in DB for Stripe ID:', promoCodeId);
+                return;
+            }
+            const { error: redeemError } = await supabaseAdmin.from('promo_code_redemptions').insert({
+                promo_code_id: promo.id,
+                tenant_id: tenantId,
+                applied_months: promo.duration_months
+            });
+            if (redeemError) {
+                console.warn('[SUBSCRIPTION_INTENT] Error creating redemption entry:', redeemError.message);
+                return;
+            }
+            await supabaseAdmin.from('promo_codes').update({ current_uses: (promo.current_uses || 0) + 1 }).eq('id', promo.id);
+        }
+
         // User über das Frontend-Token verifizieren (Sicherheit!)
         let userEmail: string | undefined;
         const { data: { user }, error: userError } = await supabaseClient.auth.getUser()
@@ -144,6 +168,39 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
         if (!tenantId) {
             return new Response(JSON.stringify({ error: "Tenant-ID konnte nicht ermittelt werden. Bitte x-tenant-subdomain Header mitsenden." }), { status: 400, headers: corsHeaders });
+        }
+
+        if (promoCodeId && action === 'confirm') {
+            console.log('[SUBSCRIPTION_INTENT] Validating promo code before confirm:', promoCodeId);
+            const { data: promoCheck, error: promoCheckError } = await supabaseAdmin
+              .from('promo_codes')
+              .select('id, is_active, max_uses, current_uses, expires_at')
+              .eq('stripe_promotion_code_id', promoCodeId)
+              .single();
+  
+            if (promoCheckError || !promoCheck) {
+                return new Response(JSON.stringify({ error: 'Gutscheincode nicht gefunden.' }), { status: 400, headers: corsHeaders });
+            }
+            if (!promoCheck.is_active) {
+                return new Response(JSON.stringify({ error: 'Gutscheincode ist nicht aktiv.' }), { status: 400, headers: corsHeaders });
+            }
+            if (promoCheck.max_uses && promoCheck.current_uses >= promoCheck.max_uses) {
+                return new Response(JSON.stringify({ error: 'Gutscheincode Nutzungslimit erreicht.' }), { status: 400, headers: corsHeaders });
+            }
+            if (promoCheck.expires_at && new Date(promoCheck.expires_at) < new Date()) {
+                return new Response(JSON.stringify({ error: 'Gutscheincode abgelaufen.' }), { status: 400, headers: corsHeaders });
+            }
+            
+            const { data: redemptionCheck } = await supabaseAdmin
+              .from('promo_code_redemptions')
+              .select('id')
+              .eq('promo_code_id', promoCheck.id)
+              .eq('tenant_id', tenantId)
+              .maybeSingle();
+              
+            if (redemptionCheck) {
+                return new Response(JSON.stringify({ error: 'Gutscheincode wurde bereits eingelöst.' }), { status: 400, headers: corsHeaders });
+            }
         }
 
         // ==========================================
@@ -473,6 +530,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
                     finalSubscriptionId = updatedSub.id;
                     finalStatus = updatedSub.status;
 
+                    if (promoCodeId) {
+                        await redeemPromoCode(promoCodeId, tenant.id);
+                    }
+
                     console.log("✅ Upgrade applied successfully");
                 }
             } else {
@@ -490,6 +551,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 const subscription = await stripe.subscriptions.create(subOptions);
                 finalSubscriptionId = subscription.id;
                 finalStatus = subscription.status;
+
+                if (promoCodeId) {
+                    await redeemPromoCode(promoCodeId, tenant.id);
+                }
             }
 
             return new Response(JSON.stringify({ success: true, subscriptionId: finalSubscriptionId }), { headers: corsHeaders });
